@@ -16,6 +16,8 @@ class ModelCapabilities:
     properties: frozenset[str] = frozenset({"energy", "forces"})
     cuda_graph_properties: frozenset[str] = frozenset()
     periodic_only: bool = True
+    # Opt in only when every cell-dependent capture input is updated on replay.
+    cuda_graph_variable_cell: bool = False
 
 
 def resolve_device(device):
@@ -38,7 +40,8 @@ class ModelBackend(ABC):
     """Return owned NumPy results in ASE units, with total (extensive) energy.
 
     Implement _predict_eager; CUDA adapters also implement _predict_graph and
-    clear_graphs. Graphs must never outlive a change in species/order/cell/PBC.
+    clear_graphs. Graphs must never outlive a change in species/order/PBC.
+    Cell changes also invalidate captures unless cuda_graph_variable_cell is set.
     One backend belongs to one calculator and must not be used concurrently.
     """
 
@@ -73,7 +76,8 @@ class ModelBackend(ABC):
             raise ValueError("Positions and cell must be finite")
         if self.capabilities.periodic_only and (not atoms.pbc.all() or atoms.cell.volume <= 0):
             raise ValueError("This backend requires a nonzero, fully periodic cell (pbc=True)")
-        signature = (atoms.numbers.tobytes(), atoms.cell.array.tobytes(), atoms.pbc.tobytes())
+        cell_signature = None if self.capabilities.cuda_graph_variable_cell else atoms.cell.array.tobytes()
+        signature = (atoms.numbers.tobytes(), cell_signature, atoms.pbc.tobytes())
         if signature != self._signature:
             self.clear_graphs()
             if self._signature is not None:

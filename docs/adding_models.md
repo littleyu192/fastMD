@@ -61,6 +61,9 @@ register_model("my_wbm_model", "my_package.fastmd_backend:MyModel")
    不能把任意 PyTorch 模型套一层 `torch.cuda.graph` 就认为正确。
 5. 实现 `clear_graphs()`，清理静态输入、捕获输出和模型特定的组成缓存，保留加载的权重。
    基类在元素（含顺序）、原子数、晶胞、PBC 改变时调用此方法；位置改变时复用并更新输入。
+   只有完成变胞适配的后端才能声明 `cuda_graph_variable_cell=True`，跳过晶胞数值变化引起的
+   失效。此时必须更新所有晶胞相关输入、按新晶胞维护邻居及周期镜像，并处理容量增长。
+   当前仅 MatRIS 开启此能力；声明本身不会自动实现这些更新。
 6. 扩展 `stats()` 报告捕获、重放和容量。不要把“要求使用 graph”当成“已经实际 replay”。
 
 捕获预热需要 `eval()`、冻结权重，并保留坐标/应变求导。不能把依赖能量梯度的推理包在

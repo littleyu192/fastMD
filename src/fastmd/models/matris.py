@@ -5,14 +5,24 @@ from .base import ModelBackend, ModelCapabilities
 
 
 class MatRISModel(ModelBackend):
+    """MatRIS inference with variable-cell graph reuse.
+
+    compute_stress=True always returns energy, forces and stress together, for
+    ASE NPT or cell relaxation without separate force/stress evaluations.
+    """
+
     capabilities = ModelCapabilities(
         frozenset({"energy", "forces", "stress", "magmoms"}),
         frozenset({"energy", "forces", "stress", "magmoms"}),
+        cuda_graph_variable_cell=True,
     )
 
     def __init__(self, *, checkpoint=None, model_name="matris_10m_oam",
-                 compile_lowerings=False, expert_overrides=None, **kwargs):
+                 compute_stress=False, compile_lowerings=False, expert_overrides=None, **kwargs):
         super().__init__(**kwargs)
+        # NPT requests forces and stress separately. Return both from one model
+        # evaluation so ASE can cache them and the captured task stays stable.
+        self.compute_stress = bool(compute_stress)
         from fastmd._vendor.matris.applications.base import MatRISCalculator
         from fastmd._vendor.matris.config import CapacityConfig, InferenceConfig, resolve_config
         overrides = dict(expert_overrides or {})
@@ -42,9 +52,9 @@ class MatRISModel(ModelBackend):
         self.runner = None
         self._task = None
 
-    @staticmethod
-    def _prediction_task(properties):
-        return "efsm" if "magmoms" in properties else ("efs" if "stress" in properties else "ef")
+    def _prediction_task(self, properties):
+        return "efsm" if "magmoms" in properties else (
+            "efs" if self.compute_stress or "stress" in properties else "ef")
 
     def graph_unavailable_reason(self, properties):
         reason = super().graph_unavailable_reason(properties)
@@ -75,13 +85,16 @@ class MatRISModel(ModelBackend):
             self._task = task
         converter = self.model.graph_converter
         with self._graph_config.scope():
+            # Rebuild topology from the current cell, including periodic images.
+            # The runner copies lattice/coordinates/topology into address-stable
+            # buffers and selects a larger capacity bucket when necessary.
             graph = atoms_to_graph_gpu(atoms, atom_graph_cutoff=converter.atom_graph_cutoff,
                                        line_graph_cutoff=converter.line_graph_cutoff, device=self.device)
             output, n = self.runner.run(graph)
         scale = n if self.model.is_intensive else 1
         results = {"energy": float(output["e"][0].detach()) * scale,
                    "forces": output["f"][0][:n].detach().cpu().numpy().copy()}
-        if "stress" in properties:
+        if "s" in task:
             results["stress"] = output["s"][0].detach().cpu().numpy().copy() * units.GPa
         if "magmoms" in properties:
             results["magmoms"] = output["m"][0][:n].detach().cpu().numpy().copy()
@@ -95,6 +108,7 @@ class MatRISModel(ModelBackend):
 
     def stats(self):
         return {**super().stats(), "optimization_profile": self._graph_config.optimization_profile,
+                "compute_stress": self.compute_stress,
                 "cache": self.runner.stats() if self.runner else {},
                 "kernel_options": dict(self._graph_config.kernel_options),
                 "merged_projection_caches": sum(

@@ -9,3 +9,4 @@ dist/
 *.traj
 *.log
 checkpoints/
+/docs/

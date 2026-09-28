@@ -2,6 +2,49 @@
 
 Date: 2026-09-27. This records local evidence, not a GPU performance claim.
 
+## MatRIS ASE NPT update (2026-09-28)
+
+MatRIS now opts into variable-cell graph reuse. `model_kwargs={"compute_stress":
+True}` returns energy, forces and stress from each evaluation, including eager
+inference, so ASE can cache all three properties for NPT.
+
+The focused regression suite passed **37 tests**, with **4 CUDA tests skipped**
+and 4 unrelated ALIGNN cases deselected, using the local MatRIS 10M OAM checkpoint:
+
+```bash
+export FASTMD_MATRIS_CHECKPOINT=/absolute/path/MatRIS_10M_OAM.pth.tar
+python -m pytest -q tests/test_calculator.py tests/test_matris_config.py \
+  tests/test_matris_npt.py tests/test_models.py -k 'not alignn'
+```
+
+New CPU coverage verifies all six stress components against strain finite
+differences (step 5e-4; convergence also checked at 2e-4), energy/force/stress
+caching, and four ASE NPTBerendsen steps with an evolving cell. It also compares
+the address-stable padded workspace against fresh ragged graphs after compression,
+expansion and shear, including changing edge/triplet counts. Other backends retain
+cell-triggered invalidation; composition, atom count, ordering and PBC still
+invalidate captures for variable-cell backends.
+
+`examples/npt.py --device cpu --eager --steps 2` also completed for its default
+64-atom Si cell, writing the ASE log and trajectory with zero cache invalidations.
+
+The new CUDA tests require `cuda_graph=True` and check eager/replay agreement,
+capture reuse for small cell changes, growth into another capacity bucket,
+periodic boundary crossing, returned-array ownership and a short ASE NPT run.
+The initial checks above ran on the management node without CUDA. A subsequent
+run on **g08 / NVIDIA H100 80GB**, in job **102928** after its training task ended,
+passed **37 tests with no skips** (108.331 seconds), including these CUDA tests.
+The [NPT GPU report](../matris_npt.md) records the full environment, raw artifacts,
+64/216-atom Si comparisons and measured default-Graph speedups of **3.957×/2.641×**
+over default eager inference for end-to-end ASE NPT. No captures occurred in the
+timed runs. The report also retains an initial stress finite-difference failure
+across the model's hard three-body cutoff, reproduced in eager mode; checks away
+from that cutoff passed without relaxing tolerances. This validates Graph/eager
+equivalence, not long-time ensemble statistics or a globally smooth potential.
+Run `python -m pytest -q tests/test_matris_npt.py` on the target GPU before
+production use. The example uses Berendsen coupling for pressure equilibration;
+it is not a validation of exact NPT fluctuation statistics.
+
 ## Environments
 
 - Existing adapters: Python 3.11, PyTorch 2.8.0+cu128, ASE 3.23.0, DGL 1.1.1.
@@ -43,8 +86,9 @@ multiplier. See the README before using its default force scaling for MD.
 
 ## Pending GPU validation
 
-CUDA capture/replay, fused Triton execution, neighbor-list rebuild/reuse and
-capacity retries on real hardware, optional Inductor/cuEquivariance/CuTeDSL
+Beyond the MatRIS NPT checks recorded above, CUDA capture/replay, fused Triton
+execution, neighbor-list rebuild/reuse and capacity retries for the other
+backends, optional Inductor/cuEquivariance/CuTeDSL
 paths, multi-device selection, peak memory, and speedups remain unverified here.
 CPU equivalence checks do not validate those GPU kernels. No reproduction-bundle
 speedup is claimed as a measured fastMD result.

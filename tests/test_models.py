@@ -75,7 +75,7 @@ def test_cuda_replay_matches_eager(name):
     np.testing.assert_array_equal(reference_forces, saved)
     assert graph.stats()["mode"] == "cuda_graph"
     assert graph.stats()["graph_calls"] == 7
-    assert graph.stats()["invalidations"] == 3
+    assert graph.stats()["invalidations"] == (2 if name == "matris" else 3)
 
 
 @pytest.mark.integration

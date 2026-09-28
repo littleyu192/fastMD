@@ -194,6 +194,49 @@ transfers. This release does not expose the original branches' whole-step GPU MD
 as ASE MD or capture the entire MD loop in a CUDA Graph. Initial capture has a
 setup cost, so short jobs may not benefit. Benchmark your own system.
 
+### MatRIS with ASE NPT
+
+Enable `compute_stress` so every evaluation returns energy, forces and stress
+together. ASE can then reuse these results when its integrator requests them
+separately, without switching between force-only and stress captures:
+
+```python
+from ase.md.nptberendsen import NPTBerendsen
+
+# Reuse the initialized periodic atoms and velocities from the MD example above.
+atoms.calc = FastMDCalculator(
+    "matris", device="cuda", cuda_graph=True,
+    model_kwargs={"compute_stress": True},
+)
+atoms.calc.warmup(atoms)
+dyn = NPTBerendsen(
+    atoms, timestep=units.fs, temperature_K=300,
+    pressure_au=0.0 * units.GPa,
+    compressibility_au=1 / (100 * units.GPa),  # Illustrative value for Si
+    taut=100 * units.fs, taup=1000 * units.fs,
+)
+dyn.run(1000)
+```
+
+MatRIS rebuilds neighbors using the current cell and copies the new cell,
+coordinates and topology into fixed-address graph inputs. Cell changes reuse
+captures while the topology fits a cached capacity bucket; larger topologies
+capture another bucket. Changes in composition, atom count or PBC still
+invalidate captures. With stable capacity, `calc.stats()["cache"]["captures"]`
+should stop increasing as the cell evolves.
+
+The barostat and integration run in ASE; kinetic stress is added by ASE. The
+calculator returns potential stress in eV/Å³. Berendsen coupling is useful for
+pressure equilibration but does not reproduce exact NPT fluctuations. Choose
+the compressibility and coupling times for your material and workflow.
+
+Run `python examples/npt.py --checkpoint /path/to/MatRIS.pth.tar` on a CUDA GPU,
+or add `--device cpu --eager` for a CPU check. Variable-cell capture/replay and
+short ASE NPT runs have been checked on an H100 with MatRIS 10M OAM; see the
+[NPT GPU report](matris_npt.md) for measured speedups and the model's hard-cutoff
+limitation. This option also works in eager mode and for
+cell relaxation. Force-only MatRIS workflows keep their existing default cost.
+
 ### Geometry and cell relaxation
 
 ```python
@@ -210,9 +253,9 @@ FIRE(FrechetCellFilter(atoms)).run(fmax=0.05, steps=500)
 MatRIS and MACE can capture stress calculations. CHGNet computes stress eagerly; use
 `cuda_graph=False` for cell relaxation to avoid unnecessary capture overhead.
 ALIGNN currently does not expose stress through this interface and cannot be
-used for NPT or cell relaxation here. Cell changes invalidate captures, so
-variable-cell workflows can trigger frequent recapture and may perform better
-with eager inference.
+used for NPT or cell relaxation here. Cell changes invalidate captures for backends
+other than MatRIS, so their variable-cell workflows can trigger frequent
+recapture and may perform better with eager inference.
 
 ## 4. CUDA Graph defaults
 
@@ -265,8 +308,10 @@ These public settings apply to each calculator instance. You do not need to set
 internal experimental environment variables, which ordinary workflows should
 not depend on.
 
-Changes to atom count, species, species order, cell, or PBC automatically
-invalidate existing captures. Neighbor lists are updated for new positions on each evaluation. MACE reuses a
+Changes to atom count, species, species order, or PBC automatically invalidate
+existing captures. Cell changes also invalidate captures except for MatRIS,
+which updates the cell in place and reuses compatible capacity buckets.
+Neighbor lists are updated for new positions on each evaluation. MACE reuses a
 candidate list while displacements stay within the skin threshold, filtering
 active edges on the GPU each time; it rebuilds the candidates when needed. When edge or triplet counts exceed capacity, the backend
 increases capacity and captures again. Arrays returned to ASE own their storage

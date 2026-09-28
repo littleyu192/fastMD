@@ -45,9 +45,14 @@ def test_ase_results_cache_stress_and_free_energy():
     assert atoms.calc.stats()["invalidations"] == 0
 
 
-@pytest.mark.parametrize("change", ["species", "order", "cell", "count"])
-def test_capture_invalidated_for_structural_changes(change):
-    atoms = make_atoms()
+@pytest.mark.parametrize("variable_cell", [False, True])
+@pytest.mark.parametrize("change", ["species", "order", "cell", "count", "pbc"])
+def test_capture_invalidated_for_structural_changes(change, variable_cell):
+    backend = HarmonicModel()
+    backend.capabilities = ModelCapabilities(
+        properties=backend.capabilities.properties, periodic_only=False,
+        cuda_graph_variable_cell=variable_cell)
+    atoms = make_atoms(backend)
     atoms.numbers[0] = 6
     atoms.get_forces()
     backend = atoms.calc.backend
@@ -58,10 +63,12 @@ def test_capture_invalidated_for_structural_changes(change):
         atoms.numbers[:] = atoms.numbers[::-1]
     elif change == "cell":
         atoms.set_cell(atoms.cell * 1.01, scale_atoms=True)
+    elif change == "pbc":
+        atoms.pbc[0] = False
     else:
         atoms += atoms[:1]
     atoms.get_forces()
-    assert backend.clears == previous + 1
+    assert backend.clears == previous + (0 if variable_cell and change == "cell" else 1)
 
 
 def test_warmup_does_not_move_atoms():
