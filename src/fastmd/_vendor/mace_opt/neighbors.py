@@ -469,7 +469,7 @@ class FixedCapacityNeighbors:
         # rebuild threshold on max displacement (device policy)
         self.disp_thr = max(0.0, 0.5 * self.skin - self.eps)
         self.head = int(head)
-        cell_np = np.asarray(cell, dtype=np.float64).reshape(3, 3)
+        cell_np = np.array(cell, dtype=np.float64, copy=True).reshape(3, 3)
         self.cell_np = cell_np
         vol = abs(np.linalg.det(cell_np))
         heights = [vol / np.linalg.norm(np.cross(cell_np[(k + 1) % 3], cell_np[(k + 2) % 3]))
@@ -478,6 +478,7 @@ class FixedCapacityNeighbors:
         norms = np.linalg.norm(cell_np, axis=1)
         self.pad_axis = int(np.argmax(norms))
         self.pad_rep = int(math.ceil(self.r_max * pad_margin / float(norms[self.pad_axis])))
+        self.pad_margin = float(pad_margin)
         dev = self.device
         prm = np.zeros(24, dtype=np.float64)
         prm[_P_CELL:_P_CELL + 9] = cell_np.reshape(-1)
@@ -590,6 +591,49 @@ class FixedCapacityNeighbors:
         return sorted(self.tiers)
 
     # ------------------------------------------------------------ control
+    @torch.no_grad()
+    def update_cell(self, cell) -> bool:
+        """Update cell buffers in place and force fresh periodic candidates.
+
+        Returns True if the image loop must grow: callers MUST invalidate CUDA
+        captures before the next step in that case. Bounds never shrink, so small
+        NPT fluctuations do not repeatedly compile/capture across a boundary.
+        Cartesian candidate shifts cannot survive any cell change, even with
+        unchanged atomic coordinates or a displacement below the Verlet limit.
+        """
+        cell_np = np.array(cell, dtype=np.float64, copy=True).reshape(3, 3)
+        if np.array_equal(cell_np, self.cell_np):
+            return False
+        vol = abs(np.linalg.det(cell_np))
+        if not np.isfinite(cell_np).all() or not np.isfinite(vol) or vol <= 0:
+            raise ValueError("MACE requires a finite, nonsingular periodic cell")
+        inverse = np.linalg.inv(cell_np)
+        heights = 1.0 / np.linalg.norm(inverse, axis=0)
+        required = [int(math.floor(self.r_cand / h + 1e-6)) + 1 for h in heights]
+        grew = any(new > old for new, old in zip(required, self.n_img))
+        self.n_img = [max(new, old) for new, old in zip(required, self.n_img)]
+        norms = np.linalg.norm(cell_np, axis=1)
+        self.pad_axis = int(np.argmax(norms))
+        self.pad_rep = int(math.ceil(self.r_max * self.pad_margin / norms[self.pad_axis]))
+        pad_us = np.zeros(3)
+        pad_us[self.pad_axis] = self.pad_rep
+        prm = np.zeros(24)
+        prm[_P_CELL:_P_CELL + 9] = cell_np.ravel()
+        prm[_P_INV:_P_INV + 9] = inverse.ravel()
+        prm[_P_RC2], prm[_P_RF2], prm[_P_THR2] = (
+            self.r_cand ** 2, self.r_filter ** 2, self.disp_thr ** 2)
+        cm = torch.tensor(cell_np, dtype=self.model_dtype)
+        prmm = torch.zeros(16, dtype=self.model_dtype)
+        prmm[_M_CELL:_M_CELL + 9] = cm.reshape(-1)
+        prmm[_M_PAD_US:_M_PAD_US + 3] = torch.tensor(pad_us, dtype=self.model_dtype)
+        prmm[_M_PAD_SH:_M_PAD_SH + 3] = prmm[_M_PAD_US:_M_PAD_US + 3] @ cm
+        self.prm32.copy_(torch.as_tensor(prm, dtype=torch.float32, device=self.device))
+        self.prm_m.copy_(prmm.to(self.device))
+        self.cell_m.copy_(cm.to(self.device))
+        self.cell_np = cell_np
+        self.request_rebuild()
+        return grew
+
     def request_rebuild(self) -> None:
         """Force a candidate rebuild at the next :meth:`step` (stream ordered)."""
         self.ctrl[CTRL_FORCE:CTRL_FORCE + 1].fill_(1)

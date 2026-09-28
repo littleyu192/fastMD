@@ -171,7 +171,7 @@ def test_mace_cuda_replay_and_invalidation(kind, variant):
             assert graph.stats()["cache"]["capacity_growths"] > 0
     np.testing.assert_array_equal(saved, copy)
     assert graph.stats()["mode"] == "cuda_graph"
-    assert graph.stats()["invalidations"] == 3
+    assert graph.stats()["invalidations"] == 2  # Cell updates now retain the runner.
     assert graph.stats()["graph_calls"] == 7
 
 

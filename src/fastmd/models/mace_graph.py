@@ -1,7 +1,8 @@
 """Capture GPU neighbor maintenance plus MACE, with checked capacity growth.
 
-A runner owns a fixed composition and cell. ModelBackend invalidates it when
-those change. No integration takes place here: retries evaluate the same input.
+A runner owns a fixed composition. Cell inputs are updated in place; changing
+the periodic-image loop bounds invalidates captures. No integration takes place
+here: retries evaluate the same input.
 """
 import math
 
@@ -49,6 +50,8 @@ class MACEGraphRunner:
         self.captures = 0
         self.replays = 0
         self.capacity_growths = 0
+        self.cell_updates = 0
+        self.image_range_growths = 0
         self.last_neighbor_stats = {}
 
     def _evaluate(self, compute_stress):
@@ -113,7 +116,14 @@ class MACEGraphRunner:
         self.cache[(self.e_cap, compute_stress)] = (graph, result)
         self.captures += 1
 
-    def run(self, positions, *, compute_stress):
+    def run(self, positions, *, compute_stress, cell=None):
+        if cell is not None and not np.array_equal(cell, self.neighbors.cell_np):
+            # Periodic-image loop bounds are compile-time kernel arguments.
+            # All other cell-dependent inputs keep their captured addresses.
+            if self.neighbors.update_cell(cell):
+                self.cache.clear()
+                self.image_range_growths += 1
+            self.cell_updates += 1
         self.positions.copy_(torch.as_tensor(np.array(positions), dtype=torch.float64,
                                              device=self.backend.device))
         for _ in range(5):
@@ -130,6 +140,7 @@ class MACEGraphRunner:
     def stats(self):
         return dict(captures=self.captures, replays=self.replays, cached_graphs=len(self.cache),
                     capacity_growths=self.capacity_growths, edge_capacity=self.e_cap,
+                    cell_updates=self.cell_updates, image_range_growths=self.image_range_growths,
                     candidate_capacity=self.neighbors.c_cap,
                     capture_scope="neighbors+model+forces/stress", neighbors=self.last_neighbor_stats,
                     compiled_modules=self.fast_model.compiled_module_report() if self.fast_model else {})

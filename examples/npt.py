@@ -1,4 +1,4 @@
-"""MatRIS + ASE Berendsen pressure equilibration with variable-cell inference.
+"""MatRIS or MACE + ASE Berendsen pressure equilibration.
 
 Berendsen coupling is useful for equilibration; it does not reproduce the exact
 NPT fluctuations. The compressibility below is an illustrative silicon value.
@@ -16,6 +16,7 @@ from fastmd import FastMDCalculator
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model", choices=("matris", "mace"), default="matris")
     parser.add_argument("--checkpoint")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--eager", action="store_true", help="Disable CUDA Graph (also needed for CPU)")
@@ -30,7 +31,7 @@ def main():
 
     atoms = bulk("Si", "diamond", a=5.43, cubic=True).repeat((2, 2, 2))
     atoms.calc = FastMDCalculator(
-        "matris", checkpoint=args.checkpoint, device=args.device,
+        args.model, checkpoint=args.checkpoint, device=args.device,
         cuda_graph=not args.eager, model_kwargs={"compute_stress": True})
     MaxwellBoltzmannDistribution(atoms, temperature_K=args.temperature,
                                 rng=np.random.default_rng(42))

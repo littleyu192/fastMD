@@ -194,7 +194,7 @@ transfers. This release does not expose the original branches' whole-step GPU MD
 as ASE MD or capture the entire MD loop in a CUDA Graph. Initial capture has a
 setup cost, so short jobs may not benefit. Benchmark your own system.
 
-### MatRIS with ASE NPT
+### MatRIS and MACE with ASE NPT
 
 Enable `compute_stress` so every evaluation returns energy, forces and stress
 together. ASE can then reuse these results when its integrator requests them
@@ -205,7 +205,7 @@ from ase.md.nptberendsen import NPTBerendsen
 
 # Reuse the initialized periodic atoms and velocities from the MD example above.
 atoms.calc = FastMDCalculator(
-    "matris", device="cuda", cuda_graph=True,
+    "matris", device="cuda", cuda_graph=True,  # Use "mace" for MACE-MPA-0 medium
     model_kwargs={"compute_stress": True},
 )
 atoms.calc.warmup(atoms)
@@ -225,6 +225,14 @@ capture another bucket. Changes in composition, atom count or PBC still
 invalidate captures. With stable capacity, `calc.stats()["cache"]["captures"]`
 should stop increasing as the cell evolves.
 
+MACE supports the same `compute_stress=True` option. It updates the cell,
+inverse cell, periodic shifts and padding in fixed-address buffers and rebuilds
+the GPU candidate list whenever the cell changes. Existing captures remain
+usable while the neighbor capacity and periodic-image loop bounds suffice.
+Compression or shear that requires a larger image range triggers recapture;
+capacity overflow grows buffers and retries the same geometry. Atom count,
+species or PBC changes still invalidate the runner.
+
 The barostat and integration run in ASE; kinetic stress is added by ASE. The
 calculator returns potential stress in eV/Å³. Berendsen coupling is useful for
 pressure equilibration but does not reproduce exact NPT fluctuations. Choose
@@ -236,6 +244,17 @@ short ASE NPT runs have been checked on an H100 with MatRIS 10M OAM; see the
 [NPT GPU report](matris_npt.md) for measured speedups and the model's hard-cutoff
 limitation. This option also works in eager mode and for
 cell relaxation. Force-only MatRIS workflows keep their existing default cost.
+
+For MACE, run:
+
+```bash
+python examples/npt.py --model mace --checkpoint /path/to/mace-mpa-0-medium.model
+```
+
+Omit `--checkpoint` to use the default MPA-0 medium model. MACE uses double
+precision and the fused `fast` variant by default; no graph tuning is required.
+Use the [MACE NPT validation script](examples/validate_mace_npt.py) to compare
+MP-0/MPA-0 medium with the official calculator and measure end-to-end ASE timings.
 
 ### Geometry and cell relaxation
 
@@ -254,7 +273,7 @@ MatRIS and MACE can capture stress calculations. CHGNet computes stress eagerly;
 `cuda_graph=False` for cell relaxation to avoid unnecessary capture overhead.
 ALIGNN currently does not expose stress through this interface and cannot be
 used for NPT or cell relaxation here. Cell changes invalidate captures for backends
-other than MatRIS, so their variable-cell workflows can trigger frequent
+other than MatRIS and MACE, so their variable-cell workflows can trigger frequent
 recapture and may perform better with eager inference.
 
 ## 4. CUDA Graph defaults
@@ -380,6 +399,7 @@ when a multi-head checkpoint needs an explicit head.
 | --- | --- | --- |
 | `model_name` | `medium-mpa-0` | Used only when `checkpoint` is omitted; `medium` selects MP-0 |
 | `default_dtype` | `float64` | Set `float32` explicitly if appropriate for your accuracy requirements |
+| `compute_stress` | `False` | Set `True` for NPT/cell relaxation to return energy, forces and stress together |
 | `variant` | `fast` | Fused edge geometry/SH/radial basis and applicable ZBL, density and force/stress tails |
 | `neighbor_skin` | `1.0` Å | Candidate-list reuse distance |
 | `capacity_headroom` | `1.25` | Initial/growth capacity margin |
@@ -396,7 +416,9 @@ GPU capture includes candidate-list rebuild/filter kernels, model execution,
 and coordinate/strain derivatives. Each replay checks capacity and neighbor
 consistency before returning a prediction. Overflow releases affected graphs,
 grows buffers and retries the same geometry. Changes to composition, atom count
-or cell discard the entire runner. The source neighbor builder uses quadratic
+or PBC discard the entire runner. Cell changes update buffers and rebuild neighbors;
+only larger periodic-image ranges or capacity requirements trigger recapture.
+The source neighbor builder uses quadratic
 pair enumeration during rebuilds; benchmark large systems before assuming it
 will outperform a cell-list implementation.
 

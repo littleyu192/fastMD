@@ -13,14 +13,18 @@ class MACEModel(ModelBackend):
     ``variant='fast'`` enables the migrated Triton fusions. ``fast_cm`` also
     compiles the original GEMM-level modules; ``plain`` captures upstream MACE.
     CPU and explicitly eager calls use upstream MACE in all three cases.
+    Set ``compute_stress=True`` for ASE NPT to cache energy, forces and stress
+    together on every evaluation, avoiding separate force/stress calls.
     """
 
     capabilities = ModelCapabilities(frozenset({"energy", "forces", "stress"}),
-                                     frozenset({"energy", "forces", "stress"}))
+                                     frozenset({"energy", "forces", "stress"}),
+                                     cuda_graph_variable_cell=True)
 
     def __init__(self, *, checkpoint=None, model_name="medium-mpa-0",
                  default_dtype="float64", enable_cueq=False, head=None,
-                 variant="fast", neighbor_skin=1.0, capacity_headroom=1.25, **kwargs):
+                 variant="fast", neighbor_skin=1.0, capacity_headroom=1.25,
+                 compute_stress=False, **kwargs):
         super().__init__(**kwargs)
         if variant not in {"plain", "fast", "fast_cm"}:
             raise ValueError("MACE variant must be 'plain', 'fast', or 'fast_cm'")
@@ -37,6 +41,7 @@ class MACEModel(ModelBackend):
         self.variant = variant if self.config.enable_fusions else "plain"
         self.neighbor_skin = float(neighbor_skin)
         self.capacity_headroom = float(capacity_headroom)
+        self.compute_stress = bool(compute_stress)
         self.runner = None
 
     def graph_unavailable_reason(self, properties):
@@ -69,7 +74,8 @@ class MACEModel(ModelBackend):
         info = self.info
         inputs = tb.inputs_from_atoms(atoms, info)
         with tb.default_dtype(info.dtype):
-            result = tb.mace_forward(self.model, inputs, compute_stress="stress" in properties)
+            result = tb.mace_forward(self.model, inputs,
+                                     compute_stress=self.compute_stress or "stress" in properties)
         return self._numpy_results(result)
 
     @staticmethod
@@ -84,12 +90,15 @@ class MACEModel(ModelBackend):
         from .mace_graph import MACEGraphRunner
         if self.runner is None:
             self.runner = MACEGraphRunner(self, atoms)
-        return self._numpy_results(self.runner.run(atoms.positions, compute_stress="stress" in properties))
+        return self._numpy_results(self.runner.run(
+            atoms.positions, cell=atoms.cell.array,
+            compute_stress=self.compute_stress or "stress" in properties))
 
     def clear_graphs(self):
         self.runner = None
 
     def stats(self):
         return {**super().stats(), "variant": self.variant, "dtype": str(self.info.dtype),
+                "compute_stress": self.compute_stress,
                 "cueq": self.info.enable_cueq, "head": self.info.heads[self.info.head_index],
                 "cache": self.runner.stats() if self.runner else {}}
