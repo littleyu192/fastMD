@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import os
+from fastmd._vendor.matris.config import env_value
+
 
 import torch
 from torch import Tensor, nn
@@ -14,29 +15,17 @@ from .basis_function import (
     SphericalExpansion,
     SinusoidalTimeExpansion
 )
-from .functions import get_normalization, SwishLayer, aggregate, model_fusions_enabled
+from .functions import get_normalization, SwishLayer, aggregate
 
-_FUSED_THREEBODY_LINEAR_ENABLED = os.getenv(
-    "MATRIS_FUSED_THREEBODY_LINEAR", "1"
-) != "0"
-_FUSED_THREEBODY_LINEAR_EAGER = os.getenv(
-    "MATRIS_FUSED_THREEBODY_LINEAR_EAGER", "0"
-) == "1"
+_FUSED_THREEBODY_LINEAR_ENABLED = env_value("MATRIS_FUSED_THREEBODY_LINEAR", "1") != "0"
+_FUSED_THREEBODY_LINEAR_EAGER = env_value("MATRIS_FUSED_THREEBODY_LINEAR_EAGER", "0") == "1"
 _FUSED_THREEBODY_LINEAR_GRAPH = False
-_FUSED_THREEBODY_LINEAR_MIN_ROWS = int(
-    os.getenv("MATRIS_FUSED_THREEBODY_LINEAR_MIN_ROWS", "60000")
-)
-_FUSED_THREEBODY_BASIS_ENABLED = os.getenv(
-    "MATRIS_FUSED_THREEBODY_BASIS", "1"
-) != "0"
-_FUSED_THREEBODY_BASIS_EAGER = os.getenv(
-    "MATRIS_FUSED_THREEBODY_BASIS_EAGER", "0"
-) == "1"
+_FUSED_THREEBODY_LINEAR_MIN_ROWS = int(env_value("MATRIS_FUSED_THREEBODY_LINEAR_MIN_ROWS", "60000"))
+_FUSED_THREEBODY_BASIS_ENABLED = env_value("MATRIS_FUSED_THREEBODY_BASIS", "1") != "0"
+_FUSED_THREEBODY_BASIS_EAGER = env_value("MATRIS_FUSED_THREEBODY_BASIS_EAGER", "0") == "1"
 _FUSED_THREEBODY_BASIS_GRAPH = False
-_FUSED_THREEBODY_BASIS_MIN_ROWS = int(
-    os.getenv("MATRIS_FUSED_THREEBODY_BASIS_MIN_ROWS", "60000")
-)
-_UNDIRECTED_EDGE_INIT = os.getenv("MATRIS_UNDIRECTED_EDGE_INIT", "1") != "0"
+_FUSED_THREEBODY_BASIS_MIN_ROWS = int(env_value("MATRIS_FUSED_THREEBODY_BASIS_MIN_ROWS", "60000"))
+_UNDIRECTED_EDGE_INIT = env_value("MATRIS_UNDIRECTED_EDGE_INIT", "1") != "0"
 
 
 def set_fused_feature_graph_optimizations(enabled: bool) -> tuple[bool, bool]:
@@ -53,7 +42,7 @@ def restore_fused_feature_graph_optimizations(state: tuple[bool, bool]) -> None:
 
 
 def _use_fused_threebody_linear(basis: Tensor) -> bool:
-    if not model_fusions_enabled() or not _FUSED_THREEBODY_LINEAR_ENABLED:
+    if not _FUSED_THREEBODY_LINEAR_ENABLED:
         return False
     if not (basis.is_cuda and basis.dim() == 2):
         return False
@@ -68,25 +57,18 @@ def _use_fused_threebody_basis(
     source_index: Tensor,
     freqs: Tensor,
 ) -> bool:
-    if not model_fusions_enabled() or not _FUSED_THREEBODY_BASIS_ENABLED:
+    if not _FUSED_THREEBODY_BASIS_ENABLED:
         return False
-    if not (
-        unit_vec.is_cuda
-        and target_index.is_cuda
-        and source_index.is_cuda
-        and freqs.is_cuda
-    ):
+    if not (unit_vec.is_cuda and target_index.is_cuda and source_index.is_cuda and freqs.is_cuda):
         return False
     if unit_vec.dim() != 2 or unit_vec.shape[1] != 3:
         return False
-    if (
-        target_index.numel() != source_index.numel()
-        or target_index.numel() < _FUSED_THREEBODY_BASIS_MIN_ROWS
-    ):
+    if target_index.numel() != source_index.numel() or target_index.numel() < _FUSED_THREEBODY_BASIS_MIN_ROWS:
         return False
     if freqs.requires_grad or freqs.numel() != 3:
         return False
     return _FUSED_THREEBODY_BASIS_EAGER or _FUSED_THREEBODY_BASIS_GRAPH
+
 
 class AtomTypeEmbedding(nn.Module):
     """Encode an atom by its atomic number using 'nn.Embedding'."""
@@ -207,24 +189,20 @@ class EdgeBasisEmbedding(nn.Module):
         threebody_rbf = self.threebody_rbf_expansion(unique_edge_lengths)  #[nEdges/2, num_radial]
         
         edge_feat_undirect = self.edge_linear1(pairwise_rbf)
-        if model_fusions_enabled() and _UNDIRECTED_EDGE_INIT:
-            # Both directed rows of an undirected pair are identical here, so
-            # linear/norm may run once before the redundant expand+average.
+        if _UNDIRECTED_EDGE_INIT:
             edge_feat = self.edge_linear2(edge_feat_undirect)
             edge_feat = self.edge_init_norm(edge_feat)
         else:
-            edge_feat_direct = torch.index_select(
-                edge_feat_undirect, 0, graphs['directed2undirected']
-            )
+            # [edges, dim] -> [2*edges, dim]
+            edge_feat_direct = torch.index_select(edge_feat_undirect, 0, graphs['directed2undirected'])
             edge_feat_direct = self.edge_linear2(edge_feat_direct)
             edge_feat_direct = self.edge_init_norm(edge_feat_direct)
-            edge_feat = aggregate(
-                data=edge_feat_direct,
-                segment=graphs['directed2undirected'],
-                bin_count=None,
-                average=True,
-                num_segment=graphs['undirected2directed'].shape[0],
-            )
+            # Aggregate to bond_feas_ude
+            edge_feat = aggregate(data=edge_feat_direct,
+                                                     segment=graphs['directed2undirected'],
+                                                     bin_count=None,
+                                                     average=True,
+                                                     num_segment=graphs['undirected2directed'].shape[0])
         edge_feat = self.swish_layer(edge_feat)
         smooth_weight={"atom graph": pairwise_rbf, "line graph": threebody_rbf}
         #return edge_feat, pairwise_rbf, threebody_rbf
@@ -273,19 +251,19 @@ class ThreebodyEmbedding(nn.Module):
         swish_linear = self.swish_layer.linear
         if self.angle_embedding.bias is not None or swish_linear.bias is not None:
             return None
-        angle_weight = self.angle_embedding.weight
-        swish_weight = swish_linear.weight
-        if angle_weight.requires_grad or swish_weight.requires_grad:
+        angle_w = self.angle_embedding.weight
+        swish_w = swish_linear.weight
+        if angle_w.requires_grad or swish_w.requires_grad:
             return None
-        if angle_weight.device != basis.device or swish_weight.device != basis.device:
+        if angle_w.device != basis.device or swish_w.device != basis.device:
             return None
-        if angle_weight.dtype != basis.dtype or swish_weight.dtype != basis.dtype:
+        if angle_w.dtype != basis.dtype or swish_w.dtype != basis.dtype:
             return None
         key = (
-            angle_weight.data_ptr(),
-            swish_weight.data_ptr(),
-            angle_weight._version,
-            swish_weight._version,
+            angle_w.data_ptr(),
+            swish_w.data_ptr(),
+            angle_w._version,
+            swish_w._version,
             basis.device,
             basis.dtype,
         )
@@ -294,7 +272,7 @@ class ThreebodyEmbedding(nn.Module):
                 return None
             with torch.no_grad():
                 self._combined_swish_weight = torch.matmul(
-                    swish_weight.detach(), angle_weight.detach()
+                    swish_w.detach(), angle_w.detach()
                 ).contiguous()
                 self._combined_swish_cache_key = key
         return self._combined_swish_weight
@@ -324,10 +302,11 @@ class ThreebodyEmbedding(nn.Module):
         else:
             edge_vecs_ij = torch.index_select(
                 unit_edge_vectors, 0, target_de_index
-            )
+            ) # normalized edge vector ij [nAngle, 3]
             edge_vecs_jk = torch.index_select(
                 unit_edge_vectors, 0, source_de_index
-            )
+            ) # normalized edge vector jk [nAngle, 3]
+
             theta_ijk = torch.sum(edge_vecs_ij * edge_vecs_jk, dim=1) * (1 - 1e-6)
             angle = torch.acos(theta_ijk)
 

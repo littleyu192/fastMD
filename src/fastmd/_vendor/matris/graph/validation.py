@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 def raise_if_isolated_atoms(count: int | Tensor) -> None:
     """Raise the historical MatRIS error when one or more atoms have no edges."""
-    if isinstance(count, Tensor):
+    if torch.is_tensor(count):
         count = int(count.item() if count.numel() == 1 else count.sum().item())
     else:
         count = int(count)
@@ -26,25 +26,23 @@ def raise_if_isolated_atoms(count: int | Tensor) -> None:
 def raise_if_graph_has_isolated_atoms(
     graphs: "RadiusGraph | Sequence[RadiusGraph]",
 ) -> None:
-    """Synchronously validate graph metadata or derive zero-degree atoms."""
+    """Synchronously validate metadata, or derive counts for legacy graphs.
+
+    This is an explicit strict-mode check, not part of tolerant graph replay.
+    Graphs loaded from older files may not carry isolated-atom metadata.
+    """
     if not isinstance(graphs, Sequence):
         graphs = [graphs]
     counts = []
     for graph in graphs:
         isolated_count = getattr(graph, "isolated_atom_count", None)
         if isolated_count is None:
-            num_atoms = graph.atomic_number.shape[0]
+            target_index = graph.atom_graph[:, 0].long()
             degrees = torch.zeros(
-                num_atoms,
-                dtype=torch.long,
+                graph.atomic_number.shape[0], dtype=torch.long,
                 device=graph.atom_graph.device,
             )
-            target_index = graph.atom_graph[:, 0].long()
-            degrees.index_add_(
-                0,
-                target_index,
-                torch.ones_like(target_index, dtype=torch.long),
-            )
+            degrees.index_add_(0, target_index, torch.ones_like(target_index))
             isolated_count = degrees.eq(0).sum().reshape(1)
         counts.append(isolated_count.reshape(-1))
     if len(counts) == 1:

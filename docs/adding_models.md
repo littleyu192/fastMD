@@ -79,5 +79,5 @@ register_model("my_wbm_model", "my_package.fastmd_backend:MyModel")
 - 使用自身权重跑 `examples/compare.py` 和一段短 NVE 轨迹，不仅检查吞吐。
 
 WBM 是评测用的结构集合；数据集名称不替代模型的推理能力声明。
-当前注册表不声称已经支持尚未适配的 MACE、SevenNet、ORB 等模型。
+当前注册表不声称已经支持尚未适配的 SevenNet、ORB 等模型。
 未来增加批处理应设计独立的 tensor state / batched backend，不改变 ASE 的单结构调用约定。

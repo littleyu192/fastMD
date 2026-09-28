@@ -12,6 +12,8 @@ from torch import Tensor
 import sys
 from abc import ABC, abstractmethod
 
+from .topology_contract import BuilderEvidence
+
 datatype = torch.float32
 
 class RadiusGraph:
@@ -32,6 +34,8 @@ class RadiusGraph:
         undirected2directed: Tensor,
         atom_target_sorted: bool = False,
         line_atom_sorted: bool = False,
+        isolated_atom_count: Tensor | None = None,
+        topology_evidence: Any | None = None,
     ):
         """Initialize a RadiusGraph object representing a material graph.
         
@@ -92,6 +96,12 @@ class RadiusGraph:
         self.undirected2directed = undirected2directed
         self.atom_target_sorted = atom_target_sorted
         self.line_atom_sorted = line_atom_sorted
+        self.isolated_atom_count = isolated_atom_count
+        self.topology_evidence = (
+            BuilderEvidence.from_dict(topology_evidence)
+            if isinstance(topology_evidence, dict)
+            else topology_evidence
+        )
         
         assert len(directed2undirected) == 2 * len(undirected2directed), (
             f"Number of directed indices ({len(directed2undirected)}) != "
@@ -116,6 +126,12 @@ class RadiusGraph:
             undirected2directed=self.undirected2directed.to(device),
             atom_target_sorted=self.atom_target_sorted,
             line_atom_sorted=self.line_atom_sorted,
+            isolated_atom_count=(
+                None
+                if self.isolated_atom_count is None
+                else self.isolated_atom_count.to(device)
+            ),
+            topology_evidence=self.topology_evidence,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -135,6 +151,12 @@ class RadiusGraph:
             "undirected2directed": self.undirected2directed,
             "atom_target_sorted": self.atom_target_sorted,
             "line_atom_sorted": self.line_atom_sorted,
+            "isolated_atom_count": self.isolated_atom_count,
+            "topology_evidence": (
+                None
+                if self.topology_evidence is None
+                else self.topology_evidence.to_dict()
+            ),
         }
 
     def save(self, fname: str | None = None, save_dir: str = ".") -> str:

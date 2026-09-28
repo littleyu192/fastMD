@@ -6,7 +6,8 @@ envelope path.
 """
 from __future__ import annotations
 
-import os
+from fastmd._vendor.matris.config import env_value
+
 
 import torch
 import triton
@@ -15,7 +16,7 @@ from torch.autograd import Function
 
 
 def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
+    value = env_value(name)
     if value is None:
         return default
     return int(value)

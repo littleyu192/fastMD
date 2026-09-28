@@ -11,9 +11,16 @@ from pymatgen.core import Structure
 from pymatgen.io.ase import AseAtomsAdaptor
 
 from .gpu_graph_builder import atoms_to_graph_gpu, op_available
+from .matris_topology import matris_builder_evidence
 from .radiusgraph import Graph, Node, RadiusGraph
 
 datatype = torch.float32
+
+_CPU_BUILDER_EVIDENCE = matris_builder_evidence(
+    "matris.cpu_radius_graph",
+    atom_target_sorted=False,
+    line_owner_sorted=False,
+)
 
 
 class GraphConverter(nn.Module):
@@ -59,6 +66,7 @@ class GraphConverter(nn.Module):
         graph_id=None,
         mp_id=None,
         atoms=None,
+        check_isolated_atoms: bool = True,
     ) -> RadiusGraph:
         """Convert a structure, return a RadiusGraph.
 
@@ -68,6 +76,9 @@ class GraphConverter(nn.Module):
                 Default = None
             mp_id (str): Materials Project id of this structure
                 Default = None
+            check_isolated_atoms (bool): Reject zero-neighbor atoms when True.
+                False retains every atom, including an entirely empty edge
+                graph, for a model/application with an explicit isolation policy.
         
         """
         if self.algorithm == "gpu" and op_available and torch.cuda.is_available():
@@ -77,6 +88,7 @@ class GraphConverter(nn.Module):
                 ase_atoms,
                 atom_graph_cutoff=self.atom_graph_cutoff,
                 line_graph_cutoff=self.line_graph_cutoff,
+                check_isolated_atoms=check_isolated_atoms,
             )
             graph.graph_id = graph_id
             graph.mp_id = mp_id
@@ -100,7 +112,7 @@ class GraphConverter(nn.Module):
             n_atoms, center_index, neighbor_index, image, distance
         )
         atom_graph, directed2undirected = graph.adjacency_list()
-        atom_graph = torch.tensor(atom_graph, dtype=torch.int32)
+        atom_graph = torch.tensor(atom_graph, dtype=torch.int32).reshape(-1, 2)
         directed2undirected = torch.tensor(directed2undirected, dtype=torch.int32)
         undirected2directed = graph.undirected2directed()
         undirected2directed = torch.tensor(undirected2directed, dtype=torch.int32)
@@ -113,12 +125,11 @@ class GraphConverter(nn.Module):
         except Exception as exc:
             structure.to(filename="error_graph.cif")
 
-        line_graph = torch.tensor(line_graph, dtype=torch.int32)
+        line_graph = torch.tensor(line_graph, dtype=torch.int32).reshape(-1, 5)
 
-        # For isolated atom, we stop this calculation
+        # Keep the same explicit strict/deferred policy on CPU and GPU.
         n_isolated_atoms = len({*range(n_atoms)} - {*center_index})
-        if n_isolated_atoms:
-            atom_graph_cutoff = self.atom_graph_cutoff
+        if check_isolated_atoms and n_isolated_atoms:
             error = f"Error: Detected {n_isolated_atoms} isolated atom. Calculation stopped"
             raise ValueError(error) # or print(error)
         
@@ -126,7 +137,7 @@ class GraphConverter(nn.Module):
             atomic_number=atomic_number,
             atom_frac_coord=atom_frac_coord,
             atom_graph=atom_graph,
-            neighbor_image=torch.tensor(image, dtype=datatype),
+            neighbor_image=torch.tensor(image, dtype=datatype).reshape(-1, 3),
             directed2undirected=directed2undirected,
             undirected2directed=undirected2directed,
             line_graph=line_graph,
@@ -136,6 +147,8 @@ class GraphConverter(nn.Module):
             composition=structure.composition.formula,
             atom_graph_cutoff=self.atom_graph_cutoff,
             line_graph_cutoff=self.line_graph_cutoff,
+            isolated_atom_count=torch.tensor([n_isolated_atoms], dtype=torch.int64),
+            topology_evidence=_CPU_BUILDER_EVIDENCE,
         )
 
     @staticmethod

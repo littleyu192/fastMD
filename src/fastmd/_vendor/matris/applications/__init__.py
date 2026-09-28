@@ -1,1 +1,1 @@
-"""Private inference runtime migrated from MatRIS."""
+"""Private MatRIS application modules; imported lazily by fastMD."""

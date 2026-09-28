@@ -7,6 +7,7 @@ and integrator.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -14,7 +15,9 @@ import torch
 from torch import Tensor
 
 from .._nvtx import nvtx_range
-from .gpu_graph_builder import MAX_IMAGE, _cuda_device
+from .geometry import small_matmul
+from .gpu_graph_builder import MAX_IMAGE, _cuda_device, _env_flag as _env_flag_fixed
+from .matris_topology import matris_builder_evidence
 from .radiusgraph import RadiusGraph
 
 try:
@@ -38,6 +41,14 @@ except ImportError:
     tl = None
     _fixed_builder_available = False
 
+
+_FIXED_BUILDER_EVIDENCE = matris_builder_evidence(
+    "matris.fixed_capacity_radius_graph",
+    atom_target_sorted=True,
+    line_owner_sorted=True,
+    fixed_capacity=True,
+    incidence_consistent=False,
+)
 
 
 if _fixed_builder_available:
@@ -229,6 +240,22 @@ class FixedCapacityGraphStatus:
     isolated_atom_count: Tensor
 
 
+def fixed_capacity_exceeded(status, builder) -> Tensor:
+    """Device predicate: the real graph in ``status`` does not fit ``builder``.
+
+    The sink-padding contract needs at least one padding undirected pair,
+    because ``_materialize_line_graph`` routes every padding triplet to one.
+    A real directed-edge count equal to ``e_capacity`` leaves no such pair,
+    so it is a capacity overflow just like ``edges > e_capacity`` (the same
+    rule as the bucketed model graph, which requires ``u_capacity > u``).
+    """
+    return (
+        (status.edge_count[0] >= builder.e_capacity)
+        | (status.triplet_count[0] > builder.t_capacity)
+        | status.invalid_pairs[0]
+    )
+
+
 @dataclass(frozen=True)
 class StaticizationInvariantReport:
     edge_count: int
@@ -398,6 +425,43 @@ class FixedCapacityGraphBuilder:
         )
         self._slot_block = triton.next_power_of_2(self.buffer_max)
 
+        # Certified pair-sort key bound. For a fixed cell, the per-step edge
+        # image is candidate_shift + wrap[neighbor] - wrap[atom]. The
+        # candidate shift is bounded by ceil(candidate_cutoff / h_min) for
+        # the smallest perpendicular cell height h_min, and each wrap term is
+        # bounded by 1 whenever displacement stays within the skin validity
+        # predicate (a violating step is rolled back before its state is
+        # visible), so the +2 margin is transactionally protected. When the
+        # resulting key range plus the padding-sentinel range fits int32, the
+        # pair sort and reverse-key search run on 4-byte keys.
+        cell_volume = torch.abs(torch.linalg.det(self.cell.double()))
+        face_areas = torch.stack(
+            [
+                torch.linalg.cross(
+                    self.cell.double()[(axis + 1) % 3],
+                    self.cell.double()[(axis + 2) % 3],
+                ).norm()
+                for axis in range(3)
+            ]
+        )
+        min_height = float((cell_volume / face_areas).min())
+        certified_shift = math.ceil(self.candidate_cutoff / max(min_height, 1e-6))
+        self.certified_max_image = int(certified_shift + 2)
+        narrow_radix = 2 * self.certified_max_image + 1
+        narrow_volume = narrow_radix**3
+        narrow_key_max = self.n_real * self.n_real * narrow_volume + narrow_volume
+        use_narrow = (
+            _env_flag_fixed("MATRIS_NARROW_SORT_KEYS", True)
+            and narrow_key_max + self.e_capacity
+            < torch.iinfo(torch.int32).max
+        )
+        if use_narrow:
+            self.sort_key_dtype = torch.int32
+            self.sort_key_max_image = self.certified_max_image
+        else:
+            self.sort_key_dtype = torch.int64
+            self.sort_key_max_image = MAX_IMAGE
+
         max_total_cells, neighbor_radius = estimate_batch_cell_list_sizes(
             self.cells,
             self.pbc,
@@ -485,6 +549,7 @@ class FixedCapacityGraphBuilder:
             undirected2directed=self.undirected2directed,
             atom_target_sorted=True,
             line_atom_sorted=True,
+            topology_evidence=_FIXED_BUILDER_EVIDENCE,
         )
 
         self.edge_ids = torch.arange(self.e_capacity, device=self.device, dtype=torch.int64)
@@ -581,9 +646,9 @@ class FixedCapacityGraphBuilder:
     def refresh_candidates(self, positions: Tensor) -> None:
         """Refresh the slow-path cell list used by subsequent exact re-filter steps."""
         positions = positions.to(device=self.device, dtype=torch.float32)
-        frac_unwrapped = positions @ self.inv_cell
+        frac_unwrapped = small_matmul(positions, self.inv_cell)
         wraps = torch.floor(frac_unwrapped).to(torch.int32)
-        wrapped = (frac_unwrapped - wraps.float()) @ self.cell
+        wrapped = small_matmul(frac_unwrapped - wraps.float(), self.cell)
         self.reference_positions.copy_(positions)
         self.reference_wraps.copy_(wraps)
         self.wrap_delta.zero_()
@@ -652,28 +717,30 @@ class FixedCapacityGraphBuilder:
         total_edges = self.edge_offsets[-1]
         total_clamped = total_edges.clamp(max=self.e_capacity)
         is_real = self.edge_ids < total_clamped
-        center = self.center.long()
-        neighbor = self.neighbor.long()
-        images = self.images.long()
-        radix = 2 * MAX_IMAGE + 1
+        key_dtype = self.sort_key_dtype
+        max_image = self.sort_key_max_image
+        center = self.center.to(key_dtype)
+        neighbor = self.neighbor.to(key_dtype)
+        images = self.images.to(key_dtype)
+        radix = 2 * max_image + 1
         volume = radix**3
         forward_key = (
             (center * self.n_real + neighbor) * volume
-            + (images[:, 0] + MAX_IMAGE) * radix * radix
-            + (images[:, 1] + MAX_IMAGE) * radix
+            + (images[:, 0] + max_image) * radix * radix
+            + (images[:, 1] + max_image) * radix
             + images[:, 2]
-            + MAX_IMAGE
+            + max_image
         )
         reverse_key = (
             (neighbor * self.n_real + center) * volume
-            + (-images[:, 0] + MAX_IMAGE) * radix * radix
-            + (-images[:, 1] + MAX_IMAGE) * radix
+            + (-images[:, 0] + max_image) * radix * radix
+            + (-images[:, 1] + max_image) * radix
             - images[:, 2]
-            + MAX_IMAGE
+            + max_image
         )
         invalid_key = (
-            torch.iinfo(torch.int64).max - self.e_capacity + self.edge_ids
-        )
+            torch.iinfo(key_dtype).max - self.e_capacity + self.edge_ids
+        ).to(key_dtype)
         forward_key = torch.where(is_real, forward_key, invalid_key)
         sorted_key, sort_idx = torch.sort(forward_key)
         self.center.copy_(self.center[sort_idx])
@@ -682,15 +749,15 @@ class FixedCapacityGraphBuilder:
         self.distances.copy_(self.distances[sort_idx])
         self.short_flags.copy_(self.short_flags[sort_idx])
 
-        center = self.center.long()
-        neighbor = self.neighbor.long()
-        images = self.images.long()
+        center = self.center.to(key_dtype)
+        neighbor = self.neighbor.to(key_dtype)
+        images = self.images.to(key_dtype)
         reverse_key = (
             (neighbor * self.n_real + center) * volume
-            + (-images[:, 0] + MAX_IMAGE) * radix * radix
-            + (-images[:, 1] + MAX_IMAGE) * radix
+            + (-images[:, 0] + max_image) * radix * radix
+            + (-images[:, 1] + max_image) * radix
             - images[:, 2]
-            + MAX_IMAGE
+            + max_image
         )
         reverse_key = torch.where(is_real, reverse_key, invalid_key)
         reverse_pos = torch.searchsorted(sorted_key, reverse_key).clamp(
@@ -836,10 +903,10 @@ class FixedCapacityGraphBuilder:
                 raise ValueError(
                     f"positions must have shape {(self.n_real, 3)}, got {tuple(positions.shape)}"
                 )
-            frac_unwrapped = positions @ self.inv_cell
+            frac_unwrapped = small_matmul(positions, self.inv_cell)
             wraps = torch.floor(frac_unwrapped).to(torch.int32)
             frac = frac_unwrapped - wraps.float()
-            wrapped = frac @ self.cell
+            wrapped = small_matmul(frac, self.cell)
             self.frac_coords[: self.n_real].copy_(frac)
             if rebuild_candidates:
                 self.reference_positions.copy_(positions)
@@ -864,8 +931,11 @@ class FixedCapacityGraphBuilder:
             self._materialize_edges(wrapped)
             self._materialize_pairs()
             self._materialize_line_graph()
+            # ``>=``: at edges == e_capacity no padding pair is left and the
+            # padding triplets would index u == u_capacity (one past the end),
+            # so the safe all-sink topology must be substituted as well.
             overflow = (
-                (self.edge_offsets[-1] > self.e_capacity)
+                (self.edge_offsets[-1] >= self.e_capacity)
                 | (self.pair_offsets[-1] > self.t_capacity)
                 | self._invalid_pairs[0]
                 | ~self._candidate_valid[0]
@@ -956,9 +1026,9 @@ class BatchedCandidateRefresher:
                 f"positions must have shape {expected_shape}, got {tuple(positions.shape)}"
             )
         positions = positions.to(self.device, torch.float32)
-        frac_unwrapped = torch.bmm(positions, self.inv_cells)
+        frac_unwrapped = small_matmul(positions, self.inv_cells)
         wraps = torch.floor(frac_unwrapped).to(torch.int32)
-        wrapped = torch.bmm(frac_unwrapped - wraps.float(), self.cells)
+        wrapped = small_matmul(frac_unwrapped - wraps.float(), self.cells)
         wrapped_flat = wrapped.reshape(self.total_atoms, 3)
 
         self.neighbor_matrix.fill_(self.total_atoms)

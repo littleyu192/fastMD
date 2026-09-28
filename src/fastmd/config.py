@@ -8,7 +8,7 @@ class CUDAGraphConfig:
     """auto: use supported captures; True: require capture; False: eager only.
 
     Capacity defaults are model-specific. Edges in MatRIS/CHGNet are undirected;
-    ALIGNN uses directed edges. The cache is cleared when its bucket limit is
+    ALIGNN and MACE use directed edges. The cache is cleared when its bucket limit is
     exceeded. Warmup never moves the user's atoms or starts a trial trajectory.
     """
 

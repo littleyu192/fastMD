@@ -1,5 +1,6 @@
 import torch
 from fastmd._vendor.matris.graph import RadiusGraph
+from fastmd._vendor.matris.graph.geometry import small_matmul
 from collections.abc import Sequence
 from .functions import segment_count
 
@@ -88,7 +89,10 @@ def process_graphs(graphs: Sequence[RadiusGraph],
             #graph.lattice.requires_grad = False
             graph.lattice = graph.lattice.detach()
 
-        atom_cart_coords = graph.atom_frac_coord @ graph.lattice  # [n_atom, 3]
+        # Geometry products use small_matmul: cuBLAS would run them in TF32
+        # whenever allow_tf32 is set (the default under the NGC containers'
+        # TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1), ~1e-2 A.
+        atom_cart_coords = small_matmul(graph.atom_frac_coord, graph.lattice)  # [n_atom, 3]
         
         batch_cart_coords.append(atom_cart_coords)
         batch_lattice.append(graph.lattice)
@@ -150,7 +154,7 @@ def process_graphs(graphs: Sequence[RadiusGraph],
     # Reshape [n_graphs*3, 3] -> [n_graphs, 3, 3] for volumes calculation
     batch_lattices = batch_lattice.reshape(num_graphs, 3, 3)
     cross_product = torch.linalg.cross(batch_lattices[:, 1], batch_lattices[:, 2])
-    volumes = torch.einsum('ni,ni->n', batch_lattices[:, 0], cross_product)
+    volumes = (batch_lattices[:, 0] * cross_product).sum(dim=-1)
     volumes = volumes.unsqueeze(1).unsqueeze(2)
     
     batch_line_graph_compress = torch.tensor([]) 
@@ -189,19 +193,19 @@ def process_graphs(graphs: Sequence[RadiusGraph],
             )
             batch_cart_coords = (
                 coords_by_graph
-                + torch.matmul(coords_by_graph, symmetric_strains)
+                + small_matmul(coords_by_graph, symmetric_strains)
             ).view(-1, 3)
         else:
             coord_chunks = torch.split(batch_cart_coords, atoms_per_graph)
             batch_cart_coords = torch.cat(
                 [
-                    coords + coords @ symmetric_strains[graph_idx]
+                    coords + small_matmul(coords, symmetric_strains[graph_idx])
                     for graph_idx, coords in enumerate(coord_chunks)
                 ],
                 dim=0,
             )
         batch_lattice = batch_lattice.view(-1, 3, 3)
-        batch_lattice = batch_lattice + torch.matmul(batch_lattice, symmetric_strains)
+        batch_lattice = batch_lattice + small_matmul(batch_lattice, symmetric_strains)
         batch_lattice = batch_lattice.view(-1, 3)
     #========================================
     
@@ -211,10 +215,10 @@ def process_graphs(graphs: Sequence[RadiusGraph],
     center_pos = batch_cart_coords[target_index] 
     neighbor_pos = batch_cart_coords[source_index]
     if num_graphs == 1:
-        image_cart = batch_image @ batch_lattice
+        image_cart = small_matmul(batch_image, batch_lattice)
     elif len({graph.atom_graph.shape[0] for graph in graphs}) == 1:
         edges_per_system = graphs[0].atom_graph.shape[0]
-        image_cart = torch.matmul(
+        image_cart = small_matmul(
             batch_image.view(num_graphs, edges_per_system, 3),
             batch_lattice.view(num_graphs, 3, 3),
         ).view(-1, 3)
@@ -226,7 +230,7 @@ def process_graphs(graphs: Sequence[RadiusGraph],
         lattices = batch_lattice.view(num_graphs, 3, 3)
         image_cart = torch.cat(
             [
-                image @ lattices[graph_idx]
+                small_matmul(image, lattices[graph_idx])
                 for graph_idx, image in enumerate(image_chunks)
             ],
             dim=0,
@@ -265,17 +269,13 @@ def process_graphs(graphs: Sequence[RadiusGraph],
     bincount_source_atom_graph = segment_count(source_index, total_atoms)
     bincount_source_atom_graph = bincount_source_atom_graph.where(bincount_source_atom_graph != 0, bincount_source_atom_graph.new_ones(1))
     target_count_atom_graph = segment_count(target_index, total_atoms)
-    # Preserve the zero-degree information before replacing empty segment
-    # counts with one for safe attention normalization.  Readout uses this
-    # device-side, fixed-shape mask to handle isolated atoms without deleting
-    # nodes or synchronizing CUDA back to the host.
+    # Retain zero-degree information before clamping the attention counts.
+    # This fixed-shape device mask also works during CUDA Graph replay as
+    # atoms disconnect/reconnect, without deleting nodes or host synchronization.
     batched_graph['atom_active_mask'] = target_count_atom_graph.ne(0)
-    if num_graphs == 1 and getattr(graphs[0], "atom_target_sorted", False):
-        atom_graph_dict['_target_segment_attention_identity_perm'] = True
+    if all(getattr(graph, "atom_target_sorted", False) for graph in graphs):
         atom_graph_dict['_target_segment_attention_counts'] = target_count_atom_graph
-    bincount_target_atom_graph = target_count_atom_graph.where(
-        target_count_atom_graph != 0, target_count_atom_graph.new_ones(1)
-    )
+    bincount_target_atom_graph = target_count_atom_graph.where(target_count_atom_graph != 0, target_count_atom_graph.new_ones(1))
     atom_graph_dict['source_bincount'] = bincount_source_atom_graph
     atom_graph_dict['target_bincount'] = bincount_target_atom_graph
     
@@ -296,5 +296,24 @@ def process_graphs(graphs: Sequence[RadiusGraph],
     
     batched_graph['atom_graph_dict'] = atom_graph_dict
     batched_graph['line_graph_dict'] = line_graph_dict
+
+    # Contract verification and lowering selection happen while the graph is
+    # prepared/captured. CUDA Graph replay consumes the already compiled plan.
+    from fastmd._vendor.matris.graph.matris_topology import bind_matris_topology
+    from .topology_lowering import compile_lowering_plan, matris_lowering_requests
+
+    topology_binding = bind_matris_topology(batched_graph, graphs)
+    topology_plan = compile_lowering_plan(
+        topology_binding.instance.schema,
+        topology_binding.instance.certificate,
+        matris_lowering_requests(),
+    )
+    batched_graph['topology_contract'] = topology_binding.instance
+    batched_graph['topology_verification'] = topology_binding.report
+    batched_graph['topology_lowering_plan'] = topology_plan
+    atom_graph_dict['_topology_lowering_plan'] = topology_plan
+    line_graph_dict['_topology_lowering_plan'] = topology_plan
+    atom_graph_dict['_topology_graph_kind'] = 'atom'
+    line_graph_dict['_topology_graph_kind'] = 'line'
     
     return batched_graph

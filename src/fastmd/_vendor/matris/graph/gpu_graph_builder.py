@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-import os
+from fastmd._vendor.matris.config import env_value
+
 
 import numpy as np
 import torch
 from torch import Tensor
 
 from .._nvtx import nvtx_range
+from .geometry import small_matmul
+from .matris_topology import matris_builder_evidence
 from .radiusgraph import RadiusGraph
+from .validation import raise_if_isolated_atoms
 
 try:
     from nvalchemiops.neighborlist.neighbor_utils import estimate_max_neighbors
@@ -32,16 +36,28 @@ except ImportError:
 # cell dimension >= cutoff / MAX_IMAGE, i.e. always for physical cells.
 MAX_IMAGE = 10
 
+_GPU_BUILDER_EVIDENCE = matris_builder_evidence(
+    "matris.gpu_radius_graph",
+    atom_target_sorted=True,
+    line_owner_sorted=True,
+)
+
 
 def _env_flag(name: str, default: bool) -> bool:
-    value = os.getenv(name)
+    value = env_value(name)
     if value is None:
         return default
     return value.lower() not in {"0", "false", "off", "no"}
 
 
 _LINE_GRAPH_TRITON = _env_flag("MATRIS_LINE_GRAPH_TRITON", True)
-_LINE_GRAPH_TRITON_BLOCK = int(os.getenv("MATRIS_LINE_GRAPH_TRITON_BLOCK", "256"))
+_LINE_GRAPH_TRITON_BLOCK = int(env_value("MATRIS_LINE_GRAPH_TRITON_BLOCK", "256"))
+# Elide the redundant _build_d2u key sort and _build_line_graph stable sort
+# when the edge stream is already ordered by construction (single-system path;
+# neighbor_list_nvidia argsorts by (batch, center, neighbor, image), and
+# batch is a monotone function of the graph-contiguous center index, so both
+# downstream key orders are postconditions of that argsort).
+_PRESORTED_BUILD = _env_flag("MATRIS_PRESORTED_BUILD", True)
 
 
 def _cuda_device(device: torch.device | str) -> torch.device:
@@ -60,7 +76,14 @@ def neighbor_list_nvidia(
     batch_idx: Tensor,
     pbc: Tensor,
     device: torch.device | str = "cuda",
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    return_num_neighbors: bool = False,
+) -> tuple[Tensor, Tensor, Tensor, Tensor] | tuple[
+    Tensor,
+    Tensor,
+    Tensor,
+    Tensor,
+    Tensor,
+]:
     with nvtx_range("neighbor_list_nvidia"):
         device = _cuda_device(device)
         positions = positions.to(device)
@@ -105,7 +128,9 @@ def neighbor_list_nvidia(
 
         edge_batch = batch_idx[center].long()
         diff = positions[neighbor] - positions[center]
-        diff = diff + torch.einsum("ei,eij->ej", images.float(), cell[edge_batch])
+        diff = diff + small_matmul(
+            images.float().unsqueeze(-2), cell[edge_batch]
+        ).squeeze(-2)
         dist = diff.norm(dim=1)
         mask = dist < cutoff
         center = center[mask]
@@ -126,7 +151,10 @@ def neighbor_list_nvidia(
             + (img[:, 1] + max_img) * radix
             + (img[:, 2] + max_img)
         ).argsort()
-        return center[order], neighbor[order], images[order], dist[order]
+        result = center[order], neighbor[order], images[order], dist[order]
+        if return_num_neighbors:
+            return (*result, num_neighbors)
+        return result
 
 
 def _build_d2u(
@@ -134,10 +162,16 @@ def _build_d2u(
     neighbor: Tensor,
     images: Tensor,
     n_atoms: int,
+    presorted: bool = False,
 ) -> tuple[Tensor, Tensor]:
     with nvtx_range("_build_d2u"):
         device = center.device
         n_edges = center.shape[0]
+        if n_edges == 0:
+            # A valid all-isolated graph has no reverse-edge pairs. Shape-based
+            # dispatch is host-known and does not synchronize the device.
+            empty = torch.empty(0, dtype=torch.int32, device=device)
+            return empty, empty.clone()
         img = images.long()
         max_img = MAX_IMAGE  # static bound -> no .item() D2H sync
         radix = 2 * max_img + 1
@@ -154,8 +188,21 @@ def _build_d2u(
             + (-img[:, 1] + max_img) * radix
             + (-img[:, 2] + max_img)
         )
-        sorted_key, sort_idx = forward_key.sort()
-        pair_idx = sort_idx[torch.searchsorted(sorted_key, reverse_key).clamp(max=n_edges - 1)]
+        if presorted:
+            # forward_key order is a postcondition of the neighbor-list
+            # argsort (same lexicographic components; the omitted batch term
+            # is monotone in center), so the sort is the identity.
+            pair_idx = torch.searchsorted(forward_key, reverse_key).clamp(
+                max=n_edges - 1
+            )
+            sorted_key = forward_key
+        else:
+            sorted_key, sort_idx = forward_key.sort()
+            pair_idx = sort_idx[
+                torch.searchsorted(sorted_key, reverse_key).clamp(
+                    max=n_edges - 1
+                )
+            ]
         edge_ids = torch.arange(n_edges, device=device)
         uvals, directed2undirected = torch.unique(
             torch.minimum(edge_ids, pair_idx),
@@ -178,6 +225,53 @@ def _build_d2u(
 
 
 if _triton_available:
+
+    @triton.jit
+    def _count_isolated_sorted_kernel(
+        center,
+        batch_idx,
+        isolated_atom_counts,
+        n_edges,
+        SEARCH_STEPS: tl.constexpr,
+    ):
+        atom = tl.program_id(0)
+        lo = atom * 0
+        hi = lo + n_edges
+        for _ in tl.static_range(0, SEARCH_STEPS):
+            mid = (lo + hi) // 2
+            in_bounds = mid < n_edges
+            value = tl.load(center + mid, mask=in_bounds, other=-1)
+            move_right = in_bounds & (value < atom)
+            lo = tl.where(move_right, mid + 1, lo)
+            hi = tl.where(move_right, hi, mid)
+
+        value = tl.load(center + lo, mask=lo < n_edges, other=-1)
+        graph_idx = tl.load(batch_idx + atom)
+        tl.atomic_add(
+            isolated_atom_counts + graph_idx,
+            1,
+            mask=value != atom,
+        )
+
+
+    @triton.jit
+    def _line_graph_status_kernel(
+        pair_counts,
+        atom_neighbor_counts,
+        status,
+        N_ATOMS: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        atoms = tl.arange(0, BLOCK)
+        mask = atoms < N_ATOMS
+        pairs = tl.load(pair_counts + atoms, mask=mask, other=0)
+        neighbors = tl.load(atom_neighbor_counts + atoms, mask=mask, other=0)
+        tl.store(status, tl.sum(pairs, axis=0))
+        tl.store(
+            status + 1,
+            tl.sum((mask & (neighbors == 0)).to(tl.int64), axis=0),
+        )
+        tl.store(status + 2, tl.sum(neighbors.to(tl.int64), axis=0))
 
     @triton.jit
     def _line_graph_materialize_kernel(
@@ -228,7 +322,80 @@ if _triton_available:
         tl.store(out + base + 4, second_de, mask=mask)
 
 else:
+    _count_isolated_sorted_kernel = None
+    _line_graph_status_kernel = None
     _line_graph_materialize_kernel = None
+
+
+def _count_isolated_atoms(
+    center: Tensor,
+    batch_idx: Tensor,
+    *,
+    n_atoms: int,
+    n_graphs: int,
+) -> Tensor:
+    isolated_atom_counts = torch.zeros(
+        n_graphs,
+        dtype=torch.int32,
+        device=center.device,
+    )
+    if n_atoms == 0:
+        return isolated_atom_counts
+    if _triton_available and center.is_cuda:
+        # ``neighbor_list_nvidia`` sorts by batch and global center atom. A
+        # fixed-width lower bound avoids bincount + compare + reduction kernels.
+        _count_isolated_sorted_kernel[(n_atoms,)](
+            center,
+            batch_idx,
+            isolated_atom_counts,
+            center.shape[0],
+            SEARCH_STEPS=32,
+            num_warps=1,
+        )
+        return isolated_atom_counts
+
+    neighbor_counts = torch.bincount(center, minlength=n_atoms)
+    for graph_idx in range(n_graphs):
+        atom_ids = torch.where(batch_idx == graph_idx)[0]
+        isolated_atom_counts[graph_idx] = (neighbor_counts[atom_ids] == 0).sum()
+    return isolated_atom_counts
+
+
+def _line_graph_status(
+    pair_counts: Tensor,
+    atom_neighbor_counts: Tensor,
+) -> Tensor:
+    n_atoms = int(pair_counts.shape[0])
+    if (
+        _triton_available
+        and pair_counts.is_cuda
+        and n_atoms <= 65_536
+    ):
+        status = torch.empty(3, dtype=torch.int64, device=pair_counts.device)
+        block = triton.next_power_of_2(max(n_atoms, 1))
+        _line_graph_status_kernel[(1,)](
+            pair_counts,
+            atom_neighbor_counts,
+            status,
+            N_ATOMS=n_atoms,
+            BLOCK=block,
+            num_warps=8,
+        )
+        return status
+    return torch.stack(
+        [
+            pair_counts.sum(),
+            (atom_neighbor_counts == 0).sum(),
+            atom_neighbor_counts.sum(),
+        ]
+    )
+
+
+def _exact_isolated_count(center: Tensor, n_atoms: int) -> tuple[Tensor, int]:
+    count = (
+        torch.bincount(center, minlength=n_atoms) == 0
+    ).sum().reshape(1)
+    return count, int(count.item())
 
 
 def _materialize_line_graph_triton(
@@ -268,21 +435,55 @@ def _build_line_graph(
     dist: Tensor,
     n_atoms: int,
     cutoff: float,
-) -> Tensor:
+    atom_neighbor_counts: Tensor | None = None,
+    presorted: bool = False,
+) -> Tensor | tuple[Tensor, Tensor, int]:
     with nvtx_range("_build_line_graph"):
         device = center.device
         short_de = torch.where(dist < cutoff)[0]
         if short_de.numel() == 0:
-            return torch.empty((0, 5), dtype=torch.int32, device=device)
+            empty = torch.empty((0, 5), dtype=torch.int32, device=device)
+            if atom_neighbor_counts is None:
+                return empty
+            if center.shape[0] == 0:
+                isolated = torch.full((1,), n_atoms, dtype=torch.int64, device=device)
+                return empty, isolated, n_atoms
+            isolated, isolated_count = _exact_isolated_count(center, n_atoms)
+            return empty, isolated, isolated_count
 
-        sorted_center, order = center[short_de].sort(stable=True)
-        short_de = short_de[order]
+        if presorted:
+            # center is non-decreasing (neighbor-list argsort postcondition)
+            # and short_de is an ascending index subset, so the stable sort
+            # is the identity permutation.
+            sorted_center = center[short_de]
+        else:
+            sorted_center, order = center[short_de].sort(stable=True)
+            short_de = short_de[order]
         short_ude = directed2undirected[short_de].long()
         counts = torch.bincount(sorted_center.int(), minlength=n_atoms).long()
         pair_counts = counts * (counts - 1)
-        total_pairs = int(pair_counts.sum().item())
+        isolated_atom_counts = None
+        isolated_count = 0
+        if atom_neighbor_counts is None:
+            total_pairs = int(pair_counts.sum().item())
+        else:
+            graph_status = _line_graph_status(pair_counts, atom_neighbor_counts)
+            total_pairs, candidate_isolated, candidate_edges = (
+                int(value) for value in graph_status.tolist()
+            )
+            if candidate_edges == center.shape[0]:
+                isolated_atom_counts = graph_status[1:2]
+                isolated_count = candidate_isolated
+            else:
+                isolated_atom_counts, isolated_count = _exact_isolated_count(
+                    center,
+                    n_atoms,
+                )
         if total_pairs == 0:
-            return torch.empty((0, 5), dtype=torch.int32, device=device)
+            empty = torch.empty((0, 5), dtype=torch.int32, device=device)
+            if isolated_atom_counts is None:
+                return empty
+            return empty, isolated_atom_counts, isolated_count
 
         offsets = torch.zeros(n_atoms, dtype=torch.long, device=device)
         offsets[1:] = counts[:-1].cumsum(0)
@@ -298,7 +499,9 @@ def _build_line_graph(
             n_atoms,
         )
         if triton_line_graph is not None:
-            return triton_line_graph
+            if isolated_atom_counts is None:
+                return triton_line_graph
+            return triton_line_graph, isolated_atom_counts, isolated_count
 
         pair_atom = torch.repeat_interleave(torch.arange(n_atoms, device=device), pair_counts)
         local_idx = torch.arange(total_pairs, device=device) - pair_offsets[pair_atom]
@@ -309,7 +512,7 @@ def _build_line_graph(
         first_pos = offsets[pair_atom] + first_in_group
         second_pos = offsets[pair_atom] + second_in_group
 
-        return torch.stack(
+        line_graph = torch.stack(
             [
                 pair_atom.int(),
                 short_ude[first_pos].int(),
@@ -319,6 +522,9 @@ def _build_line_graph(
             ],
             dim=1,
         )
+        if isolated_atom_counts is None:
+            return line_graph
+        return line_graph, isolated_atom_counts, isolated_count
 
 
 def _extract_atoms(atoms_list, device: torch.device):
@@ -335,13 +541,13 @@ def _extract_atoms(atoms_list, device: torch.device):
     for graph_idx, atoms in enumerate(atoms_list):
         cell = torch.from_numpy(atoms.get_cell().array.astype(np.float32)).to(device)
         pos = torch.from_numpy(atoms.get_positions().astype(np.float32)).to(device)
-        frac = (pos @ torch.linalg.inv(cell)) % 1.0
+        frac = small_matmul(pos, torch.linalg.inv(cell)) % 1.0
         n_atoms = len(atoms)
         atomic_numbers.append(
             torch.tensor(atoms.get_atomic_numbers(), dtype=torch.int32, device=device)
         )
         frac_coords.append(frac)
-        positions.append(frac @ cell)
+        positions.append(small_matmul(frac, cell))
         cells.append(cell)
         pbc.append(torch.tensor(atoms.get_pbc(), dtype=torch.bool, device=device))
         batch_idx.append(torch.full((n_atoms,), graph_idx, dtype=torch.int32, device=device))
@@ -387,12 +593,12 @@ def _extract_tensor_system(
     if pbc.dim() != 1 or pbc.shape[0] != 3:
         raise ValueError(f"pbc must have shape (3,), got {tuple(pbc.shape)}")
 
-    frac = (positions @ torch.linalg.inv(cell)) % 1.0
+    frac = small_matmul(positions, torch.linalg.inv(cell)) % 1.0
     n_atoms = int(positions.shape[0])
     return {
         "atomic_numbers": atomic_numbers,
         "frac_coords": frac,
-        "positions": frac @ cell,
+        "positions": small_matmul(frac, cell),
         "cells": cell.unsqueeze(0),
         "pbc": pbc.unsqueeze(0),
         "batch_idx": torch.zeros(n_atoms, dtype=torch.int32, device=device),
@@ -409,6 +615,7 @@ def _split_graphs(
     directed2undirected: Tensor,
     undirected2directed: Tensor,
     line_graph: Tensor,
+    isolated_atom_counts: Tensor,
     atom_graph_cutoff: float,
     line_graph_cutoff: float,
 ) -> list[RadiusGraph]:
@@ -433,6 +640,8 @@ def _split_graphs(
                 line_graph_cutoff=line_graph_cutoff,
                 atom_target_sorted=True,
                 line_atom_sorted=True,
+                isolated_atom_count=isolated_atom_counts[0:1],
+                topology_evidence=_GPU_BUILDER_EVIDENCE,
             )
         ]
 
@@ -492,6 +701,10 @@ def _split_graphs(
                 line_graph_cutoff=line_graph_cutoff,
                 atom_target_sorted=True,
                 line_atom_sorted=True,
+                isolated_atom_count=isolated_atom_counts[
+                    graph_idx : graph_idx + 1
+                ],
+                topology_evidence=_GPU_BUILDER_EVIDENCE,
             )
         )
     return graphs
@@ -502,28 +715,65 @@ def _build_graphs_from_payload(
     atom_graph_cutoff: float,
     line_graph_cutoff: float,
     device: torch.device,
+    *,
+    check_isolated_atoms: bool = True,
 ) -> list[RadiusGraph]:
-    center, neighbor, images, dist = neighbor_list_nvidia(
-        payload["positions"],
-        payload["cells"],
-        atom_graph_cutoff,
-        payload["batch_idx"],
-        payload["pbc"],
-        device=device,
-    )
+    n_atoms = int(payload["atomic_numbers"].shape[0])
+    n_graphs = len(payload["atom_offsets"]) - 1
+    atom_neighbor_counts = None
+    if n_graphs == 1:
+        center, neighbor, images, dist, atom_neighbor_counts = neighbor_list_nvidia(
+            payload["positions"],
+            payload["cells"],
+            atom_graph_cutoff,
+            payload["batch_idx"],
+            payload["pbc"],
+            device=device,
+            return_num_neighbors=True,
+        )
+        if check_isolated_atoms and center.numel() == 0:
+            raise_if_isolated_atoms(n_atoms)
+        isolated_atom_counts = None
+    else:
+        center, neighbor, images, dist = neighbor_list_nvidia(
+            payload["positions"],
+            payload["cells"],
+            atom_graph_cutoff,
+            payload["batch_idx"],
+            payload["pbc"],
+            device=device,
+        )
+        isolated_atom_counts = _count_isolated_atoms(
+            center,
+            payload["batch_idx"],
+            n_atoms=n_atoms,
+            n_graphs=n_graphs,
+        )
+        if check_isolated_atoms:
+            raise_if_isolated_atoms(isolated_atom_counts)
+    presorted = _PRESORTED_BUILD and n_graphs == 1
     directed2undirected, undirected2directed = _build_d2u(
         center,
         neighbor,
         images,
-        int(payload["atomic_numbers"].shape[0]),
+        n_atoms,
+        presorted=presorted,
     )
-    line_graph = _build_line_graph(
+    line_graph_result = _build_line_graph(
         center,
         directed2undirected,
         dist,
-        int(payload["atomic_numbers"].shape[0]),
+        n_atoms,
         line_graph_cutoff,
+        atom_neighbor_counts=atom_neighbor_counts,
+        presorted=presorted,
     )
+    if n_graphs != 1:
+        line_graph = line_graph_result
+    else:
+        line_graph, isolated_atom_counts, isolated_count = line_graph_result
+        if check_isolated_atoms:
+            raise_if_isolated_atoms(isolated_count)
     return _split_graphs(
         payload,
         center,
@@ -532,6 +782,7 @@ def _build_graphs_from_payload(
         directed2undirected,
         undirected2directed,
         line_graph,
+        isolated_atom_counts,
         atom_graph_cutoff,
         line_graph_cutoff,
     )
@@ -550,6 +801,7 @@ class TensorGraphBuilder:
         line_graph_cutoff: float = 4.5,
         device: torch.device | str = "cuda",
         composition: str | None = None,
+        check_isolated_atoms: bool = True,
     ) -> None:
         self.device = _cuda_device(device)
         self.cell = cell.to(device=self.device, dtype=torch.float32)
@@ -567,6 +819,7 @@ class TensorGraphBuilder:
         self.compositions = [composition or ""]
         self.atom_graph_cutoff = float(atom_graph_cutoff)
         self.line_graph_cutoff = float(line_graph_cutoff)
+        self.check_isolated_atoms = bool(check_isolated_atoms)
 
         if self.cell.dim() != 2 or tuple(self.cell.shape) != (3, 3):
             raise ValueError(f"cell must have shape (3, 3), got {tuple(self.cell.shape)}")
@@ -588,11 +841,11 @@ class TensorGraphBuilder:
                     "positions must have the same length as atomic_numbers "
                     f"({positions.shape[0]} != {self.n_atoms})"
                 )
-            frac = (positions @ self.inv_cell) % 1.0
+            frac = small_matmul(positions, self.inv_cell) % 1.0
             payload = {
                 "atomic_numbers": self.atomic_numbers,
                 "frac_coords": frac,
-                "positions": frac @ self.cell,
+                "positions": small_matmul(frac, self.cell),
                 "cells": self.cells,
                 "pbc": self.pbc,
                 "batch_idx": self.batch_idx,
@@ -604,6 +857,7 @@ class TensorGraphBuilder:
                 self.atom_graph_cutoff,
                 self.line_graph_cutoff,
                 self.device,
+                check_isolated_atoms=self.check_isolated_atoms,
             )[0]
 
     __call__ = build
@@ -619,6 +873,7 @@ def tensors_to_graph_gpu(
     line_graph_cutoff: float = 4.5,
     device: torch.device | str = "cuda",
     composition: str | None = None,
+    check_isolated_atoms: bool = True,
 ) -> RadiusGraph:
     """Build a single-system RadiusGraph directly from CUDA/CPU tensors.
 
@@ -641,6 +896,7 @@ def tensors_to_graph_gpu(
             atom_graph_cutoff,
             line_graph_cutoff,
             device,
+            check_isolated_atoms=check_isolated_atoms,
         )[0]
 
 
@@ -650,19 +906,18 @@ def atoms_to_graph_gpu(
     atom_graph_cutoff: float = 6.0,
     line_graph_cutoff: float = 4.5,
     device: torch.device | str = "cuda",
+    check_isolated_atoms: bool = True,
 ) -> RadiusGraph | list[RadiusGraph]:
     device = _cuda_device(device)
     batched = not hasattr(atoms, "get_positions")
     atoms_list = list(atoms) if batched else [atoms]
     payload = _extract_atoms(atoms_list, device)
 
-    # NOTE: the per-step isolated-atom check (bincount + .item()) is intentionally
-    # omitted here — it forced two D2H syncs every step. Model readout handles
-    # isolated atoms on device; applications can opt into strict validation.
     graphs = _build_graphs_from_payload(
         payload,
         atom_graph_cutoff,
         line_graph_cutoff,
         device,
+        check_isolated_atoms=check_isolated_atoms,
     )
     return graphs if batched else graphs[0]

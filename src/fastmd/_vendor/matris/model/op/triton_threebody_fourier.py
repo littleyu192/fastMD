@@ -12,7 +12,8 @@ The Fourier frequencies must be frozen; backward returns gradients only for
 """
 from __future__ import annotations
 
-import os
+from fastmd._vendor.matris.config import env_value
+
 
 import torch
 import triton
@@ -22,7 +23,7 @@ from triton.language.extra import libdevice
 
 
 def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
+    value = env_value(name)
     if value is None:
         return default
     return int(value)

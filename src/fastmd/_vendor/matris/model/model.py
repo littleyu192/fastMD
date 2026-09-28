@@ -58,7 +58,7 @@ class MatRIS(nn.Module):
         is_conservation: bool = True,
         reference_energy: str | None = None,
         enable_compile: bool = False,
-        enable_checkpoint: bool | None = None,
+        enable_checkpoint: bool | None = False,
     ):
         """
         Args:
@@ -97,8 +97,9 @@ class MatRIS(nn.Module):
             reference_energy (str): refernece energy of 'str'(eg. MPtrj, OMat..) dataset(Caculated by linear regression).
                 more details can be found at reference_energy.py.
             enable_compile (bool): Whether to compile interaction blocks.
-            enable_checkpoint (bool | None): True forces checkpointing on,
-                False forces it off, and None keeps the automatic threshold.
+            enable_checkpoint (bool | None): False disables activation
+                checkpointing for inference performance, True forces
+                checkpointing on, and None uses the automatic threshold.
         """
         
         super().__init__()
@@ -156,8 +157,9 @@ class MatRIS(nn.Module):
                 activation_type=activation_type,
                 enable_compile=enable_compile,
                 enable_checkpoint=enable_checkpoint,
+                last_block=(layer_index == num_layers - 1),
             )
-            for _ in range(num_layers)
+            for layer_index in range(num_layers)
         ]
         self.interaction_block = nn.ModuleList(interaction_block)
 
@@ -229,6 +231,41 @@ class MatRIS(nn.Module):
             )
             readout_atom_mask = readout_atom_mask & real_atom_mask
         batch_graph['readout_atom_mask'] = readout_atom_mask
+
+        # Ragged single-system inference skips line-graph layers altogether
+        # when no real triplets exist. Dummy triplets in padded graphs must not
+        # activate those layers: their biases/residuals also update real bonds
+        # that have no incident triplets. Preserve that skip independently for
+        # each graph in a batch, using only device-side predicates so the same
+        # captured graph can disconnect and reconnect atoms during replay.
+        line_graph = batch_graph['line_graph_dict']
+        if len(line_graph['line_graph']) and (
+            real_counts is not None or batch_graph['num_graphs'] > 1
+        ):
+            line_atoms = line_graph['atom_list']
+            if real_counts is not None:
+                real_triplets = real_atom_mask[line_atoms]
+            else:
+                real_triplets = torch.ones_like(line_atoms, dtype=torch.bool)
+            if batch_graph['num_graphs'] == 1:
+                has_real_line_graph = real_triplets.any()
+            else:
+                atom_segment = batch_graph['atom_segment']
+                triplets_per_graph = torch.zeros(
+                    batch_graph['num_graphs'],
+                    dtype=torch.int32,
+                    device=line_atoms.device,
+                ).scatter_add_(
+                    0, atom_segment[line_atoms], real_triplets.to(torch.int32)
+                )
+                undirected_atom = batch_graph['atom_graph_dict']['target_index'][
+                    batch_graph['undirected2directed']
+                ]
+                has_real_line_graph = (
+                    triplets_per_graph.gt(0)[atom_segment[undirected_atom]]
+                    .unsqueeze(1)
+                )
+            batch_graph['_has_real_line_graph'] = has_real_line_graph
 
         # ======== Feature embedding ========
         node_feat = self.atom_embedding( batch_graph['atomic_numbers'] - 1 ) # atom type feature init (use 0 for 'H')
@@ -319,14 +356,20 @@ class MatRIS(nn.Module):
             return torch.full(
                 (num_graphs,), n_real, dtype=torch.int32, device=device
             )
-        counts = list(n_real)
-        if len(counts) != num_graphs:
-            raise ValueError(
-                f"n_real must contain {num_graphs} counts, got {len(counts)}"
-            )
+        else:
+            counts = list(n_real)
+            if len(counts) != num_graphs:
+                raise ValueError(
+                    f"n_real must contain {num_graphs} counts, got {len(counts)}"
+                )
         if any(count <= 0 for count in counts):
             raise ValueError("n_real counts must be positive")
-        return torch.tensor(counts, dtype=torch.int32, device=device)
+        return torch.stack(
+            [
+                torch.full((), count, dtype=torch.int32, device=device)
+                for count in counts
+            ]
+        )
     
     def get_params(self) -> int:
         """Return the number of parameters in the model."""
@@ -348,7 +391,7 @@ class MatRIS(nn.Module):
         model_name: str = "matris_10m_oam",
         device: str | None = None,
         enable_compile: bool = False,
-        enable_checkpoint: bool | None = None,
+        enable_checkpoint: bool | None = False,
     ):
         """Load pretrained model.
 
@@ -357,8 +400,9 @@ class MatRIS(nn.Module):
             model_name: Pretrained model name to load when model_path is omitted.
             device: Device to load the model on.
             enable_compile: Whether to compile interaction blocks.
-            enable_checkpoint: True forces checkpointing on, False forces it off,
-                and None keeps the original automatic threshold.
+            enable_checkpoint: False disables activation checkpointing for
+                inference performance, True forces checkpointing on, and None
+                uses the automatic threshold.
         """
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"

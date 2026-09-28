@@ -1,51 +1,97 @@
-# 从三个分支迁移到 fastMD
+# Inference migration
 
-## 原代码职责
+fastMD exposes one ASE Calculator backed by lazy model adapters. The original
+repositories and the supplied reproduction bundle remain independent of the
+installed package. No training utilities, platform-specific binaries, benchmark
+HDF5 datasets, or MACE/MatRIS checkpoints are required from adjacent directories.
 
-| 来源 | 模型 | 建图 | 捕获实现 | 原调用入口 |
-| --- | --- | --- | --- | --- |
-| `main` | `matris/model` | `graph/gpu_graph_builder.py`、`RadiusGraph` | `applications/cuda_graph.py` 的容量分桶、静态 workspace、sink padding | `MatRISCalculator`；另有独立 GPU MD |
-| `origin/CHGNet_CG` | `chgnet/model` | `graph/gpu_graph_builder.py`、`CrystalGraph` | `model/cuda_graph.py` 的容量分桶、组合能修正 | 原 ASE calculator 不直接接入该 runner；GPU MD 单独使用 |
-| `origin/ALIGNN_CG` | `alignn/models` | DGL 和 tensor radius graph | `ff/cuda_graph.py` 的 `ModelCUDAGraphRunner` 和整步 runner | ASE calculator、GPU MD 各有入口 |
+## Sources
 
-三个分支并不是同一包的三个可同时安装的简单插件，而是各自带模型源码的代码树。
-具体来源 commit 及文件清单在 [sources.json](sources.json)。
+| Backend | Source | Integration |
+| --- | --- | --- |
+| MatRIS | Optimized `reb/third_party/matris-09bk` at `ab9ece74`, plus all five bundled patches through `1faa60f9` | Topology profile, typed scoped settings, bucketed graph runner |
+| CHGNet | `origin/CHGNet_CG` at `1d362271` | Model graph runner connected directly to ASE; composition-energy correction |
+| ALIGNN | `origin/ALIGNN_CG` at `b2ac35d5` | Minimal inference context for the model graph runner |
+| MACE | `reb/mace_opt`, targeting `mace-torch==0.3.16` | Tensor inputs, Triton neighbor lists, fused forward/backward and optional compiled modules |
 
-## 新的公共结构
+The complete file inventory, source hashes, patch hashes and local adaptations
+are in [sources.json](sources.json). Retained source licenses and attribution
+are listed in [../NOTICE](../NOTICE).
 
-`calculator.py` 只处理 ASE 行为：缓存、属性、单位约定、数组所有权、形状和有限值检查。
-`models/base.py` 处理设备选择、能力声明、已知回退、结构签名与捕获失效。
-`models/registry.py` 惰性加载模型，非 ALIGNN 用户无需在 import fastmd 时导入 DGL。
-各模型适配器负责 checkpoint、原始预测格式、总能量/应力转换、捕获 runner 和统计。
+## Public boundaries
 
-`_vendor` 是当前第一阶段重构保留的推理内核边界，内部仍包含原项目风格的代码。
-绝对包导入迁移到 `fastmd._vendor.*`，避免覆盖环境中上游同名包。
-只迁移推理相关 Python 和必需数据，没有迁移训练工具、旧样例或平台相关 `.so` 文件。
-ALIGNN 的捕获模块与旧 GPU MD 类型位于同一文件，因原模块依赖保留少量 MD 支持文件；
-这些不是 fastMD 的公共接口。后续可逐项拆分，不在尚未完成 GPU 数值验证前改写数值内核。
+- `calculator.py`: ASE caching, requested properties, result ownership, units,
+  finite-value/shape checks and `free_energy` compatibility.
+- `models/base.py`: device selection, declared capabilities, explicit fallback,
+  and capture invalidation on species/order, atom count, cell or PBC changes.
+- `models/registry.py`: lazy factories; adding a model does not add branches to
+  the common Calculator or eagerly import unrelated optional dependencies.
+- `models/<model>.py`: checkpoint loading, native inputs, graph runner ownership,
+  extensive energy/ASE stress conversion and statistics.
+- `_vendor/`: private numerical implementations and source-level attribution.
+  Import paths, scoped MatRIS module bindings, the tuning subprocess and MatRIS
+  custom-op registrations use private namespaces.
 
-## 本次解决的接口问题
+One backend belongs to one serial workflow. Returned NumPy arrays own their
+storage, so later graph replays cannot overwrite previously returned values.
+Known capability limitations can fall back in `auto`; unexpected runtime
+errors propagate. Failed calculations clear ASE results before inference.
 
-- CHGNet 的模型捕获不再要求用户创建 GPU MD 对象；ALIGNN 使用最小推理上下文驱动 runner。
-- CHGNet 推理不再导入无关的 VASP 解析工具，NVML 只在显式请求显存排序时导入。
-- 用户用同一个 `FastMDCalculator` 入口，显式能力表防止把 stress/magmoms 宣称为已捕获。
-- 默认每次力评估也返回能量，避免 ASE 连续询问 energy/forces 时重复计算。
-- 能量输出统一为总能 eV，MatRIS/CHGNet 的 GPa 应力转为 ASE eV/Å³。
-- 实现 `free_energy`，适配 ASE force-consistent 优化器。
-- 按元素（含顺序）、原子数、cell、PBC 失效捕获，特别处理 CHGNet 捕获时固定的组合能。
-- MatRIS 按任务变化重建 runner，避免 EF 捕获被拿去读取应力或磁矩。
-- 返回结果做独立复制，避免 replay 修改用户已保存的结果。
-- 计算失败先清空 ASE 结果，避免新结构获得旧结果。
-- 对当前不支持的非周期/部分周期体系直接报错，防止原 MatRIS calculator 修改用户晶胞。
-- 修改私有 MatRIS converter，使显式 CPU 配置在有 GPU 的主机上仍遵守 legacy 建图选择。
-- 公开的容量和预热配置从 runner 的环境变量覆盖改为实例参数。
-- 捕获缓存有数量上限；未知模型错误或 CUDA 错误向上传播，不静默掩盖。
+## Optimized MatRIS
 
-## 本次范围
+The `topology` profile is now the default whenever `enable_fusions=True`.
+It connects verified graph topology to indexed projections, merged frozen
+projections, segmented attention/reductions and the other eligible Triton
+lowerings. Selection remains conditional on row counts, device, dtype and
+feature widths. `enable_fusions=False` selects the generic profile.
+Activation checkpointing is disabled for coordinate/strain inference.
 
-本版优先让用户在 ASE 中调用模型级 CUDA Graph。没有统一整步 GPU 积分器，没有增加训练接口，
-没有承诺所有 WBM 模型或批处理均已适配。原仓库、分支、权重文件保持原状。
+The five source patches cover:
 
-架构参考 [TorchSim ModelInterface](https://github.com/TorchSim/torch-sim/blob/main/torch_sim/models/interface.py)
-的统一模型接口及能力声明。fastMD 自己的接口直接接收 ASE `Atoms`，不复制 TorchSim 的状态格式，
-也没有复制其实现源码。其批处理、GPU 常驻状态可作为后续独立扩展的参考。
+1. Fixed-capacity edge overflow at the sentinel boundary.
+2. Lattice/fractional-coordinate matrix multiplication without TF32 loss.
+3. GPU logging producer/consumer stream ordering.
+4. Native ASE-order Nose–Hoover chain integration.
+5. Thread-local CUDA capture and logger failure handling.
+
+Single-GPU application sources carrying these fixes are preserved privately.
+Only inference is exposed through the public Calculator. Distributed experiments
+and the separate M3GNet integration are excluded. Optional Blackwell CuTeDSL
+sources and operator compilation are retained; default inference uses the
+portable PyTorch GEMM backend and does not require CuTeDSL.
+
+## MACE
+
+The migrated numerical runtime comprises `tensor_batch.py`, `neighbors.py`,
+`fast_forward.py`, and `fusion/`. Benchmark-specific MD drivers, whole-step NHC
+capture, frame loggers and HDF5 fixtures are outside the ASE inference adapter.
+
+The public runner captures both neighbor maintenance and model derivatives.
+Fixed species/cell data remain on the GPU. A skin allows candidate-list reuse;
+Triton kernels filter active edges on every evaluation. Every replay checks
+neighbor consistency and capacity. Overflow invalidates captured pointers,
+grows storage, forces a complete candidate rebuild and retries the same input.
+Predictions from truncated lists are never returned.
+
+`plain` captures upstream MACE, `fast` enables the migrated edge and derivative
+fusions, and `fast_cm` also compiles original GEMM-level submodules. The latter
+reports per-module eager fallbacks. CPU and explicitly eager inference use
+upstream MACE for a reference. MP-0 medium and MPA-0 medium are the initial
+supported CUDA architectures; this is not a claim of universal MACE support.
+
+Local adaptations remove the optimizer package's import-time loading environment
+mutation, restore default dtype on exceptions, validate checkpoint paths, support
+explicit heads, scope compiler limits, and select indexed CUDA devices correctly
+when enabling optional cuEquivariance convolution fusion.
+
+## Scope and performance
+
+ASE still owns integration, constraints and callbacks. MACE's captured neighbor
+update reduces work inside an inference call, but it does not make ASE's MD loop
+a whole-step CUDA graph. The reproduction bundle's NHC throughput numbers are
+not transferred to fastMD as measured speedups. See [validation.md](validation.md)
+and use the comparison script on the target GPU and actual structures.
+
+TorchSim inspired the adapter/capability boundary; it is not a dependency. The
+current API handles one ASE structure at a time. Future WBM model adapters and
+batched tensor interfaces can extend that boundary independently.

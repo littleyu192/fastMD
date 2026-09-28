@@ -74,27 +74,22 @@ class EnergyHead(nn.Module):
         Args:
             node_feat : Tensor(N_atoms, feat_dim) – atomic feature vectors.
             n_real : one real-atom count per graph for the static padded path.
+                Atoms after that graph-local count are dummy sinks and are
+                excluded from the energy reduction.
         """
         energies = self.energy_head(node_feat)  # (N_atoms, output_dim)
         atom_mask = batch_graph.get("readout_atom_mask")
         if atom_mask is None:
             atom_mask = batch_graph.get("atom_active_mask")
-        if (
-            atom_mask is not None
-            and n_real is not None
-            and "readout_atom_mask" not in batch_graph
-        ):
+        if n_real is not None and "readout_atom_mask" not in batch_graph:
             masks = [
                 torch.arange(n_atoms, device=energies.device) < n_real[index]
                 for index, n_atoms in enumerate(batch_graph['atoms_per_graph'])
             ]
-            atom_mask = atom_mask & torch.cat(masks)
-        elif atom_mask is None and n_real is not None:
-            masks = [
-                torch.arange(n_atoms, device=energies.device) < n_real[index]
-                for index, n_atoms in enumerate(batch_graph['atoms_per_graph'])
-            ]
-            atom_mask = torch.cat(masks)
+            real_atom_mask = torch.cat(masks)
+            atom_mask = (
+                real_atom_mask if atom_mask is None else atom_mask & real_atom_mask
+            )
         if atom_mask is not None:
             energies = energies.masked_fill(~atom_mask.unsqueeze(1), 0)
         total_energy = self.pooling(energies, batch_graph['atom_segment'], num_segment=batch_graph['num_graphs']).view(-1)  # (N_graphs,)

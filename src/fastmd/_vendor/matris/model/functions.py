@@ -1,38 +1,36 @@
 from __future__ import annotations
 
+from fastmd._vendor.matris.config import env_value
+
 from collections.abc import Sequence
-import os
 
 import torch
 from torch import Tensor, nn
 import math
 from .op import fused_silu, fused_sigmoid
 
-# The crossover is workload/GPU dependent and can be tuned without changing
-# model code.  Below the threshold PyTorch's LayerNorm kernels are faster.
-_LN_FUSE_THRESH = int(os.getenv("MATRIS_GATED_LN_FUSE_MIN_ROWS", "10000"))
-_SEGMENT_SOFTMAX_FUSION_ENABLED = os.getenv(
-    "MATRIS_FUSED_SEGMENT_SOFTMAX", "1"
-) != "0"
-_GATED_LN_FUSION_ENABLED = os.getenv("MATRIS_FUSED_GATED_LN", "1") != "0"
-_FUSED_GATED_LN_RESIDUAL = os.getenv(
-    "MATRIS_FUSED_GATED_LN_RESIDUAL", "1"
-) != "0"
-_MODEL_FUSIONS_ENABLED = os.getenv("MATRIS_MODEL_FUSIONS", "1") != "0"
-_ACT_SILU = 1
-_ACT_SIGMOID = 2
-
-
-def set_model_fusions_enabled(enabled: bool) -> bool:
-    """Set the process-local generic fusion switch and return its old value."""
-    global _MODEL_FUSIONS_ENABLED
-    previous = _MODEL_FUSIONS_ENABLED
-    _MODEL_FUSIONS_ENABLED = bool(enabled)
-    return previous
-
-
-def model_fusions_enabled() -> bool:
-    return _MODEL_FUSIONS_ENABLED
+# Row-count threshold above which the fused Triton LayerNorm+activation (Fusion C)
+# is used instead of eager nn.LayerNorm+act.
+_LN_FUSE_THRESH = int(env_value("MATRIS_GATED_LN_FUSE_MIN_ROWS", "10000"))
+_FUSED_GATED_LN_RESIDUAL = env_value("MATRIS_FUSED_GATED_LN_RESIDUAL", "1") != "0"
+_FUSED_SEGMENT_SOFTMAX = env_value("MATRIS_FUSED_SEGMENT_SOFTMAX", "1") != "0"
+_INDEXED_CAT_LINEAR_FUSE = env_value("MATRIS_FUSED_INDEXED_CAT_LINEAR", "0") == "1"
+_INDEXED_CAT_LINEAR_BACKEND = env_value(
+    "MATRIS_FUSED_INDEXED_CAT_LINEAR_BACKEND", "decomposed_indexed_silu"
+).lower()
+_INDEXED_CAT_LINEAR_MIN_ROWS = int(
+    env_value("MATRIS_INDEXED_CAT_LINEAR_MIN_ROWS", "20000")
+)
+_INDEXED_CAT_LINEAR_BACKENDS = {
+    "cutedsl_dense_silu",
+    "decomposed_indexed_silu",
+}
+if _INDEXED_CAT_LINEAR_FUSE and _INDEXED_CAT_LINEAR_BACKEND not in _INDEXED_CAT_LINEAR_BACKENDS:
+    raise ValueError(
+        "unsupported MATRIS_FUSED_INDEXED_CAT_LINEAR_BACKEND="
+        f"{_INDEXED_CAT_LINEAR_BACKEND!r}; expected one of "
+        f"{sorted(_INDEXED_CAT_LINEAR_BACKENDS)}"
+    )
 
 class FusedSiLU(torch.nn.Module):
     """Fused Sigmoid Linear Unit."""
@@ -143,15 +141,12 @@ def Dimwise_softmax(feas: Tensor, segment: Tensor, num_segment=None) -> Tensor:
     num, dim = feas.shape
     if num_segment is None:
         num_segment = int(segment.max()) + 1
-    if (
-        _MODEL_FUSIONS_ENABLED
-        and _SEGMENT_SOFTMAX_FUSION_ENABLED
-        and feas.is_cuda
-    ):
+    if feas.is_cuda and _FUSED_SEGMENT_SOFTMAX:
+        # Fusion A: single fused Triton segment-softmax (3 fwd + 2 bwd kernels)
+        # replacing ~8 eager ops; validated exact (FP64 gradcheck) and 2-2.6x faster.
         from .op.triton_segment_softmax import fused_segment_softmax
-
         return fused_segment_softmax(feas, segment, num_segment)
-    
+
     segment_expanded = segment.unsqueeze(1).expand(-1, dim) # [num, dim]
     
     feas_max = torch.empty( num_segment, dim, dtype=feas.dtype, device=feas.device )
@@ -345,72 +340,55 @@ class GatedMLP(nn.Module):
             bias=bias,
             use_fp16=use_fp16,
         )
-
-        # This fusion is generic: it only depends on LayerNorm and activation
-        # types, rather than any MatRIS graph semantics.
+        # Fusion C: fuse LayerNorm+activation when the norm is LayerNorm and the
+        # activations are SiLU(core)/Sigmoid(gate). Only applied to large row counts
+        # (line-graph tensors), where the fused Triton kernel is a net win (~2.6x);
+        # torch's LayerNorm already wins at small row counts, so guard by a threshold.
+        from .op.triton_layernorm_act import ACT_SILU, ACT_SIGMOID
         self._fuse_ln = (
             isinstance(self.core_norm, nn.LayerNorm)
             and isinstance(self.gate_norm, nn.LayerNorm)
             and isinstance(self.activation_func, FusedSiLU)
             and isinstance(self.activation_gate, FusedSigmoid)
         )
-        # Keep Triton as a lazy CUDA-only dependency; these values mirror the
-        # public activation constants in triton_layernorm_act.
-        self._core_act, self._gate_act = _ACT_SILU, _ACT_SIGMOID
+        self._core_act, self._gate_act = ACT_SILU, ACT_SIGMOID
+        self._indexed_cat_linear_cache_key = None
+        self._indexed_cat_linear_weight = None
+        self._indexed_cat_linear_bias = None
+        self._indexed_cat_linear_split_cache_key = None
+        self._indexed_cat_linear_split_weights = None
+        self._indexed_cat_linear_split_bias = None
 
     def _finish_gate(self, core_x: Tensor, gate_x: Tensor) -> Tensor:
         if self.gate_norm is None:
-            return self.activation_func(core_x) * self.activation_gate(gate_x)
-
-        if (
-            _MODEL_FUSIONS_ENABLED
-            and _GATED_LN_FUSION_ENABLED
-            and self._fuse_ln
-            and core_x.is_cuda
-            and core_x.shape[0] >= _LN_FUSE_THRESH
-        ):
-            core_norm = self.core_norm
-            gate_norm = self.gate_norm
+            core = self.activation_func(core_x)
+            gate = self.activation_gate(gate_x)
+        elif self._fuse_ln and core_x.is_cuda and core_x.shape[0] >= _LN_FUSE_THRESH:
+            cn, gn = self.core_norm, self.gate_norm
             if not (
-                core_norm.weight.requires_grad
-                or core_norm.bias.requires_grad
-                or gate_norm.weight.requires_grad
-                or gate_norm.bias.requires_grad
+                cn.weight.requires_grad
+                or cn.bias.requires_grad
+                or gn.weight.requires_grad
+                or gn.bias.requires_grad
             ):
                 from .op.triton_gated_ln import fused_gated_ln
-
                 return fused_gated_ln(
                     core_x,
                     gate_x,
-                    core_norm.weight,
-                    core_norm.bias,
-                    gate_norm.weight,
-                    gate_norm.bias,
-                    core_norm.eps,
-                    gate_norm.eps,
+                    cn.weight,
+                    cn.bias,
+                    gn.weight,
+                    gn.bias,
+                    cn.eps,
+                    gn.eps,
                 )
-
             from .op.triton_layernorm_act import fused_ln_act
-
-            core = fused_ln_act(
-                core_x,
-                core_norm.weight,
-                core_norm.bias,
-                core_norm.eps,
-                self._core_act,
-            )
-            gate = fused_ln_act(
-                gate_x,
-                gate_norm.weight,
-                gate_norm.bias,
-                gate_norm.eps,
-                self._gate_act,
-            )
-            return core * gate
-
-        core = self.activation_func(self.core_norm(core_x))
-        gate = self.activation_gate(self.gate_norm(gate_x))
-        return core * gate
+            core = fused_ln_act(core_x, cn.weight, cn.bias, cn.eps, self._core_act)
+            gate = fused_ln_act(gate_x, gn.weight, gn.bias, gn.eps, self._gate_act)
+        else:
+            core = self.activation_func(self.core_norm(core_x))
+            gate = self.activation_gate(self.gate_norm(gate_x))
+        return core * gate # gate mul
 
     def forward_with_residual(
         self,
@@ -418,8 +396,7 @@ class GatedMLP(nn.Module):
         residual: Tensor,
         res_weight: Tensor,
     ) -> Tensor | None:
-        """Fuse the frozen GatedMLP epilogue with its weighted residual."""
-        if not model_fusions_enabled() or not _FUSED_GATED_LN_RESIDUAL:
+        if not _FUSED_GATED_LN_RESIDUAL:
             return None
         if not (
             self._fuse_ln
@@ -432,13 +409,12 @@ class GatedMLP(nn.Module):
             and not res_weight.requires_grad
         ):
             return None
-        core_norm = self.core_norm
-        gate_norm = self.gate_norm
+        cn, gn = self.core_norm, self.gate_norm
         if (
-            core_norm.weight.requires_grad
-            or core_norm.bias.requires_grad
-            or gate_norm.weight.requires_grad
-            or gate_norm.bias.requires_grad
+            cn.weight.requires_grad
+            or cn.bias.requires_grad
+            or gn.weight.requires_grad
+            or gn.bias.requires_grad
         ):
             return None
         core_x = self.mlp_core(feas)
@@ -450,15 +426,351 @@ class GatedMLP(nn.Module):
         return fused_gated_ln_residual(
             core_x,
             gate_x,
-            core_norm.weight,
-            core_norm.bias,
-            gate_norm.weight,
-            gate_norm.bias,
+            cn.weight,
+            cn.bias,
+            gn.weight,
+            gn.bias,
             residual,
             res_weight,
-            core_norm.eps,
-            gate_norm.eps,
+            cn.eps,
+            gn.eps,
         )
+
+    def _first_linear_modules(self) -> tuple[nn.Linear, nn.Linear] | None:
+        if len(self.mlp_core.layers) == 0 or len(self.mlp_gate.layers) == 0:
+            return None
+        core_linear = self.mlp_core.layers[0]
+        gate_linear = self.mlp_gate.layers[0]
+        if not isinstance(core_linear, nn.Linear) or not isinstance(gate_linear, nn.Linear):
+            return None
+        return core_linear, gate_linear
+
+    def _can_fuse_indexed_cat_first_linear(self, rows: int, dim: int, parts: int) -> bool:
+        if not _INDEXED_CAT_LINEAR_FUSE:
+            return False
+        if self.use_fp16 or self.gate_norm is None or not self._fuse_ln:
+            return False
+        if rows < _INDEXED_CAT_LINEAR_MIN_ROWS:
+            return False
+        modules = self._first_linear_modules()
+        if modules is None:
+            return False
+        core_linear, gate_linear = modules
+        input_dim = parts * dim
+        if (
+            core_linear.in_features != input_dim
+            or gate_linear.in_features != input_dim
+            or core_linear.out_features != gate_linear.out_features
+        ):
+            return False
+        if (core_linear.bias is None) != (gate_linear.bias is None):
+            return False
+        tensors = [core_linear.weight, gate_linear.weight]
+        if core_linear.bias is not None:
+            tensors += [core_linear.bias, gate_linear.bias]
+        tensors += [self.core_norm.weight, self.core_norm.bias, self.gate_norm.weight, self.gate_norm.bias]
+        return not any(t.requires_grad for t in tensors)
+
+    def _merged_first_linear_params(
+        self,
+        rows: int,
+        dim: int,
+        parts: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[Tensor, Tensor | None] | None:
+        if not self._can_fuse_indexed_cat_first_linear(rows, dim, parts):
+            return None
+        modules = self._first_linear_modules()
+        if modules is None:
+            return None
+        core_linear, gate_linear = modules
+        if core_linear.weight.device != device or core_linear.weight.dtype != dtype:
+            return None
+        if gate_linear.weight.device != device or gate_linear.weight.dtype != dtype:
+            return None
+        bias_key = ()
+        if core_linear.bias is not None:
+            if core_linear.bias.device != device or core_linear.bias.dtype != dtype:
+                return None
+            if gate_linear.bias.device != device or gate_linear.bias.dtype != dtype:
+                return None
+            bias_key = (
+                core_linear.bias.data_ptr(),
+                gate_linear.bias.data_ptr(),
+                core_linear.bias._version,
+                gate_linear.bias._version,
+            )
+        key = (
+            core_linear.weight.data_ptr(),
+            gate_linear.weight.data_ptr(),
+            core_linear.weight._version,
+            gate_linear.weight._version,
+            device,
+            dtype,
+            dim,
+            parts,
+            bias_key,
+        )
+        if self._indexed_cat_linear_cache_key != key:
+            if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+                return None
+            with torch.no_grad():
+                self._indexed_cat_linear_weight = torch.cat(
+                    [core_linear.weight.detach(), gate_linear.weight.detach()],
+                    dim=0,
+                ).contiguous()
+                if core_linear.bias is None:
+                    self._indexed_cat_linear_bias = None
+                else:
+                    self._indexed_cat_linear_bias = torch.cat(
+                        [core_linear.bias.detach(), gate_linear.bias.detach()],
+                        dim=0,
+                    ).contiguous()
+                self._indexed_cat_linear_cache_key = key
+        return self._indexed_cat_linear_weight, self._indexed_cat_linear_bias
+
+    def _split_first_linear_params(
+        self,
+        rows: int,
+        dim: int,
+        parts: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[tuple[Tensor, ...], Tensor | None] | None:
+        if not self._can_fuse_indexed_cat_first_linear(rows, dim, parts):
+            return None
+        modules = self._first_linear_modules()
+        if modules is None:
+            return None
+        core_linear, gate_linear = modules
+        if core_linear.weight.device != device or core_linear.weight.dtype != dtype:
+            return None
+        if gate_linear.weight.device != device or gate_linear.weight.dtype != dtype:
+            return None
+        bias_key = ()
+        if core_linear.bias is not None:
+            if core_linear.bias.device != device or core_linear.bias.dtype != dtype:
+                return None
+            if gate_linear.bias.device != device or gate_linear.bias.dtype != dtype:
+                return None
+            bias_key = (
+                core_linear.bias.data_ptr(),
+                gate_linear.bias.data_ptr(),
+                core_linear.bias._version,
+                gate_linear.bias._version,
+            )
+        key = (
+            core_linear.weight.data_ptr(),
+            gate_linear.weight.data_ptr(),
+            core_linear.weight._version,
+            gate_linear.weight._version,
+            device,
+            dtype,
+            dim,
+            parts,
+            bias_key,
+        )
+        if self._indexed_cat_linear_split_cache_key != key:
+            if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+                return None
+            with torch.no_grad():
+                weights = []
+                for part in range(parts):
+                    start = part * dim
+                    end = start + dim
+                    weights.append(
+                        torch.cat(
+                            [
+                                core_linear.weight.detach()[:, start:end],
+                                gate_linear.weight.detach()[:, start:end],
+                            ],
+                            dim=0,
+                        ).contiguous()
+                    )
+                self._indexed_cat_linear_split_weights = tuple(weights)
+                if core_linear.bias is None:
+                    self._indexed_cat_linear_split_bias = None
+                else:
+                    self._indexed_cat_linear_split_bias = torch.cat(
+                        [core_linear.bias.detach(), gate_linear.bias.detach()],
+                        dim=0,
+                    ).contiguous()
+                self._indexed_cat_linear_split_cache_key = key
+        return self._indexed_cat_linear_split_weights, self._indexed_cat_linear_split_bias
+
+    @staticmethod
+    def _run_after_first(mlp: MLP, x: Tensor) -> Tensor:
+        for layer in list(mlp.layers)[1:]:
+            x = layer(x)
+        return x
+
+    @staticmethod
+    def _run_after_first_activation(mlp: MLP, x: Tensor) -> Tensor:
+        for layer in list(mlp.layers)[2:]:
+            x = layer(x)
+        return x
+
+    def aligned_first_linear_block(
+        self,
+        rows: int,
+        dim: int,
+        parts: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor | None:
+        """Aligned-column block of the split first linear ([2H, dim]) or None.
+
+        Lets a caller merge the p0 projection into a wider frozen GEMM and
+        pass the result back via ``precomputed_p0``. Only valid for the
+        decomposed backend, under the same fusion guards.
+        """
+        if _INDEXED_CAT_LINEAR_BACKEND != "decomposed_indexed_silu":
+            return None
+        params = self._split_first_linear_params(rows, dim, parts, device, dtype)
+        if params is None:
+            return None
+        weights, _ = params
+        return weights[0]
+
+    def forward_aligned_gather_cat3(
+        self,
+        aligned: Tensor,
+        gathered: Tensor,
+        index_a: Tensor,
+        index_b: Tensor,
+        index_a_sorted: bool = False,
+        precomputed_p0: Tensor | None = None,
+    ) -> Tensor | None:
+        if not (
+            aligned.is_cuda
+            and gathered.is_cuda
+            and (aligned.is_contiguous() or precomputed_p0 is not None)
+            and gathered.is_contiguous()
+        ):
+            return None
+        rows, dim = aligned.shape
+        if _INDEXED_CAT_LINEAR_BACKEND == "decomposed_indexed_silu":
+            params = self._split_first_linear_params(
+                rows, dim, 3, aligned.device, aligned.dtype
+            )
+            if params is None:
+                return None
+            weights, bias = params
+            from .op.decomposed_indexed_cat_silu_linear import (
+                decomposed_indexed_cat3_silu_linear,
+            )
+
+            fused_first = decomposed_indexed_cat3_silu_linear(
+                aligned,
+                gathered,
+                index_a,
+                index_b,
+                weights,
+                bias,
+                index_a_sorted,
+                precomputed_p0=precomputed_p0,
+            )
+            if fused_first is None:
+                return None
+            core_first, gate_first = fused_first
+            core_x = self._run_after_first_activation(self.mlp_core, core_first)
+            gate_x = self._run_after_first_activation(self.mlp_gate, gate_first)
+            return self._finish_gate(core_x, gate_x)
+
+        params = self._merged_first_linear_params(rows, dim, 3, aligned.device, aligned.dtype)
+        if params is None:
+            return None
+        weight, bias = params
+        if _INDEXED_CAT_LINEAR_BACKEND == "cutedsl_dense_silu":
+            from .op.triton_gather_cat import aligned_gather_cat3
+            from .op.cutedsl_dense_silu_linear import cutedsl_dense_silu_linear
+
+            merged_input = aligned_gather_cat3(aligned, gathered, index_a, index_b)
+            fused_first = cutedsl_dense_silu_linear(merged_input, weight, bias)
+            if fused_first is None:
+                return None
+            core_first, gate_first = fused_first
+            core_x = self._run_after_first_activation(self.mlp_core, core_first)
+            gate_x = self._run_after_first_activation(self.mlp_gate, gate_first)
+            return self._finish_gate(core_x, gate_x)
+        return None
+
+    def forward_aligned_gather_cat4(
+        self,
+        aligned: Tensor,
+        gathered_a: Tensor,
+        index_a: Tensor,
+        gathered_b: Tensor,
+        index_b: Tensor,
+        index_c: Tensor,
+        index_a_sorted: bool = False,
+        precomputed_p0: Tensor | None = None,
+    ) -> Tensor | None:
+        if not (
+            aligned.is_cuda
+            and gathered_a.is_cuda
+            and gathered_b.is_cuda
+            and (aligned.is_contiguous() or precomputed_p0 is not None)
+            and gathered_a.is_contiguous()
+            and gathered_b.is_contiguous()
+        ):
+            return None
+        rows, dim = aligned.shape
+        if _INDEXED_CAT_LINEAR_BACKEND == "decomposed_indexed_silu":
+            params = self._split_first_linear_params(
+                rows, dim, 4, aligned.device, aligned.dtype
+            )
+            if params is None:
+                return None
+            weights, bias = params
+            from .op.decomposed_indexed_cat_silu_linear import (
+                decomposed_indexed_cat4_silu_linear,
+            )
+
+            fused_first = decomposed_indexed_cat4_silu_linear(
+                aligned,
+                gathered_a,
+                index_a,
+                gathered_b,
+                index_b,
+                index_c,
+                weights,
+                bias,
+                index_a_sorted,
+                precomputed_p0=precomputed_p0,
+            )
+            if fused_first is None:
+                return None
+            core_first, gate_first = fused_first
+            core_x = self._run_after_first_activation(self.mlp_core, core_first)
+            gate_x = self._run_after_first_activation(self.mlp_gate, gate_first)
+            return self._finish_gate(core_x, gate_x)
+
+        params = self._merged_first_linear_params(rows, dim, 4, aligned.device, aligned.dtype)
+        if params is None:
+            return None
+        weight, bias = params
+        if _INDEXED_CAT_LINEAR_BACKEND == "cutedsl_dense_silu":
+            from .op.triton_gather_cat import aligned_gather_cat4
+            from .op.cutedsl_dense_silu_linear import cutedsl_dense_silu_linear
+
+            merged_input = aligned_gather_cat4(
+                aligned,
+                gathered_a,
+                index_a,
+                gathered_b,
+                index_b,
+                index_c,
+            )
+            fused_first = cutedsl_dense_silu_linear(merged_input, weight, bias)
+            if fused_first is None:
+                return None
+            core_first, gate_first = fused_first
+            core_x = self._run_after_first_activation(self.mlp_core, core_first)
+            gate_x = self._run_after_first_activation(self.mlp_gate, gate_first)
+            return self._finish_gate(core_x, gate_x)
+        return None
 
     def forward(self, feas: Tensor) -> Tensor:
         """

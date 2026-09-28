@@ -6,7 +6,8 @@ input gradients for ``delta`` and ``residual`` and no parameter gradient.
 """
 from __future__ import annotations
 
-import os
+from fastmd._vendor.matris.config import env_value
+
 
 import torch
 import triton
@@ -15,7 +16,7 @@ from torch.autograd import Function
 
 
 def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
+    value = env_value(name)
     if value is None:
         return default
     return int(value)
@@ -31,7 +32,7 @@ def _residual_add_fwd(
     residual,
     weight,
     out,
-    N,
+    N: tl.constexpr,
     D: tl.constexpr,
     BM: tl.constexpr,
     BD: tl.constexpr,
@@ -51,7 +52,7 @@ def _residual_add_bwd(
     gout,
     weight,
     grad_residual,
-    N,
+    N: tl.constexpr,
     D: tl.constexpr,
     BM: tl.constexpr,
     BD: tl.constexpr,

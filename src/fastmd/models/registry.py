@@ -5,6 +5,7 @@ _FACTORIES = {
     "matris": "fastmd.models.matris:MatRISModel",
     "chgnet": "fastmd.models.chgnet:CHGNetModel",
     "alignn": "fastmd.models.alignn:ALIGNNModel",
+    "mace": "fastmd.models.mace:MACEModel",
 }
 
 

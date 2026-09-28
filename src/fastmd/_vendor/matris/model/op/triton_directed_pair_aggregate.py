@@ -8,7 +8,8 @@ uses a precomputed ``pair_index[U, 2]`` and performs:
 """
 from __future__ import annotations
 
-import os
+from fastmd._vendor.matris.config import env_value
+
 
 import torch
 import triton
@@ -17,7 +18,7 @@ from torch.autograd import Function
 
 
 def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
+    value = env_value(name)
     if value is None:
         return default
     return int(value)
@@ -32,7 +33,7 @@ def _directed_pair_average_fwd(
     data,
     pair_index,
     out,
-    U,
+    U: tl.constexpr,
     D: tl.constexpr,
     BM: tl.constexpr,
     BD: tl.constexpr,
@@ -52,7 +53,7 @@ def _directed_pair_average_bwd(
     gout,
     pair_index,
     grad_data,
-    U,
+    U: tl.constexpr,
     D: tl.constexpr,
     BM: tl.constexpr,
     BD: tl.constexpr,
@@ -73,7 +74,7 @@ def _undirected_pair_expand_fwd(
     data,
     pair_index,
     out,
-    U,
+    U: tl.constexpr,
     D: tl.constexpr,
     BM: tl.constexpr,
     BD: tl.constexpr,
@@ -93,7 +94,7 @@ def _undirected_pair_expand_bwd(
     gout,
     pair_index,
     grad_data,
-    U,
+    U: tl.constexpr,
     D: tl.constexpr,
     BM: tl.constexpr,
     BD: tl.constexpr,

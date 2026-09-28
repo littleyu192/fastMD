@@ -11,15 +11,16 @@ the row-wise attention weights.
 """
 from __future__ import annotations
 
-import os
+from fastmd._vendor.matris.config import env_value
+
 import torch
 import triton
 import triton.language as tl
 from torch.autograd import Function
 
-_NUM_WARPS = int(os.getenv("MATRIS_FUSED_SEGMENT_ATTENTION_NUM_WARPS", "4"))
-_PAIRED_BWD_BM = int(os.getenv("MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BM", "8"))
-_PAIRED_BWD_BD = int(os.getenv("MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BD", "128"))
+_NUM_WARPS = int(env_value("MATRIS_FUSED_SEGMENT_ATTENTION_NUM_WARPS", "4"))
+_PAIRED_BWD_BM = int(env_value("MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BM", "8"))
+_PAIRED_BWD_BD = int(env_value("MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BD", "128"))
 
 
 @triton.jit

@@ -3,7 +3,7 @@
 **Keep using ASE's `Atoms`, optimizers, and molecular dynamics. Just change the calculator.**
 
 fastMD provides a common interface to CUDA Graph inference backends for MatRIS,
-CHGNet, and ALIGNN. On a GPU, it attempts to capture and replay energy and force
+CHGNet, ALIGNN, and MACE. On a GPU, it attempts to capture and replay energy and force
 calculations by default. On a CPU, or for unsupported properties, it uses eager
 inference and reports the reason. Capacity buckets, warmup, and kernel fusion
 have defaults, so everyday use requires no CUDA Graph tuning.
@@ -21,7 +21,7 @@ print(atoms.get_forces())            # (N, 3), eV/Å
 
 This package is independent of the adjacent `MatRIS-09bk` directory. Installation
 and use do not require switching old branches, changing `PYTHONPATH`, or
-installing three overlapping source repositories. CHGNet 0.3.0 weights are
+installing overlapping source repositories. CHGNet 0.3.0 weights are
 bundled, so the example above can run offline.
 
 ## 1. Installation
@@ -35,15 +35,29 @@ python -m pip install -e '.[chgnet]'
 # Alternatively, install dependencies for other models
 python -m pip install -e '.[matris]'
 python -m pip install -e '.[alignn]'
+python -m pip install -e '.[mace]'
 ```
 
-CUDA Graph requires an NVIDIA GPU, CUDA-enabled PyTorch 2.8 or newer, a matching
-Triton version, and the GPU neighbor-list operators:
+CUDA Graph requires an NVIDIA GPU, CUDA-enabled PyTorch 2.8 or newer, and a matching
+Triton version. MatRIS, CHGNet, and ALIGNN also use the GPU neighbor-list operators:
 
 ```bash
 python -m pip install -e '.[matris,chgnet,cuda]'
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
+
+For MACE, the GPU neighbor list is implemented directly in Triton. Warp,
+NVIDIA neighbor operators, DGL, and TorchSim are not needed:
+
+```bash
+python -m pip install -e '.[mace-cuda]'
+```
+
+The MACE extra pins `mace-torch==0.3.16` and `e3nn==0.4.4`, matching the migrated
+forward implementation. MatRIS's `cuda` extra pins `nvalchemi-toolkit-ops==0.2.0`
+and `warp-lang==1.10.0`; do not replace these with the newer versions used by the
+original MACE benchmark's TorchSim environment. MACE and MatRIS can use the same
+fastMD environment without TorchSim.
 
 The `cuda` extra does not guarantee that an existing CPU-only PyTorch installation
 will be replaced with the appropriate CUDA build. Install
@@ -66,6 +80,7 @@ All models use `FastMDCalculator(model, checkpoint=..., device=...)`.
 | `matris` | Downloads `matris_10m_oam` by default; or a local `.pth.tar` file | Energy, forces, stress, magnetic moments | Energy, forces, stress, magnetic moments |
 | `chgnet` | Bundled 0.3.0 weights; or a local `.pth.tar` file | Energy, forces, stress, magnetic moments | Energy, forces |
 | `alignn` | Requires a directory containing `config.json` and `best_model.pt` | Energy, forces | Energy, forces |
+| `mace` | Downloads MACE-MPA-0 medium by default; or a local `.model` file | Energy, forces, stress | Energy, forces, stress for supported MP-0/MPA-0 architectures |
 
 This table describes the implemented interfaces. See the
 [validation record](docs/validation.md) for what has been tested on the current
@@ -85,6 +100,11 @@ calc = FastMDCalculator("chgnet", checkpoint="checkpoints/my_chgnet.pth.tar")
 
 # ALIGNN expects a directory, not a single .pt file
 calc = FastMDCalculator("alignn", checkpoint="checkpoints/v12.2.2024_dft_3d_307k")
+
+# MACE: local weights, double precision, fused GPU inference by default
+calc = FastMDCalculator("mace", checkpoint="checkpoints/mace-mpa-0-medium.model")
+# Or let upstream MACE download MP-0 medium
+calc = FastMDCalculator("mace", model_kwargs={"model_name": "medium"})
 ```
 
 MatRIS retains the original download mechanism, with a cache at `~/.cache/matris`.
@@ -135,7 +155,7 @@ count. `free_energy` equals `energy`, supporting ASE optimizers that request
 `force_consistent=True`. No additional electronic-temperature free-energy
 correction is applied.
 
-The three adapters currently target fully periodic materials with a nonzero
+The four adapters currently target fully periodic materials with a nonzero
 cell volume (`pbc=True`). Nonperiodic molecules and partially periodic systems
 raise an explicit error. The adapters do not silently alter your vacuum spacing,
 cell, or PBC settings.
@@ -168,7 +188,7 @@ Use standard ASE units: multiply a time step in femtoseconds by `units.fs`, and
 pass temperature in kelvin through `temperature_K`. ASE constraints,
 `dyn.attach()`, trajectory output, and NVE/NVT workflows work as usual.
 
-The acceleration here applies to **model inference**. ASE still runs the
+The acceleration here applies to **energy/force inference**. MACE also captures its GPU neighbor-list maintenance. ASE still runs the
 integrator and Python loop, and each call still involves host/device data
 transfers. This release does not expose the original branches' whole-step GPU MD
 as ASE MD or capture the entire MD loop in a CUDA Graph. Initial capture has a
@@ -179,15 +199,15 @@ setup cost, so short jobs may not benefit. Benchmark your own system.
 ```python
 from ase.optimize import FIRE
 
-# Fixed cell: supported by all three backends
+# Fixed cell: supported by all four backends
 FIRE(atoms, trajectory="relax.traj").run(fmax=0.05, steps=500)
 
-# Variable cell: use MatRIS or CHGNet, which provide stress
+# Variable cell: use MatRIS, MACE, or CHGNet, which provide stress
 from ase.filters import FrechetCellFilter
 FIRE(FrechetCellFilter(atoms)).run(fmax=0.05, steps=500)
 ```
 
-MatRIS can capture stress calculations. CHGNet computes stress eagerly; use
+MatRIS and MACE can capture stress calculations. CHGNet computes stress eagerly; use
 `cuda_graph=False` for cell relaxation to avoid unnecessary capture overhead.
 ALIGNN currently does not expose stress through this interface and cannot be
 used for NPT or cell relaxation here. Cell changes invalidate captures, so
@@ -226,13 +246,14 @@ calc = FastMDCalculator("chgnet", cuda_graph=CUDAGraphConfig(
 ))
 ```
 
-| Setting | MatRIS default | CHGNet default | ALIGNN default |
-| --- | --- | --- | --- |
-| Warmup iterations before capture | 3 | 3 | 3 |
-| Edge capacity increment | 512 undirected edges | 128 undirected edges | 1024 directed edges |
-| Triplet capacity increment | 8192 | 1024 | 16384 |
-| Cache policy | Multiple buckets; clear after exceeding 8 | Multiple buckets; clear after exceeding 8 | Keep one capacity; recapture on overflow |
-| Kernel fusion | Enabled | Enabled | Enabled |
+| Setting | MatRIS | CHGNet | ALIGNN | MACE |
+| --- | --- | --- | --- | --- |
+| Warmup iterations | 3 | 3 | 3 | 3 |
+| Edge capacity increment | 512 undirected | 128 undirected | 1024 directed | 256 directed |
+| Triplet increment | 8192 | 1024 | 16384 | Not used |
+| Cache | Up to 8 buckets | Up to 8 buckets | One capacity | Up to 8 graphs |
+| Fusion | Topology profile | Enabled | Enabled | `fast` |
+| Captured work | Model + derivatives | Model + forces | Model + forces | Neighbor update + model + derivatives |
 
 Larger capacity increments can reduce recapture frequency but increase memory
 use and padded computation. When MatRIS or CHGNet exceeds the cache limit, it
@@ -245,8 +266,9 @@ internal experimental environment variables, which ordinary workflows should
 not depend on.
 
 Changes to atom count, species, species order, cell, or PBC automatically
-invalidate existing captures. Neighbor lists are rebuilt for the new positions
-on each evaluation. When edge or triplet counts exceed capacity, the backend
+invalidate existing captures. Neighbor lists are updated for new positions on each evaluation. MACE reuses a
+candidate list while displacements stay within the skin threshold, filtering
+active edges on the GPU each time; it rebuilds the candidates when needed. When edge or triplet counts exceed capacity, the backend
 increases capacity and captures again. Arrays returned to ASE own their storage
 and are not overwritten by the next replay.
 
@@ -259,7 +281,86 @@ Use one calculator/backend per serial workflow; do not share an instance across
 threads. `warmup()` prepares the cache for the current geometry only. Subsequent
 changes in temperature or neighbor counts can still trigger new captures.
 
-## 5. Examples, numerical checks, and timing
+## 5. Optimized MatRIS and MACE
+
+### MatRIS
+
+The bundled MatRIS engine now comes from the optimized `matris-09bk` snapshot
+in `reb_package_20260927`, including all five supplied fix patches. The default
+**topology** profile enables eligible indexed projections, merged frozen-weight
+projections, segmented attention/reductions, paired edge operations and fused
+basis/envelope/residual operations. Kernel selection still depends on device,
+graph topology and tensor size; enabling a profile does not mean every operation
+uses a fused kernel on every system. Activation checkpointing is disabled.
+
+Ordinary ASE code needs no changes. Optional operator compilation is available:
+
+```python
+calc = FastMDCalculator(
+    "matris", checkpoint="checkpoints/MatRIS_10M_OAM.pth.tar",
+    model_kwargs={"compile_lowerings": True},
+)
+```
+
+Compilation adds startup cost. Advanced kernel experiments can use
+`model_kwargs={"expert_overrides": {"MATRIS_INDEXED_CAT_LINEAR_MIN_ROWS": 0}}`.
+The underlying typed configuration validates these options and scopes them to
+this backend. `calc.stats()` reports the requested profile and configuration.
+Optional Blackwell CuTeDSL implementations are retained, but are not selected
+by default and require their own compatible toolchain. The default GEMM backend
+is PyTorch; no CuTeDSL installation is needed for ordinary use.
+
+### MACE
+
+```python
+from ase.build import bulk
+from fastmd import FastMDCalculator
+
+atoms = bulk("Si", "diamond", a=5.43, cubic=True)
+atoms.calc = FastMDCalculator(
+    "mace", checkpoint="checkpoints/mace-mpa-0-medium.model",
+)
+print(atoms.get_potential_energy())
+print(atoms.get_forces())
+print(atoms.get_stress())
+```
+
+MP-0 medium and MPA-0 medium are the initial supported CUDA architectures.
+This does not imply support for every MACE foundation model or fine-tuned
+architecture. An unsupported capture architecture reports an eager fallback in
+`auto` mode and raises in strict mode. Provide `model_kwargs={"head": "name"}`
+when a multi-head checkpoint needs an explicit head.
+
+| `model_kwargs` option | Default | Meaning |
+| --- | --- | --- |
+| `model_name` | `medium-mpa-0` | Used only when `checkpoint` is omitted; `medium` selects MP-0 |
+| `default_dtype` | `float64` | Set `float32` explicitly if appropriate for your accuracy requirements |
+| `variant` | `fast` | Fused edge geometry/SH/radial basis and applicable ZBL, density and force/stress tails |
+| `neighbor_skin` | `1.0` Å | Candidate-list reuse distance |
+| `capacity_headroom` | `1.25` | Initial/growth capacity margin |
+| `enable_cueq` | `False` | Optional cuEquivariance conversion; install compatible cuEquivariance packages separately |
+
+Use `variant="plain"` for captured upstream operations or `variant="fast_cm"`
+for fused inference plus optional compilation of the original GEMM-level
+submodules. `fast_cm` takes longer to prepare and reports compiled/fallback
+modules in `calc.stats()["cache"]["compiled_modules"]`. `enable_fusions=False`
+selects `plain`. CPU and `cuda_graph=False` use upstream eager MACE regardless
+of the chosen variant, providing a reference path.
+
+GPU capture includes candidate-list rebuild/filter kernels, model execution,
+and coordinate/strain derivatives. Each replay checks capacity and neighbor
+consistency before returning a prediction. Overflow releases affected graphs,
+grows buffers and retries the same geometry. Changes to composition, atom count
+or cell discard the entire runner. The source neighbor builder uses quadratic
+pair enumeration during rebuilds; benchmark large systems before assuming it
+will outperform a cell-list implementation.
+
+The source package's whole-step NHC MD timing results include work outside this
+ASE Calculator interface. They are **not fastMD benchmark results**. Compare on
+your GPU and structures using the script below; startup and replay are reported
+separately.
+
+## 6. Examples, numerical checks, and timing
 
 After installation, run these commands from this directory:
 
@@ -267,20 +368,24 @@ After installation, run these commands from this directory:
 python examples/single_point.py --model chgnet
 python examples/md.py --model chgnet --steps 100
 python examples/compare.py --model chgnet
-python examples/compare.py --model matris --checkpoint ../checkpoint/MatRIS_10M_OAM.pth.tar
+python examples/compare.py --model matris --checkpoint ../checkpoint/MatRIS_10M_OAM.pth.tar --compile
+python examples/compare.py --model mace --checkpoint checkpoints/mace-mpa-0-medium.model --stress --compile --output mace-benchmark.json
 ```
 
-`compare.py` runs eager and CUDA Graph inference on the same perturbed geometries
-on a GPU, checks energy and force differences, and reports warmup and subsequent
-evaluation times separately. It exits explicitly when no GPU is available;
+`compare.py` compares eager, graph without fusions, and fused graph inference on
+the same perturbed geometries. `--compile` adds the optional compiled variant;
+`--stress` includes stress validation. It reports model loading, setup/warmup,
+and subsequent evaluation time separately, including ASE host/device transfers. It exits explicitly when no GPU is available;
 CPU execution is not reported as a CUDA acceleration result.
 
 ```bash
 python -m pip install -e '.[chgnet,test]'
 python -m pytest -q
-# Include tests for local MatRIS and ALIGNN checkpoints
+# Include tests for your local checkpoints
 FASTMD_MATRIS_CHECKPOINT=/absolute/path/model.pth.tar \
 FASTMD_ALIGNN_CHECKPOINT=/absolute/path/alignn_directory \
+FASTMD_MACE_MP0_CHECKPOINT=/absolute/path/mace-mp-0.model \
+FASTMD_MACE_MPA0_CHECKPOINT=/absolute/path/mace-mpa-0.model \
 python -m pytest -q
 ```
 
@@ -293,7 +398,7 @@ Assess performance and numerical tolerances for your model, system, GPU, and
 trajectory length. Long MD trajectories are not expected to remain bitwise
 identical across execution modes.
 
-## 6. Adding more models for WBM workflows
+## 7. Adding more models for WBM workflows
 
 The [model integration guide](docs/adding_models.md) provides a runnable
 registration example and an integration checklist. Users keep the same API:
@@ -313,14 +418,14 @@ Performance on WBM does not establish that a model provides forces, stress, or
 safe CUDA capture. Declare each model's capabilities explicitly and validate
 total energy, forces, stress sign, and units against its original calculator.
 
-## 7. Repository layout and provenance
+## 8. Repository layout and provenance
 
 ```text
 fastMD/
 ├── src/fastmd/
 │   ├── calculator.py      # Common ASE entry point
 │   ├── config.py          # Defaults for each calculator instance
-│   ├── models/            # Backend contract, registry, and three adapters
+│   ├── models/            # Backend contract, registry, and four adapters
 │   └── _vendor/           # Migrated models, graph builders, and optimized kernels
 ├── examples/              # Single-point, ASE MD, and CUDA accuracy/timing comparisons
 ├── tests/                 # ASE contract and real-model integration tests
@@ -330,7 +435,8 @@ fastMD/
 
 The [migration notes](docs/migration.md) describe the original branches'
 responsibilities and the fixes made during this refactor. The
-[source manifest](docs/sources.json) records each branch's commit and migrated
-files. Private namespaces avoid conflicts with `matris`, `chgnet`, and `alignn`
-packages already installed in your environment. Original license and citation
+[source manifest](docs/sources.json) records source commits, fix-patch hashes and
+migrated files. Private namespaces avoid conflicts with `matris`, `chgnet`, and `alignn`
+packages already installed in your environment. MACE optimizations also live in
+a private namespace; the upstream `mace` dependency is used for checkpoint classes. Original license and citation
 requirements continue to apply; see [NOTICE](NOTICE) and `licenses/`.

@@ -1,4 +1,4 @@
-"""MatRIS adapter using the migrated main-branch inference engine."""
+"""MatRIS adapter with topology-directed inference lowerings."""
 from ase import units
 
 from .base import ModelBackend, ModelCapabilities
@@ -10,11 +10,25 @@ class MatRISModel(ModelBackend):
         frozenset({"energy", "forces", "stress", "magmoms"}),
     )
 
-    def __init__(self, *, checkpoint=None, model_name="matris_10m_oam", **kwargs):
+    def __init__(self, *, checkpoint=None, model_name="matris_10m_oam",
+                 compile_lowerings=False, expert_overrides=None, **kwargs):
         super().__init__(**kwargs)
         from fastmd._vendor.matris.applications.base import MatRISCalculator
+        from fastmd._vendor.matris.config import CapacityConfig, InferenceConfig, resolve_config
+        overrides = dict(expert_overrides or {})
+        if compile_lowerings:
+            overrides["MATRIS_COMPILED_LOWERINGS"] = True
+        options = dict(
+            optimization_profile="topology" if self.config.enable_fusions else "generic",
+            checkpoint="off", report=False, expert_overrides=overrides,
+            capacity=CapacityConfig(u_step=self.config.edge_capacity_step or 512,
+                                    t_step=self.config.triplet_capacity_step or 8192,
+                                    warmup=self.config.warmup_steps),
+        )
+        self._graph_config = resolve_config(InferenceConfig(execution="model_graph", **options))
         self.calculator = MatRISCalculator(model_path=str(checkpoint) if checkpoint is not None else None,
-                                          model=model_name, device=str(self.device), task="ef")
+                                          model=model_name, device=str(self.device), task="ef",
+                                          config=InferenceConfig(execution="eager", **options))
         self.model = self.calculator.model.eval()
         self.model.enable_checkpoint = False
         for layer in self.model.interaction_block:
@@ -55,16 +69,15 @@ class MatRISModel(ModelBackend):
         if self.runner is None or task != self._task:
             self.runner = BucketedGraphRunner(
                 self.model, task=task,
-                u_step=self.config.edge_capacity_step or 512,
-                t_step=self.config.triplet_capacity_step or 8192,
-                warmup=self.config.warmup_steps,
                 enable_model_fusions=self.config.enable_fusions,
+                config=self._graph_config,
             )
             self._task = task
         converter = self.model.graph_converter
-        graph = atoms_to_graph_gpu(atoms, atom_graph_cutoff=converter.atom_graph_cutoff,
-                                   line_graph_cutoff=converter.line_graph_cutoff, device=self.device)
-        output, n = self.runner.run(graph)
+        with self._graph_config.scope():
+            graph = atoms_to_graph_gpu(atoms, atom_graph_cutoff=converter.atom_graph_cutoff,
+                                       line_graph_cutoff=converter.line_graph_cutoff, device=self.device)
+            output, n = self.runner.run(graph)
         scale = n if self.model.is_intensive else 1
         results = {"energy": float(output["e"][0].detach()) * scale,
                    "forces": output["f"][0][:n].detach().cpu().numpy().copy()}
@@ -81,4 +94,10 @@ class MatRISModel(ModelBackend):
         self._task = None
 
     def stats(self):
-        return {**super().stats(), "cache": self.runner.stats() if self.runner else {}}
+        return {**super().stats(), "optimization_profile": self._graph_config.optimization_profile,
+                "cache": self.runner.stats() if self.runner else {},
+                "kernel_options": dict(self._graph_config.kernel_options),
+                "merged_projection_caches": sum(
+                    getattr(module, "_merged_attn_proj_weight", None) is not None
+                    for module in self.model.modules()),
+                "checkpointing": self.model.enable_checkpoint}

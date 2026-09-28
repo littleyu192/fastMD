@@ -1,14 +1,14 @@
 from ase import Atoms, units
 from ase.calculators.calculator import Calculator, all_changes, all_properties
 import numpy as np
-import time
 import torch
 
 from ..model.model import MatRIS
+from ..config import InferenceConfig
+from ._config import apply_checkpoint, configure_entrypoint, config_summary, scoped_call
 
 from pymatgen.io.ase import AseAtomsAdaptor
 from ..graph import RadiusGraph
-from ..graph.validation import raise_if_graph_has_isolated_atoms
 
 from ase.optimize import (
     BFGS, BFGSLineSearch, 
@@ -29,14 +29,15 @@ class MatRISCalculator(Calculator):
     
     implemented_properties = ("energy", "forces", "stress", "magmoms")  # type: ignore
     
+    @configure_entrypoint("calculator")
     def __init__(
         self,
         model_path: str = None,
-        model: str = "matris_10m_oam",
+        model: MatRIS | str = "matris_10m_oam",
         task: str = "efs",
         device: str = "cpu",
-        handle_isolated_atoms: bool = True,
-        use_cuda_graph: bool = False,
+        enable_compile: bool = False,
+        config: InferenceConfig | None = None,
         **kwargs,
     ) -> None:
         """
@@ -44,40 +45,71 @@ class MatRISCalculator(Calculator):
             model (MatRIS): Instance of a MatRIS model. If set to None, the default MatRIS is loaded.
             task (str): The prediction task. Can be 'e', 'em', 'ef', 'efs', 'efsm'.
             device (str): The device to be used for predictions,
-            handle_isolated_atoms (bool): If True, isolated atoms are excluded from
-                the graph and their reference atomic energies are added back.
+            enable_compile (bool): Whether to compile interaction blocks.
+            config: Unified execution, optimization, checkpoint, isolated-atom,
+                and capacity settings. Defaults to eager execution, reference
+                isolated-atom handling, and checkpointing off. These settings
+                also apply when passing an already constructed MatRIS model.
             stress_unit (float): the conversion factor to convert GPa(MatRIS default) to eV/A^3.
             **kwargs: Passed to the Calculator parent class.
         """
         super().__init__(**kwargs)
         self.task=task
         self.device = device
-        self.handle_isolated_atoms = handle_isolated_atoms
-        self.model = MatRIS.load(model_path=model_path, model_name=model, device=self.device)
+        self.handle_isolated_atoms = self._inference_config.handle_isolated_atoms
+        enable_checkpoint = self._inference_config.checkpoint_enabled
+        if isinstance(model, MatRIS):
+            if model_path is not None:
+                raise ValueError("Pass either model=MatRIS(...) or model_path, not both")
+            self.model = model.to(self.device)
+            apply_checkpoint(self.model, enable_checkpoint)
+        else:
+            self.model = MatRIS.load(
+                model_path=model_path,
+                model_name=model,
+                device=self.device,
+                enable_compile=enable_compile,
+                enable_checkpoint=enable_checkpoint,
+            )
+        # Inference: forces/stress are autograd w.r.t. coords/strains, never params.
+        # Freezing params avoids computing unused parameter grads in the backward
+        # (cuts backward work and enables the dx-only fast path of fused LN+act).
+        for _p in self.model.parameters():
+            _p.requires_grad_(False)
         # GPU graphs retain isolated nodes and mask their learned readouts on
         # device, avoiding the legacy per-step pymatgen neighbor-list scan.
-        self._gpu_graph = getattr(self.model.graph_converter, "algorithm", "legacy") == "gpu"
+        self._gpu_graph = (
+            getattr(self.model.graph_converter, "algorithm", "legacy") == "gpu"
+            and torch.cuda.is_available()
+        )
 
         # Optional bucketed CUDA-graph replay of the (sync-free) forward+backward.
         self._graph_runner = None
-        can_handle_isolated_on_device = (
-            not self.handle_isolated_atoms
-            or self.model.reference_energy is not None
-        )
         if (
-            use_cuda_graph
+            self._inference_config.execution == "model_graph"
             and self._gpu_graph
-            and can_handle_isolated_on_device
             and torch.cuda.is_available()
         ):
             from .cuda_graph import BucketedGraphRunner
-            self._graph_runner = BucketedGraphRunner(self.model, task=self.task)
+            capacity = self._inference_config.capacity
+            self._graph_runner = BucketedGraphRunner(
+                self.model, task=self.task,
+                u_step=capacity.u_step, t_step=capacity.t_step,
+                n_dummy=capacity.n_dummy, min_pad_u=capacity.min_pad_u,
+                warmup=capacity.warmup,
+                enable_model_fusions=self._inference_config.optimization_profile != "generic",
+                config=self._inference_config,
+            )
 
         self.stress_unit = units.GPa
         key = ["atoms_per_graph", "ref_energy"]
         for t in task:
             key.append(t)
         self.key = set(key)
+
+    def config_summary(self) -> dict:
+        """Requested/resolved configuration and observed execution state."""
+        return config_summary(self)
 
     def _get_isolated_atom_indices(self, structure) -> np.ndarray:
         center_index, _, _, _ = structure.get_neighbor_list(
@@ -123,59 +155,45 @@ class MatRISCalculator(Calculator):
             return value.cpu().detach().numpy()
         return np.array(value)
 
+    @scoped_call
     def _predict_structure(self, structure, atoms=None):
         # atoms!=None takes the GPU fast path (build graph straight from ASE atoms,
         # skipping the ASE<->pymatgen round trip).
         if self._graph_runner is not None and atoms is not None:
             # Bucketed CUDA-graph replay of forward+backward (padded, dummy-sink
             # masked -> exact on the n_real real atoms).
-            profile_stages = self._graph_runner.profile_stages
-            calculator_start = time.perf_counter()
-            if profile_stages:
-                build_begin = torch.cuda.Event(enable_timing=True)
-                build_done = torch.cuda.Event(enable_timing=True)
-                build_begin.record()
-            g = self.model.graph_converter(None, atoms=atoms).to(self.device)
-            if not self.handle_isolated_atoms:
-                raise_if_graph_has_isolated_atoms(g)
-            if profile_stages:
-                build_done.record()
+            g = self.model.graph_converter(
+                None,
+                atoms=atoms,
+                check_isolated_atoms=(
+                    not self.handle_isolated_atoms
+                    or self.model.reference_energy is None
+                ),
+            ).to(self.device)
             out, n_real = self._graph_runner.run(g)
-            if profile_stages:
-                self._graph_runner.synchronize_profile()
-                graph_build_cuda_ms = build_begin.elapsed_time(build_done)
-            output_start = time.perf_counter()
             result = {}
             if "e" in self.key:
-                result["e"] = float(out["e"][0].detach())
+                result["e"] = float(out["e"][0])
             if "ref_energy" in self.key:
                 re = out["ref_energy"]
-                result["ref_energy"] = (
-                    float(re[0].detach()) if torch.is_tensor(re) else float(re)
-                )
+                result["ref_energy"] = float(re[0]) if torch.is_tensor(re) else float(re)
             if "f" in self.key and "f" in out:
                 result["f"] = out["f"][0][:n_real].detach().cpu().numpy()
             if "s" in self.key and "s" in out:
                 result["s"] = out["s"][0].detach().cpu().numpy()
             if "m" in self.key and "m" in out:
                 result["m"] = out["m"][0][:n_real].detach().cpu().numpy()
-            if profile_stages:
-                torch.cuda.synchronize()
-                self._graph_runner.last_run_info.update(
-                    graph_build_cuda_ms=graph_build_cuda_ms,
-                    output_convert_wall_ms=(
-                        time.perf_counter() - output_start
-                    ) * 1000,
-                    calculator_wall_ms=(
-                        time.perf_counter() - calculator_start
-                    ) * 1000,
-                )
             return result
 
-        graph = self.model.graph_converter(structure, atoms=atoms).to(self.device) # convert to List
+        graph = self.model.graph_converter(
+            structure,
+            atoms=atoms,
+            check_isolated_atoms=(
+                not self.handle_isolated_atoms
+                or self.model.reference_energy is None
+            ),
+        ).to(self.device)
         graphs = [graph] if isinstance(graph, RadiusGraph) else graph
-        if self._gpu_graph and not self.handle_isolated_atoms:
-            raise_if_graph_has_isolated_atoms(graphs)
 
         model_prediction = self.model(
             graphs,
@@ -189,42 +207,38 @@ class MatRISCalculator(Calculator):
             for key in self.key & set(model_prediction.keys())
         }
      
-    def precapture(
-        self,
-        atoms,
-        n_steps: int = 120,
-        temperature: float = 300.0,
-        timestep: float = 1.0,
-        seed: int | None = None,
-        proactive: bool = False,
-    ) -> None:
+    @scoped_call
+    def precapture(self, atoms, n_steps: int = 120, temperature: float = 300.0,
+                   timestep: float = 1.0) -> None:
         """Warm the CUDA-graph bucket cache up front by driving a throwaway NVT
         trajectory on a COPY of `atoms`. This covers the one-time thermalization
         drift plus the equilibrium fluctuation of the edge/triplet counts, so the
         production run replays with no mid-run capture spikes. No-op unless
-        use_cuda_graph is active."""
+        execution='model_graph' is active."""
         if self._graph_runner is None:
             return
         from ase.md.nvtberendsen import NVTBerendsen
         from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
         probe = atoms.copy()
-        rng = np.random.RandomState(seed) if seed is not None else np.random
-        MaxwellBoltzmannDistribution(
-            probe, temperature_K=temperature, force_temp=True, rng=rng
-        )
+        MaxwellBoltzmannDistribution(probe, temperature_K=temperature, force_temp=True)
         probe.calc = self
-        self._graph_runner.phase = "precapture"
-        dyn = NVTBerendsen(
-            probe,
-            timestep=timestep * units.fs,
-            temperature_K=temperature,
-            taut=100 * units.fs,
-        )
+        dyn = NVTBerendsen(probe, timestep=timestep * units.fs,
+                           temperature_K=temperature, taut=100 * units.fs)
         dyn.run(n_steps)
-        g = self.model.graph_converter(None, atoms=probe).to(self.device)
-        self._graph_runner.precapture(g, proactive=proactive)
-        self._graph_runner.print_cache_summary("after-precapture")
+        # proactive ±1 neighbor buckets around the final state
+        g = self.model.graph_converter(
+            None,
+            atoms=probe,
+            check_isolated_atoms=(
+                not self.handle_isolated_atoms
+                or self.model.reference_energy is None
+            ),
+        ).to(self.device)
+        self._graph_runner.precapture(g, proactive=True)
+        print(f"CUDA-graph precapture: {self._graph_runner.captures} graphs / "
+              f"{len(self._graph_runner.cache)} buckets")
 
+    @scoped_call
     def calculate(
         self,
         atoms: Atoms,
@@ -270,15 +284,13 @@ class MatRISCalculator(Calculator):
         isolated_indices = np.array([], dtype=int)
         isolated_ref_energy = 0.0
 
-        use_gpu_fast_path = self._gpu_graph and (
-            not self.handle_isolated_atoms
-            or self.model.reference_energy is not None
-        )
+        use_gpu_fast_path = self._gpu_graph
         if use_gpu_fast_path:
             # Fast path: build the graph straight from ASE atoms (no ASE->pymatgen
-            # ->ASE round trip). Isolated atoms remain in the fixed-shape graph;
-            # the model excludes their learned readouts on device and retains
-            # their atomic reference energies.
+            # ->ASE round trip). Isolated nodes stay in place; the model masks
+            # learned readouts on device and retains their reference energies.
+            # Without a reference table the converter rejects isolated atoms
+            # strictly; connected systems still use the requested CUDA replay.
             structure = None
             pred_structure = None
             pred_atoms = atoms
