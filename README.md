@@ -258,23 +258,100 @@ MP-0/MPA-0 medium with the official calculator and measure end-to-end ASE timing
 
 ### Geometry and cell relaxation
 
+Use the relaxation helper to keep the model's energy, force and stress requests
+consistent throughout optimization. It selects the appropriate inference path
+and uses familiar ASE defaults:
+
 ```python
-from ase.optimize import FIRE
+from ase.io import read, write
+from fastmd import relax, RelaxationConfig, make_relaxation_calculator
 
-# Fixed cell: supported by all four backends
-FIRE(atoms, trajectory="relax.traj").run(fmax=0.05, steps=500)
-
-# Variable cell: use MatRIS, MACE, or CHGNet, which provide stress
-from ase.filters import FrechetCellFilter
-FIRE(FrechetCellFilter(atoms)).run(fmax=0.05, steps=500)
+atoms = read("POSCAR")
+calc = make_relaxation_calculator(
+    "matris", checkpoint="checkpoints/MatRIS_10M_OAM.pth.tar", device="cuda",
+)
+result = relax(atoms, calc)  # FIRE + FrechetCellFilter, fmax=0.05, up to 500 steps
+write("relaxed.extxyz", result.atoms)
+print(result.converged, result.steps, result.final_energy)
+print(result.max_force, result.max_filter_force, result.elapsed_seconds)
 ```
 
-MatRIS and MACE can capture stress calculations. CHGNet computes stress eagerly; use
-`cuda_graph=False` for cell relaxation to avoid unnecessary capture overhead.
-ALIGNN currently does not expose stress through this interface and cannot be
-used for NPT or cell relaxation here. Cell changes invalidate captures for backends
-other than MatRIS and MACE, so their variable-cell workflows can trigger frequent
-recapture and may perform better with eager inference.
+The default relaxes atomic positions and all cell degrees of freedom at zero
+external pressure. `fmax` is in eV/Å and applies to the optimizer's generalized
+forces, including the scaled cell forces. It is not a separate stress threshold.
+`relax()` copies the input atoms and creates a fresh optimizer for every structure.
+The returned atoms retain their final results even when the calculator is reused.
+
+| Model | Position + cell relaxation | Fixed-cell relaxation |
+| --- | --- | --- |
+| MatRIS | Fused CUDA Graph energy/force/stress inference | CUDA Graph inference |
+| MACE | Fused CUDA Graph energy/force/stress inference for supported architectures | CUDA Graph inference |
+| CHGNet | Eager energy/force/stress inference; selected automatically | CUDA Graph inference |
+| ALIGNN | Unsupported: this adapter does not provide stress | CUDA Graph inference |
+
+For fixed-cell optimization, configure both the calculator and optimizer:
+
+```python
+config = RelaxationConfig(relax_cell=False, optimizer="BFGS", fmax=0.03, steps=300)
+calc = make_relaxation_calculator("chgnet", relax_cell=False)
+result = relax(atoms, calc, config)
+```
+
+`cuda_graph="auto"` uses the available path; `cuda_graph=True` requires capture
+and rejects CHGNet cell relaxation. MatRIS and MACE retain their existing kernel
+fusion defaults and enable `compute_stress=True` for cell relaxation. Graphs are
+reused while topology capacity allows; growth can require a new capture. ASE's
+optimizer and cell filter run on the CPU, so **a complete relaxation step is not
+captured in a CUDA Graph**. Per-structure elapsed time includes initial evaluation,
+capture, optimizer steps and final evaluation; model loading is separate.
+
+You can also use the calculator directly with ASE:
+
+```python
+from ase.filters import FrechetCellFilter
+from ase.optimize import FIRE
+
+atoms.calc = make_relaxation_calculator("mace", device="cuda")
+FIRE(FrechetCellFilter(atoms), trajectory="relax.traj").run(fmax=0.05, steps=500)
+```
+
+### Matbench Discovery: a reproducible 10% relaxation subset
+
+The `hsy_relax` workflow uses **21,548 structures from the 215,488 WBM unique
+prototypes**, the default Discovery leaderboard population. Selection is without
+replacement, using SHA-256 ranking with seed `20261011`; every model uses the
+same committed [material-ID manifest](benchmarks/discovery/unique-prototypes-10pct-seed20261011.json).
+Inputs are the official **unrelaxed** WBM structures.
+
+Run from the repository root after installing your model's dependencies:
+
+```bash
+# Download and verify the initial structures, then build the selected ASE database.
+python -m fastmd.discovery prepare
+
+# Check the complete workflow on two structures before starting a full run.
+python -m fastmd.discovery run --model matris \
+  --checkpoint checkpoints/MatRIS_10M_OAM.pth.tar --device cuda \
+  --output runs/matris-smoke --limit 2 --steps 3
+
+# Relax the whole selected subset with the default FIRE + cell-filter protocol.
+python -m fastmd.discovery run --model matris \
+  --checkpoint checkpoints/MatRIS_10M_OAM.pth.tar --device cuda \
+  --output runs/matris-discovery
+```
+
+Use `--model mace` with a supported MACE checkpoint, or `--model chgnet` for the
+bundled CHGNet weights and eager cell relaxation. Add `--resume` to continue an
+interrupted run with matching settings. Results include final structures,
+energies, convergence, failures, timing and inference statistics. The full
+[Discovery workflow guide](benchmarks/discovery/README.md) covers sharding,
+custom inputs and fair performance comparisons.
+
+This is a sampled relaxation workload. It does not calculate formation energies,
+DFT convex-hull distances or official Discovery F1 scores. Failed and unconverged
+structures remain in the results; the sample is not redrawn. ALIGNN's optional
+`--fixed-cell` runs are a separate position-relaxation comparison and do not match
+the variable-cell Discovery protocol.
 
 ## 4. CUDA Graph defaults
 

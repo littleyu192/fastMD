@@ -11,3 +11,5 @@ dist/
 checkpoints/
 /docs/
 /validation/
+/.cache/
+/runs/

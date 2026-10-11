@@ -10,8 +10,9 @@ class CHGNetModel(ModelBackend):
         frozenset({"energy", "forces"}),
     )
 
-    def __init__(self, *, checkpoint=None, model_name="0.3.0", **kwargs):
+    def __init__(self, *, checkpoint=None, model_name="0.3.0", compute_stress=False, **kwargs):
         super().__init__(**kwargs)
+        self.compute_stress = bool(compute_stress)
         from fastmd._vendor.chgnet.model.model import CHGNet
         self.model = (CHGNet.from_file(str(checkpoint)) if checkpoint is not None
                       else CHGNet.load(model_name=model_name, use_device=str(self.device), verbose=False))
@@ -21,6 +22,8 @@ class CHGNetModel(ModelBackend):
         self.runner = None
 
     def graph_unavailable_reason(self, properties):
+        if self.compute_stress:
+            properties = frozenset(properties) | {"stress"}
         reason = super().graph_unavailable_reason(properties)
         if reason:
             return reason
@@ -31,7 +34,8 @@ class CHGNetModel(ModelBackend):
 
     def _predict_eager(self, atoms, properties):
         from pymatgen.io.ase import AseAtomsAdaptor
-        task = "efsm" if "magmoms" in properties else ("efs" if "stress" in properties else "ef")
+        task = "efsm" if "magmoms" in properties else (
+            "efs" if self.compute_stress or "stress" in properties else "ef")
         graph = self.model.graph_converter(AseAtomsAdaptor.get_structure(atoms))
         output = self.model.predict_graph(graph.to(self.device), task=task)
         scale = len(atoms) if self.model.is_intensive else 1
@@ -68,4 +72,5 @@ class CHGNetModel(ModelBackend):
         self.runner = None
 
     def stats(self):
-        return {**super().stats(), "cache": self.runner.stats() if self.runner else {}}
+        return {**super().stats(), "compute_stress": self.compute_stress,
+                "cache": self.runner.stats() if self.runner else {}}
