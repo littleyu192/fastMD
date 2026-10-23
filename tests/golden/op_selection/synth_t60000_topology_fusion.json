@@ -1,0 +1,220 @@
+{
+ "config": "synth_t60000_topology_fusion",
+ "info": {
+  "configuration_warnings": [
+   "ConfigurationWarning: InferenceConfig(checkpoint='auto') is deprecated and will be removed in the next version: use saved_tensor_recompute ('on', 'deep' or 'auto', the default) to reduce inference memory. Layer checkpointing stays available for training and fine-tuning through MatRIS(enable_checkpoint=...)."
+  ],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "c56b3866d6e6b99b"
+  ],
+  "python": "3.12.3",
+  "seconds": 6.7,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 1072,
+   "directed_edges": 8576,
+   "triplets": 60000
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "fingerprint": "8d91d2b94984a20e"
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "like": "synth_t59999_topology_fusion:cold.eval1",
+    "set": {
+     "bwd:AddmmBackward0": "aten::add_=4 aten::as_strided=20 aten::mm=20 aten::t=20 aten::transpose=20",
+     "bwd:CatBackward0": "aten::add_=2 aten::as_strided=12 aten::narrow=12 aten::slice=12",
+     "bwd:DivBackward0": "aten::add_=2 aten::div=11 aten::mul=3 aten::neg=3 aten::sum=3",
+     "bwd:IndexSelectBackward0": "aten::add_=2 aten::empty=3 aten::fill_=3 aten::index_add_=3 aten::index_select_backward=3 aten::new_empty=3 aten::new_zeros=3 aten::zero_=3",
+     "bwd:MmBackward0": "aten::add_=7 aten::as_strided=21 aten::mm=21 aten::t=21 aten::transpose=21",
+     "bwd:MulBackward0": "aten::add_=2 aten::mul=24 aten::sum=4",
+     "bwd:SinBackward0": "aten::cos=2 aten::mul=2",
+     "bwd:ViewBackward0": "aten::reshape=2 aten::view=2",
+     "bwd:_Cat3GatherAddSiluBackward": "aten::empty=3 aten::fill_=2 aten::zero_=2 aten::zeros=2",
+     "bwd:_Cat4GatherAddSiluBackward": "aten::empty=3 aten::empty_like=1 aten::empty_strided=1 aten::fill_=3 aten::zero_=3 aten::zeros=3",
+     "bwd:_LineEnvelopeProductBackward": "aten::empty_like=1 aten::empty_strided=1 aten::fill_=1 aten::zero_=1 aten::zeros_like=1",
+     "bwd:_MergedFrozenProjectionsBackward": "aten::add_=1 aten::addmm_=2 aten::as_strided=5 aten::mm=1 aten::narrow=3 aten::slice=3 aten::squeeze=2",
+     "bwd:_ProjectionWithAliasBackward": "aten::mm=1",
+     "bwd:_ResidualAddBackward": "aten::empty_like=6 aten::empty_strided=6",
+     "bwd:_ThreebodyFourierBasisBackward": "aten::empty_like=1 aten::empty_strided=1 aten::fill_=1 aten::zero_=1 aten::zeros_like=1",
+     "bwd:fusion_silu_fwdBackward": "aten::empty=19",
+     "interaction_block.0.attn_block_line_graph": "aten::as_strided=14 aten::cat=6 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::detach=11 aten::empty=10 aten::empty_like=10 aten::empty_strided=8 aten::linear=5 aten::matmul=5 aten::mm=5 aten::narrow=3 aten::reshape=2 aten::slice=9 aten::t=5 aten::to=2 aten::transpose=5 aten::view=2",
+     "interaction_block.0.refine_block_line_graph": "aten::as_strided=15 aten::cat=5 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::detach=10 aten::empty=11 aten::empty_like=5 aten::empty_strided=3 aten::linear=7 aten::matmul=7 aten::mm=7 aten::reshape=2 aten::slice=8 aten::t=7 aten::transpose=7 aten::view=3 aten::view_as=1",
+     "three_body_embedding": "aten::as_strided=1 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::detach=2 aten::empty=3 aten::empty_like=2 aten::linear=1 aten::matmul=2 aten::mm=2 aten::t=1 aten::transpose=1"
+    },
+    "unset": [
+     "bwd:AcosBackward0",
+     "bwd:CosBackward0",
+     "bwd:SumBackward1",
+     "bwd:torch::autograd::CopySlices",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_core",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_core.layers.1",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_gate",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_gate.layers.1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_core",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_core.layers.1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_gate",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_gate.layers.1",
+     "three_body_embedding.expansion",
+     "three_body_embedding.swish_layer"
+    ]
+   },
+   "entries": {
+    "ints": {
+     "10000": 60000,
+     "1432": 8576,
+     "179": 1072,
+     "716": 4288
+    },
+    "like": "synth_t10000_topology_fusion:cold.eval1",
+    "patch": [
+     [
+      3,
+      5,
+      [
+       "fwd three_body_embedding threebody_fourier_basis/triton BM=128 SCALE=1.7724538509055159 contiguous_copy=[false,true,true,false] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=60000 vectors=8576",
+       "fwd three_body_embedding threebody_linear/combined_cached allow_fused=true policy=false rows=60000 width=7"
+      ]
+     ],
+     [
+      7,
+      13,
+      [
+       "fwd interaction_block.0.attn_block_line_graph merged_frozen_projections/torch_linear dtype=torch.float32 in_width=128 input_contiguous=true out_stride0=512 rows=60000 splits=[256,128,128]",
+       "fwd interaction_block.0.attn_block_line_graph cat3_gather_add_silu/triton BLK=128 BM=2 H=128 HAS_BIAS=true M=60000 N=256 SIA=5 SIB=5 SP0=512 dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=4",
+       "fwd interaction_block.0.attn_block_line_graph indexed_cat3/decomposed_indexed_silu HAS_BIAS=true SORTED_A=false dtype=torch.float32 gathered_rows=[4288] gemm_backend=torch index_a_sorted=false index_dtype=[torch.int64,torch.int64] p0_stride0=512 precomputed_p0=true projection_width=256 rows=60000 strict_errors=false width=128",
+       "fwd interaction_block.0.attn_block_line_graph gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=60000 tile=\"2d\" width=128",
+       "fwd interaction_block.0.attn_block_line_graph paired_segment_attention/triton_csr BLK=128 IDENTITY_A=false IDENTITY_B=false LOGA_S=[512,1] LOGB_S=[512,1] VAL_S=[128,1] contiguous_copy=[false,false,false] csr=[provided,provided] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=4 offsets_dtype=[torch.int64,torch.int64] rows=60000 segments=4288 width=128"
+      ]
+     ],
+     [
+      39,
+      44,
+      [
+       "fwd interaction_block.0.refine_block_line_graph line_envelope/triton BD=128 BM=8 base_stride0=128 contiguous_copy=[false,true,true] dtype=torch.float32 grid_BD=128 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=60000 width=128",
+       "fwd interaction_block.0.refine_block_line_graph projection_with_alias/torch_linear dtype=torch.float32 in_width=128 input_contiguous=true out_width=256 rows=60000",
+       "fwd interaction_block.0.refine_block_line_graph cat4_gather_add_silu/triton BLK=128 BM=2 H=128 HAS_BIAS=true M=60000 N=256 SIA=5 SIB=5 SIC=5 SP0=256 dtype=torch.float32 index_dtype=[torch.int64,torch.int64,torch.int64] num_warps=4",
+       "fwd interaction_block.0.refine_block_line_graph indexed_cat4/decomposed_indexed_silu HAS_BIAS=true SORTED_A=true dtype=torch.float32 gathered_rows=[1072,4288] gemm_backend=torch index_a_sorted=true index_dtype=[torch.int64,torch.int64,torch.int64] p0_stride0=256 precomputed_p0=true projection_width=256 rows=60000 strict_errors=false width=128",
+       "fwd interaction_block.0.refine_block_line_graph gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=60000 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      82,
+      85,
+      [
+       "bwd interaction_block.0.refine_block_line_graph gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=60000 tile=\"2d\" width=128",
+       "bwd interaction_block.0.refine_block_line_graph cat4_gather_add_silu/triton BLK=128 BM=8 H=128 M=60000 N=256 SIA=5 SIB=5 SIC=5 SORTED_A=true contiguous_copy=[false,false] num_warps=4",
+       "bwd interaction_block.0.refine_block_line_graph projection_with_alias/torch_linear grad_alias=false grad_p0=true",
+       "bwd interaction_block.0.refine_block_line_graph line_envelope/triton BD=128 BM=8 base_stride0=128 contiguous_copy=false dtype=torch.float32 grid_BD=128 num_warps=4 rows=60000 width=128"
+      ]
+     ],
+     [
+      98,
+      99,
+      [
+       "bwd interaction_block.0.attn_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60000 width=128"
+      ]
+     ],
+     [
+      104,
+      108,
+      [
+       "bwd interaction_block.0.attn_block_line_graph paired_segment_attention/triton_csr BD=128 BM=8 LOGA_S=[512,1] LOGB_S=[512,1] VAL_S=[128,1] contiguous_copy=[true,true] num_warps=4 rows=60000 width=128",
+       "bwd interaction_block.0.attn_block_line_graph gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=60000 tile=\"2d\" width=128",
+       "bwd interaction_block.0.attn_block_line_graph cat3_gather_add_silu/triton BLK=128 BM=8 H=128 M=60000 N=256 SIA=5 SIB=5 SORTED_A=false contiguous_copy=[false,false] num_warps=4",
+       "bwd interaction_block.0.attn_block_line_graph merged_frozen_projections/torch_linear live_grads=[true,true,true] splits=[256,128,128]"
+      ]
+     ],
+     [
+      109,
+      109,
+      [
+       "bwd three_body_embedding threebody_fourier_basis/triton BM=128 SCALE=1.7724538509055159 contiguous_copy=false num_warps=4 rows=60000 vectors=8576"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "ints": {
+     "1432": 8576,
+     "179": 1072,
+     "716": 4288,
+     "9999": 60000
+    },
+    "like": "synth_t9999_topology_fusion:cold.eval1",
+    "patch": [
+     [
+      0,
+      1,
+      [
+       "fwd interaction_block.0.attn_block_line_graph gated_tail/triton !unsupported_shape rows=60000 width=128"
+      ]
+     ],
+     [
+      6,
+      6,
+      [
+       "fwd interaction_block.0.refine_block_line_graph gated_tail/triton !unsupported_shape rows=60000 width=128"
+      ]
+     ]
+    ]
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "like": "cold.eval1",
+    "set": {
+     "interaction_block.0.attn_block_line_graph": "aten::as_strided=8 aten::cat=1 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=10 aten::empty_like=10 aten::empty_strided=8 aten::linear=5 aten::matmul=5 aten::mm=5 aten::narrow=3 aten::reshape=2 aten::slice=3 aten::t=5 aten::to=2 aten::transpose=5 aten::view=2",
+     "interaction_block.0.refine_block_line_graph": "aten::as_strided=7 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=11 aten::empty_like=5 aten::empty_strided=3 aten::linear=7 aten::matmul=7 aten::mm=7 aten::reshape=2 aten::t=7 aten::transpose=7 aten::view=3 aten::view_as=1",
+     "three_body_embedding": "aten::as_strided=1 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=3 aten::empty_like=2 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "warm.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "auto",
+  "fusion_scope": true,
+  "gpus": 1,
+  "kind": "synthetic",
+  "model": "equal_width_1layer",
+  "profile": "topology",
+  "triplets": 60000
+ }
+}

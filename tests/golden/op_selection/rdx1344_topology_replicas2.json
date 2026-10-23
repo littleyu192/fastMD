@@ -1,0 +1,176 @@
+{
+ "config": "rdx1344_topology_replicas2",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "c56b3866d6e6b99b"
+  ],
+  "python": "3.12.3",
+  "seconds": 7.8,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "capacity_history": [
+   [
+    61440,
+    958464
+   ]
+  ],
+  "replicas": {
+   "batch_size": 2,
+   "candidate_refreshes": 1,
+   "fallback_windows": 0,
+   "launches": 2,
+   "recovery_replays": 0,
+   "steps_per_launch": 1
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "fingerprint": "699a9776094c90b2"
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "<outside>": "aten::__and__=10 aten::__or__=10 aten::_linalg_check_errors=2 aten::_linalg_det=5 aten::_linalg_solve_ex=2 aten::_local_scalar_dense=12 aten::_to_copy=60 aten::abs=10 aten::add=54 aten::add_=10 aten::all=2 aten::any=7 aten::arange=34 aten::as_strided=241 aten::as_strided_=7 aten::bitwise_and=10 aten::bitwise_not=4 aten::bitwise_or=10 aten::cat=11 aten::clamp=18 aten::clamp_min=4 aten::clone=6 aten::contiguous=1 aten::copy_=137 aten::cumsum=11 aten::det=3 aten::diagonal=7 aten::div=2 aten::empty=166 aten::empty_like=25 aten::empty_strided=87 aten::eq=7 aten::expand=16 aten::fill_=109 aten::flatten=2 aten::floor=3 aten::floor_divide=16 aten::fmod_=10 aten::full=4 aten::ge=2 aten::gt=2 aten::index=18 aten::is_nonzero=3 aten::item=12 aten::le=6 aten::linalg_cross=6 aten::linalg_det=5 aten::linalg_inv=2 aten::linalg_inv_ex=2 aten::linalg_lu_factor_ex=7 aten::linalg_lu_solve=2 aten::linalg_solve_ex=2 aten::linalg_vector_norm=8 aten::lt=6 aten::mH=5 aten::mT=2 aten::max=2 aten::min=2 aten::minimum=2 aten::mul=66 aten::mul_=5 aten::narrow=10 aten::ne=9 aten::neg=10 aten::new_empty=4 aten::ones=2 aten::ones_like=4 aten::prod=6 aten::remainder=8 aten::repeat_interleave=1 aten::reshape=33 aten::resize_=57 aten::scatter_reduce_=4 aten::searchsorted=2 aten::select=70 aten::slice=34 aten::sort=4 aten::stack=8 aten::sub=27 aten::sum=21 aten::to=119 aten::transpose=7 aten::unsqueeze=42 aten::view=43 aten::view_as=4 aten::where=24 aten::zero_=92 aten::zeros=65 aten::zeros_like=10 nvalchemiops::batch_build_cell_list=1 nvalchemiops::batch_query_cell_list=1"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_topology_calc_model_graph:cold.eval1",
+    "set": {
+     "<outside>": "aten::__and__=10 aten::__or__=14 aten::_local_scalar_dense=2 aten::_to_copy=20 aten::add=53 aten::any=2 aten::as_strided=123 aten::bitwise_and=10 aten::bitwise_not=4 aten::bitwise_or=14 aten::cat=1 aten::clamp=17 aten::clamp_min=5 aten::clone=4 aten::copy_=76 aten::cumsum=10 aten::div=4 aten::empty=34 aten::empty_strided=24 aten::eq=2 aten::fill_=19 aten::floor=2 aten::floor_divide=8 aten::ge=4 aten::gt=4 aten::index=16 aten::item=2 aten::le=4 aten::linalg_vector_norm=2 aten::lt=6 aten::max=2 aten::minimum=2 aten::mul=51 aten::ne=4 aten::neg=8 aten::reciprocal=1 aten::remainder=4 aten::reshape=27 aten::resize_=24 aten::scatter_reduce_=4 aten::searchsorted=2 aten::select=52 aten::slice=24 aten::sort=4 aten::sqrt=1 aten::stack=1 aten::sub=24 aten::sum=10 aten::to=65 aten::unsqueeze=10 aten::view=28 aten::where=22 aten::zero_=15",
+     "MatRIS": "aten::__and__=1 aten::_local_scalar_dense=6 aten::_reshape_alias=4 aten::_to_copy=12 aten::add=12 aten::add_=3 aten::arange=10 aten::argsort=3 aten::as_strided=77 aten::bitwise_and=1 aten::bitwise_not=1 aten::cat=11 aten::clone=1 aten::copy_=32 aten::cumsum=1 aten::detach_=1 aten::div=3 aten::empty=38 aten::empty_like=6 aten::empty_strided=20 aten::expand=2 aten::fill_=29 aten::full=2 aten::gt=1 aten::index=12 aten::index_add_=5 aten::item=6 aten::lift_fresh=7 aten::linalg_cross=1 aten::linalg_vector_norm=1 aten::lt=2 aten::masked_fill=1 aten::masked_fill_=1 aten::mul=4 aten::ne=5 aten::new_empty=8 aten::new_ones=4 aten::new_zeros=4 aten::ones_like=5 aten::reshape=16 aten::resize_=14 aten::scalar_tensor=2 aten::scatter_add_=1 aten::searchsorted=3 aten::select=37 aten::slice=6 aten::sort=6 aten::sub=4 aten::sum=4 aten::to=28 aten::unsqueeze=13 aten::view=17 aten::where=8 aten::zero_=10 aten::zeros=6",
+     "bwd:IndexAddBackward0": "aten::as_strided=4 aten::empty=1 aten::expand=2 aten::expand_as=1 aten::gather=1 aten::index_select=1 aten::resize_=1 aten::view=1",
+     "bwd:SumBackward0": "aten::as_strided=1 aten::expand=1",
+     "bwd:UnsqueezeBackward0": "aten::add=1 aten::add_=1 aten::as_strided=4 aten::squeeze=4",
+     "bwd:ViewBackward0": "aten::_reshape_alias=1 aten::reshape=2 aten::view=1",
+     "energy_head.pooling": "aten::empty=2 aten::fill_=2 aten::index_add_=2 aten::new_empty=2 aten::new_zeros=2 aten::zero_=2",
+     "force_stress_head": "aten::as_strided=7 aten::bitwise_not=1 aten::clone=1 aten::copy_=1 aten::empty=1 aten::empty_like=2 aten::empty_strided=1 aten::expand=3 aten::fill_=1 aten::masked_fill=1 aten::masked_fill_=1 aten::mul=1 aten::ones_like=1 aten::split_with_sizes=1 aten::sum=2 aten::unsqueeze=1"
+    },
+    "unset": []
+   },
+   "entries": {
+    "ints": {
+     "123904": 245760,
+     "1408": 2816,
+     "61952": 122880,
+     "966656": 1916928
+    },
+    "like": "rdx1344_topology_gpumd_model_graph:construct.eval1"
+   },
+   "fallbacks": {
+    "ints": {
+     "121778": 245760,
+     "1344": 2816
+    },
+    "like": "rdx1344_topology_gpumd_eager:cold.eval1"
+   },
+   "label": "construct.eval1"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_topology_gpumd_model_graph:construct.eval2",
+    "set": {
+     "<outside>": "aten::__and__=10 aten::__or__=18 aten::_to_copy=20 aten::add=54 aten::any=2 aten::as_strided=143 aten::bitwise_and=10 aten::bitwise_not=4 aten::bitwise_or=18 aten::cat=1 aten::clamp=17 aten::clamp_min=5 aten::copy_=88 aten::cumsum=10 aten::detach=2 aten::div=4 aten::empty=34 aten::empty_strided=20 aten::eq=2 aten::fill_=19 aten::floor=2 aten::floor_divide=8 aten::ge=4 aten::gt=4 aten::index=16 aten::le=4 aten::linalg_vector_norm=2 aten::lt=6 aten::max=2 aten::maximum=6 aten::minimum=2 aten::mul=52 aten::ne=4 aten::neg=8 aten::reciprocal=1 aten::remainder=4 aten::reshape=29 aten::resize_=24 aten::scatter_reduce_=4 aten::searchsorted=2 aten::select=52 aten::slice=44 aten::sort=4 aten::sqrt=1 aten::stack=1 aten::sub=24 aten::sum=10 aten::to=65 aten::unsqueeze=10 aten::view=30 aten::where=22 aten::zero_=15",
+     "MatRIS": "aten::__and__=1 aten::_local_scalar_dense=6 aten::_reshape_alias=4 aten::_to_copy=12 aten::add=12 aten::add_=3 aten::arange=10 aten::argsort=3 aten::as_strided=77 aten::bitwise_and=1 aten::bitwise_not=1 aten::cat=11 aten::clone=1 aten::copy_=32 aten::cumsum=1 aten::detach_=1 aten::div=3 aten::empty=38 aten::empty_like=6 aten::empty_strided=20 aten::expand=2 aten::fill_=29 aten::full=2 aten::gt=1 aten::index=12 aten::index_add_=5 aten::item=6 aten::lift_fresh=7 aten::linalg_cross=1 aten::linalg_vector_norm=1 aten::lt=2 aten::masked_fill=1 aten::masked_fill_=1 aten::mul=4 aten::ne=5 aten::new_empty=8 aten::new_ones=4 aten::new_zeros=4 aten::ones_like=5 aten::reshape=16 aten::resize_=14 aten::scalar_tensor=2 aten::scatter_add_=1 aten::searchsorted=3 aten::select=37 aten::slice=6 aten::sort=6 aten::sub=4 aten::sum=4 aten::to=28 aten::unsqueeze=13 aten::view=17 aten::where=8 aten::zero_=10 aten::zeros=6",
+     "bwd:IndexAddBackward0": "aten::as_strided=4 aten::empty=1 aten::expand=2 aten::expand_as=1 aten::gather=1 aten::index_select=1 aten::resize_=1 aten::view=1",
+     "bwd:SumBackward0": "aten::as_strided=1 aten::expand=1",
+     "bwd:UnsqueezeBackward0": "aten::add=1 aten::add_=1 aten::as_strided=4 aten::squeeze=4",
+     "bwd:ViewBackward0": "aten::_reshape_alias=1 aten::reshape=2 aten::view=1",
+     "energy_head.pooling": "aten::empty=2 aten::fill_=2 aten::index_add_=2 aten::new_empty=2 aten::new_zeros=2 aten::zero_=2",
+     "force_stress_head": "aten::as_strided=7 aten::bitwise_not=1 aten::clone=1 aten::copy_=1 aten::empty=1 aten::empty_like=2 aten::empty_strided=1 aten::expand=3 aten::fill_=1 aten::masked_fill=1 aten::masked_fill_=1 aten::mul=1 aten::ones_like=1 aten::split_with_sizes=1 aten::sum=2 aten::unsqueeze=1"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval1"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval1"
+   },
+   "label": "construct.eval2"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval2"
+   },
+   "entries": {
+    "same_as": "construct.eval2"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval2"
+   },
+   "label": "construct.eval3"
+  },
+  {
+   "aten": {
+    "like": "construct.eval2",
+    "set": {
+     "<outside>": "aten::__and__=10 aten::__or__=18 aten::_to_copy=20 aten::add=54 aten::any=2 aten::as_strided=143 aten::bitwise_and=10 aten::bitwise_not=4 aten::bitwise_or=18 aten::cat=1 aten::clamp=17 aten::clamp_min=5 aten::copy_=92 aten::cumsum=10 aten::detach=2 aten::div=4 aten::empty=36 aten::empty_strided=20 aten::eq=2 aten::fill_=19 aten::floor=2 aten::floor_divide=8 aten::ge=4 aten::gt=4 aten::index=16 aten::le=4 aten::linalg_vector_norm=2 aten::lt=6 aten::max=2 aten::maximum=6 aten::minimum=2 aten::mul=52 aten::ne=4 aten::neg=8 aten::reciprocal=1 aten::remainder=4 aten::reshape=29 aten::resize_=24 aten::scatter_reduce_=4 aten::searchsorted=2 aten::select=52 aten::slice=44 aten::sort=4 aten::sqrt=1 aten::stack=1 aten::sub=24 aten::sum=10 aten::to=65 aten::unsqueeze=10 aten::view=30 aten::where=22 aten::zero_=15"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval3"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval3"
+   },
+   "label": "construct.eval4"
+  },
+  {
+   "aten": {
+    "like": "construct.eval2",
+    "set": {
+     "<outside>": "aten::__or__=8 aten::add=1 aten::as_strided=28 aten::bitwise_or=8 aten::cat=1 aten::copy_=18 aten::detach=2 aten::ge=2 aten::gt=2 aten::maximum=6 aten::mul=2 aten::reshape=3 aten::select=6 aten::slice=22 aten::stack=1 aten::view=4"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval4"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval4"
+   },
+   "label": "construct.capture5"
+  },
+  {
+   "aten": {
+    "<outside>": "aten::_local_scalar_dense=7 aten::any=1 aten::as_strided=5 aten::item=7 aten::select=4"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "gpus": 1,
+  "kind": "replicas",
+  "model": "rdx",
+  "profile": "topology",
+  "replicas": 2,
+  "structure": "rdx_1344"
+ }
+}

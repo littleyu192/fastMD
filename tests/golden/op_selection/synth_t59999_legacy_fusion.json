@@ -1,0 +1,161 @@
+{
+ "config": "synth_t59999_legacy_fusion",
+ "info": {
+  "configuration_warnings": [
+   "ConfigurationWarning: InferenceConfig(checkpoint='auto') is deprecated and will be removed in the next version: use saved_tensor_recompute ('on', 'deep' or 'auto', the default) to reduce inference memory. Layer checkpointing stays available for training and fine-tuning through MatRIS(enable_checkpoint=...)."
+  ],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "8dc161852fac16c3"
+  ],
+  "python": "3.12.3",
+  "seconds": 6.6,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 1072,
+   "directed_edges": 8576,
+   "triplets": 59999
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "fingerprint": "2304bfc764ce0ff6"
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "like": "synth_t59999_topology_fusion:cold.eval1",
+    "set": {
+     "atom_embedding.atom_swish_layer.linear": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "edge_embedding": "aten::as_strided=3 aten::empty=1 aten::expand=1 aten::gather=1 aten::index_select=1 aten::resize_=1 aten::view=1",
+     "edge_embedding.edge_linear1": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "edge_embedding.edge_linear2": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "edge_embedding.swish_layer.linear": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "energy_head.energy_head.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "energy_head.energy_head.layers.3": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "energy_head.energy_head.layers.6": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "energy_head.energy_head.layers.9": "aten::addmm=1 aten::as_strided=2 aten::expand=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_atom_graph": "aten::argsort=1 aten::as_strided=6 aten::cat=2 aten::clone=2 aten::contiguous=2 aten::copy_=3 aten::empty=7 aten::empty_like=9 aten::empty_strided=7 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=3 aten::resize_=2 aten::sort=2 aten::to=2 aten::view=5",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.mlp_core.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.mlp_core.layers.3": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.mlp_gate.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.mlp_gate.layers.3": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_atom_graph.node_nonlinear_update.mlp_core.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_atom_graph.node_nonlinear_update.mlp_core.layers.3": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_atom_graph.node_nonlinear_update.mlp_gate.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_atom_graph.node_nonlinear_update.mlp_gate.layers.3": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_atom_graph.source_weight_linear": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_atom_graph.target_weight_linear": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph": "aten::as_strided=6 aten::cat=2 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=5 aten::empty_like=9 aten::empty_strided=7 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=2 aten::resize_=2 aten::to=2 aten::view=4",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_core": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_core.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_gate.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph.node_nonlinear_update.mlp_core.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph.node_nonlinear_update.mlp_core.layers.3": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph.node_nonlinear_update.mlp_gate.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph.node_nonlinear_update.mlp_gate.layers.3": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph.source_weight_linear": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph.target_weight_linear": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_atom_graph": "aten::as_strided=6 aten::cat=1 aten::empty=6 aten::empty_like=2 aten::empty_strided=2 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=2 aten::resize_=2 aten::view=4",
+     "interaction_block.0.refine_block_atom_graph.edge_FFN.layers.0": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_atom_graph.edge_FFN.layers.3": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.mlp_core.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.mlp_core.layers.3": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.mlp_gate.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.mlp_gate.layers.3": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_atom_graph.learnable_envelope": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_atom_graph.node_FFN.layers.0": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_atom_graph.node_FFN.layers.3": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_line_graph": "aten::as_strided=15 aten::cat=1 aten::empty=6 aten::empty_like=2 aten::empty_strided=2 aten::expand=5 aten::gather=5 aten::index_select=5 aten::mul=1 aten::reshape=2 aten::resize_=5 aten::view=7",
+     "interaction_block.0.refine_block_line_graph.edge_FFN.layers.0": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_line_graph.edge_FFN.layers.3": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_core": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_core.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_gate.layers.0": "aten::addmm=1 aten::as_strided=1 aten::linear=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_line_graph.learnable_envelope": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_line_graph.node_FFN.layers.0": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_line_graph.node_FFN.layers.3": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "three_body_embedding": "aten::acos=1 aten::as_strided=7 aten::empty=2 aten::expand=2 aten::gather=2 aten::index_select=2 aten::mul=2 aten::resize_=2 aten::sum=1 aten::view=2",
+     "three_body_embedding.angle_embedding": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "three_body_embedding.swish_layer.linear": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1"
+    },
+    "unset": [
+     "atom_embedding.atom_swish_layer",
+     "edge_embedding.swish_layer",
+     "energy_head.energy_head",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.mlp_core",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.mlp_gate",
+     "interaction_block.0.attn_block_atom_graph.node_nonlinear_update.mlp_core",
+     "interaction_block.0.attn_block_atom_graph.node_nonlinear_update.mlp_gate",
+     "interaction_block.0.attn_block_line_graph.node_nonlinear_update.mlp_core",
+     "interaction_block.0.attn_block_line_graph.node_nonlinear_update.mlp_gate",
+     "interaction_block.0.refine_block_atom_graph.edge_FFN",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.mlp_core",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.mlp_gate",
+     "interaction_block.0.refine_block_atom_graph.node_FFN",
+     "interaction_block.0.refine_block_line_graph.edge_FFN",
+     "interaction_block.0.refine_block_line_graph.node_FFN",
+     "three_body_embedding.swish_layer"
+    ]
+   },
+   "entries": {
+    "same_as": "synth_t59999_topology_fusion:cold.eval1"
+   },
+   "fallbacks": [
+    "fwd three_body_embedding combined_threebody_linear/cached !profile_gate rows=59999 width=7",
+    "fwd interaction_block.0.attn_block_line_graph gated_ln_residual/triton !below_min_rows shape=[4288,128]",
+    "fwd interaction_block.0.attn_block_atom_graph aligned_first_linear_block/decomposed_indexed_silu !split_params:disabled parts=3 rows=8576 width=128",
+    "fwd interaction_block.0.attn_block_atom_graph merged_attention_projection/merged_frozen_projections !first_linear_block_unavailable rows=8576 width=128",
+    "fwd interaction_block.0.attn_block_atom_graph indexed_cat3/decomposed_indexed_silu !split_params:disabled rows=8576 width=128",
+    "fwd interaction_block.0.attn_block_atom_graph gated_ln_residual/triton !below_min_rows shape=[1072,128]",
+    "fwd interaction_block.0.refine_block_atom_graph indexed_cat3/decomposed_indexed_silu !split_params:disabled rows=8576 width=128"
+   ],
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "same_as": "cold.eval1"
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "warm.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "auto",
+  "fusion_scope": true,
+  "gpus": 1,
+  "kind": "synthetic",
+  "model": "equal_width_1layer",
+  "profile": "legacy",
+  "triplets": 59999
+ }
+}

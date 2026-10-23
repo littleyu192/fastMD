@@ -1,0 +1,138 @@
+{
+ "config": "rdx1344_topology_calc_eager",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "c56b3866d6e6b99b"
+  ],
+  "python": "3.12.3",
+  "seconds": 7.7,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "model_graph": null,
+  "topology_reuse": "off"
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "eager",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 8,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "topology_reuse": {
+    "fallbacks": 0,
+    "last_call": "off",
+    "reason": "auto: eager execution rebuilds per call",
+    "requested": "auto",
+    "runner": null
+   },
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "b76daf1c17aa675e",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "eager",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "topology",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_calc_eager:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_topology_gpumd_eager:cold.eval1",
+    "set": {
+     "<outside>": "aten::_to_copy=4 aten::as_strided=3 aten::copy_=4 aten::detach=8 aten::empty_strided=4 aten::resolve_conj=4 aten::resolve_neg=4 aten::select=3 aten::to=8"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "rdx1344_topology_gpumd_eager:cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "rdx1344_topology_gpumd_eager:cold.eval1"
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_topology_gpumd_eager:warm.eval1",
+    "set": {
+     "<outside>": "aten::_to_copy=4 aten::as_strided=3 aten::copy_=4 aten::detach=8 aten::empty_strided=4 aten::resolve_conj=4 aten::resolve_neg=4 aten::select=3 aten::to=8"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "warm.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "execution": "eager",
+  "gpus": 1,
+  "kind": "calculator",
+  "model": "rdx",
+  "profile": "topology",
+  "structure": "rdx_1344"
+ }
+}

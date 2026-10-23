@@ -1,0 +1,89 @@
+{
+ "config": "synth_e60000_legacy_fusion",
+ "info": {
+  "configuration_warnings": [
+   "ConfigurationWarning: InferenceConfig(checkpoint='auto') is deprecated and will be removed in the next version: use saved_tensor_recompute ('on', 'deep' or 'auto', the default) to reduce inference memory. Layer checkpointing stays available for training and fine-tuning through MatRIS(enable_checkpoint=...)."
+  ],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "8dc161852fac16c3"
+  ],
+  "python": "3.12.3",
+  "seconds": 6.7,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 7500,
+   "directed_edges": 60000,
+   "triplets": 1000
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "fingerprint": "2304bfc764ce0ff6"
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "same_as": "synth_e59998_legacy_fusion:cold.eval1"
+   },
+   "entries": {
+    "ints": {
+     "29999": 30000,
+     "59998": 60000
+    },
+    "like": "synth_e59998_legacy_fusion:cold.eval1"
+   },
+   "fallbacks": {
+    "ints": {
+     "59998": 60000
+    },
+    "like": "synth_e59998_legacy_fusion:cold.eval1"
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "same_as": "cold.eval1"
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "warm.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "auto",
+  "edges": 60000,
+  "fusion_scope": true,
+  "gpus": 1,
+  "kind": "synthetic",
+  "model": "equal_width_1layer",
+  "profile": "legacy",
+  "triplets": 1000
+ }
+}

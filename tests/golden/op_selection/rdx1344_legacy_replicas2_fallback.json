@@ -1,0 +1,165 @@
+{
+ "config": "rdx1344_legacy_replicas2_fallback",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "8dc161852fac16c3"
+  ],
+  "python": "3.12.3",
+  "seconds": 9.4,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "capacity_history": [
+   [
+    61440,
+    958464
+   ]
+  ],
+  "replicas": {
+   "batch_size": 2,
+   "candidate_refreshes": 3,
+   "fallback_windows": 2,
+   "launches": 2,
+   "recovery_replays": 2,
+   "steps_per_launch": 1
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "fingerprint": "0816bfd8bf6248b3"
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "rdx1344_topology_replicas2:construct"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_replicas2:construct.eval1"
+   },
+   "entries": {
+    "same_as": "rdx1344_legacy_replicas2:construct.eval1"
+   },
+   "fallbacks": {
+    "same_as": "rdx1344_legacy_replicas2:construct.eval1"
+   },
+   "label": "construct.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_replicas2:construct.eval2"
+   },
+   "entries": {
+    "same_as": "construct.eval1"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval1"
+   },
+   "label": "construct.eval2"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval2"
+   },
+   "entries": {
+    "same_as": "construct.eval2"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval2"
+   },
+   "label": "construct.eval3"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_replicas2:construct.eval4"
+   },
+   "entries": {
+    "same_as": "construct.eval3"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval3"
+   },
+   "label": "construct.eval4"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_replicas2:construct.capture5"
+   },
+   "entries": {
+    "same_as": "construct.eval4"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval4"
+   },
+   "label": "construct.capture5"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_topology_replicas2_fallback:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_legacy_replicas2:construct.eval2",
+    "set": {
+     "<outside>": "aten::__or__=4 aten::_local_scalar_dense=8 aten::add=1 aten::as_strided=12 aten::bitwise_or=4 aten::cat=1 aten::copy_=4 aten::detach=2 aten::ge=2 aten::gt=2 aten::item=8 aten::mul=2 aten::reshape=1 aten::select=10 aten::slice=2 aten::stack=1 aten::view=2"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.capture5"
+   },
+   "fallbacks": {
+    "same_as": "construct.capture5"
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "same_as": "cold.eval1"
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "warm.eval1"
+  }
+ ],
+ "spec": {
+  "candidate_skin": 0.0002,
+  "checkpoint": "off",
+  "gpus": 1,
+  "kind": "replicas",
+  "model": "rdx",
+  "profile": "legacy",
+  "replicas": 2,
+  "structure": "rdx_1344"
+ }
+}

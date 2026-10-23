@@ -1,0 +1,73 @@
+# Layering violations tolerated by tools/lint_layering.py: <file>  <rule>  <target>  <count>.
+# Entries may only be removed, never added: a new violation fails --strict, and so does an
+# entry above the current count (stale: lower or delete it, e.g. with --write-allowlist).
+# Baseline: published FastMD dc1358d source tree, 2026-10-23.
+# These entries document existing coupling; no production source was changed to silence a rule.
+
+# Existing lazy public MatRIS export (upstream baseline, destination is now the model package).
+fastmd/__init__.py  string  fastmd.models.matris  1
+
+# Existing accuracy API eagerly re-exports layered_precision, which loads torch; retain this known init violation without allowing new eager imports.
+fastmd/accuracy/__init__.py  init  fastmd.accuracy.layered_precision  1
+
+# Existing lazy MatRISAdapter export, inherited from the upstream adapter facade.
+fastmd/adapters/__init__.py  string  fastmd.models.matris.adapter  1
+
+# Inherited MatRIS OPTION_REGISTRY string bindings; exact per-target counts prevent new model-specific options from silently expanding this baseline.
+fastmd/config.py  string  models.matris.feature_embed  7
+fastmd/config.py  string  models.matris.functions  8
+fastmd/config.py  string  models.matris.interaction_block  18
+fastmd/config.py  string  models.matris.op.compiled_lowerings  2
+fastmd/config.py  string  models.matris.op.triton_directed_pair_aggregate  2
+fastmd/config.py  string  models.matris.op.triton_gated_ln  1
+fastmd/config.py  string  models.matris.op.triton_line_envelope  2
+fastmd/config.py  string  models.matris.op.triton_residual_add  2
+fastmd/config.py  string  models.matris.op.triton_segment_attention  3
+fastmd/config.py  string  models.matris.op.triton_threebody_fourier  1
+
+# Inherited MatRIS dispatch imports of its fused operators and activation selectors; only the single-device calls still present are counted.
+fastmd/engine/dispatch.py  model  fastmd.models.matris.op.compiled_lowerings  1
+fastmd/engine/dispatch.py  model  fastmd.models.matris.op.triton_csr_segment_sum  1
+fastmd/engine/dispatch.py  model  fastmd.models.matris.op.triton_directed_pair_aggregate  2
+fastmd/engine/dispatch.py  model  fastmd.models.matris.op.triton_gather_cat  2
+fastmd/engine/dispatch.py  model  fastmd.models.matris.op.triton_residual_add  1
+fastmd/engine/dispatch.py  model  fastmd.models.matris.op.triton_segment_attention  3
+fastmd/engine/dispatch.py  model  fastmd.models.matris.op.triton_weighted_segment_sum  1
+fastmd/engine/dispatch.py  string  fastmd.models.matris.functions  1
+fastmd/engine/dispatch.py  string  fastmd.models.matris.interaction_block  1
+
+# Inherited MatRIS policy selectors name model-owned activation and fusion switches.
+fastmd/engine/policy.py  string  fastmd.models.matris.functions  1
+fastmd/engine/policy.py  string  fastmd.models.matris.interaction_block  1
+fastmd/engine/policy.py  string  fastmd.models.matris.op.triton_directed_pair_aggregate  1
+fastmd/engine/policy.py  string  fastmd.models.matris.op.triton_gated_ln  1
+fastmd/engine/policy.py  string  fastmd.models.matris.op.triton_line_envelope  1
+fastmd/engine/policy.py  string  fastmd.models.matris.op.triton_residual_add  1
+fastmd/engine/policy.py  string  fastmd.models.matris.op.triton_segment_attention  1
+fastmd/engine/policy.py  string  fastmd.models.matris.op.triton_threebody_fourier  1
+
+# Existing capture guard queries negotiation capture_budget directly from the execution layer.
+fastmd/execution/_capture_trial.py  adapter  fastmd.adapters.negotiate  1
+
+# Existing probe cache fingerprints upstream patch reports, outside the narrow adapter protocol.
+fastmd/execution/_memory_probe_cache.py  adapter  fastmd.adapters.patches  1
+
+# Existing lazy compatibility export of MatRIS graph conversion.
+fastmd/graph/__init__.py  string  fastmd.models.matris.converter  1
+
+# Existing empty compatibility package has only a docstring, not the generated Moved/_NEW stub convention.
+fastmd/integrations/__init__.py  old-path  fastmd.integrations  1
+
+# Existing eSEN adapter installs rewrites from the shared ORB/eSEN helper.
+fastmd/models/esen.py  model  fastmd.models.operator_rewrites  1
+
+# Existing shared rewrite installer imports exactly the ORB and eSEN operator implementations; this is not a general cross-family exemption.
+fastmd/models/operator_rewrites.py  model  fastmd.models.esen_ops.esen_inference  1
+fastmd/models/operator_rewrites.py  model  fastmd.models.orb_ops.orb_inference  1
+
+# Existing ORB adapter installs rewrites from the shared ORB/eSEN helper.
+fastmd/models/orb.py  model  fastmd.models.operator_rewrites  1
+
+# Existing lazy compatibility names for MatRIS fused activation operators.
+fastmd/ops/__init__.py  string  fastmd.models.matris.op.fuse_sigmoid_op  1
+fastmd/ops/__init__.py  string  fastmd.models.matris.op.fused_silu_op  1

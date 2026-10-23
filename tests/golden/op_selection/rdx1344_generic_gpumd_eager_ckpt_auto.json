@@ -1,0 +1,251 @@
+{
+ "config": "rdx1344_generic_gpumd_eager_ckpt_auto",
+ "info": {
+  "configuration_warnings": [
+   "ConfigurationWarning: InferenceConfig(checkpoint='auto') is deprecated and will be removed in the next version: use saved_tensor_recompute ('on', 'deep' or 'auto', the default) to reduce inference memory. Layer checkpointing stays available for training and fine-tuning through MatRIS(enable_checkpoint=...)."
+  ],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "b2a5329f92eaf818"
+  ],
+  "python": "3.12.3",
+  "seconds": 6.7,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 1344,
+   "directed_edges": 121778,
+   "triplets": 951366
+  },
+  "model_graph": null
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": null,
+   "execution": "eager",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 0,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "b4319f4f044ea008",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "auto",
+   "execution": "eager",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "generic",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_gpumd_eager:construct"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_gpumd_eager:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_generic_gpumd_eager_ckpt_on:cold.eval1"
+   },
+   "entries": {
+    "like": "rdx1344_generic_gpumd_eager_ckpt_on:cold.eval1",
+    "patch": [
+     [
+      6,
+      7,
+      [
+       "fwd interaction_block.0 layer_checkpoint/on compiled=false enable_checkpoint=null layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      25,
+      26,
+      [
+       "fwd interaction_block.0 layer_checkpoint/off compiled=false enable_checkpoint=null layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      46,
+      47,
+      [
+       "fwd interaction_block.0 layer_checkpoint/on compiled=false enable_checkpoint=null layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      59,
+      60,
+      [
+       "fwd interaction_block.0 layer_checkpoint/off compiled=false enable_checkpoint=null layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      74,
+      75,
+      [
+       "fwd interaction_block.1 layer_checkpoint/on compiled=false enable_checkpoint=null layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      93,
+      94,
+      [
+       "fwd interaction_block.1 layer_checkpoint/off compiled=false enable_checkpoint=null layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      114,
+      115,
+      [
+       "fwd interaction_block.1 layer_checkpoint/on compiled=false enable_checkpoint=null layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      127,
+      128,
+      [
+       "fwd interaction_block.1 layer_checkpoint/off compiled=false enable_checkpoint=null layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      142,
+      143,
+      [
+       "fwd interaction_block.2 layer_checkpoint/on compiled=false enable_checkpoint=null layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      161,
+      162,
+      [
+       "fwd interaction_block.2 layer_checkpoint/off compiled=false enable_checkpoint=null layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      182,
+      183,
+      [
+       "fwd interaction_block.2 layer_checkpoint/on compiled=false enable_checkpoint=null layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      195,
+      196,
+      [
+       "fwd interaction_block.2 layer_checkpoint/off compiled=false enable_checkpoint=null layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      210,
+      211,
+      [
+       "fwd interaction_block.3 layer_checkpoint/on compiled=false enable_checkpoint=null layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      229,
+      230,
+      [
+       "fwd interaction_block.3 layer_checkpoint/off compiled=false enable_checkpoint=null layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      250,
+      251,
+      [
+       "fwd interaction_block.3 layer_checkpoint/on compiled=false enable_checkpoint=null layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      262,
+      263,
+      [
+       "fwd interaction_block.3 layer_checkpoint/off compiled=false enable_checkpoint=null layer=refine_block_atom_graph"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "same_as": "rdx1344_generic_gpumd_eager_ckpt_on:cold.eval1"
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "same_as": "cold.eval1"
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "warm.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "auto",
+  "execution": "eager",
+  "gpus": 1,
+  "kind": "gpumd",
+  "model": "rdx",
+  "profile": "generic",
+  "structure": "rdx_1344"
+ }
+}

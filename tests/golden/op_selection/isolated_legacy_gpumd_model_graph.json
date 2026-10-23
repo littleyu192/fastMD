@@ -1,0 +1,280 @@
+{
+ "config": "isolated_legacy_gpumd_model_graph",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "8dc161852fac16c3"
+  ],
+  "python": "3.12.3",
+  "seconds": 8.2,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 55,
+   "directed_edges": 1816,
+   "triplets": 14672
+  },
+  "model_graph": {
+   "cache_fit_reuses": 0,
+   "cached_buckets": [
+    [
+     1536,
+     16384
+    ],
+    [
+     1536,
+     24576
+    ],
+    [
+     2048,
+     16384
+    ],
+    [
+     2048,
+     24576
+    ]
+   ],
+   "captures": 4,
+   "enable_model_fusions": true
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "model_graph",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 0,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "3a7f716550a67b0c",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "model_graph",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "legacy",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "cluster_legacy_gpumd_model_graph:construct"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "same_as": "cluster_legacy_gpumd_model_graph:construct.eval1"
+   },
+   "entries": {
+    "ints": {
+     "117": 119
+    },
+    "like": "cluster_legacy_gpumd_model_graph:construct.eval1"
+   },
+   "fallbacks": {
+    "ints": {
+     "117": 119
+    },
+    "like": "cluster_legacy_gpumd_model_graph:construct.eval1"
+   },
+   "label": "construct.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval1"
+   },
+   "entries": {
+    "same_as": "construct.eval1"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval1"
+   },
+   "label": "construct.eval2"
+  },
+  {
+   "aten": {
+    "same_as": "cluster_legacy_gpumd_model_graph:construct.eval3"
+   },
+   "entries": {
+    "same_as": "construct.eval2"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval2"
+   },
+   "label": "construct.eval3"
+  },
+  {
+   "aten": {
+    "same_as": "cluster_legacy_gpumd_model_graph:construct.capture4"
+   },
+   "entries": {
+    "same_as": "construct.eval3"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval3"
+   },
+   "label": "construct.capture4"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval3"
+   },
+   "entries": {
+    "ints": {
+     "117": 119
+    },
+    "like": "cluster_legacy_gpumd_model_graph:construct.eval5"
+   },
+   "fallbacks": {
+    "ints": {
+     "117": 119
+    },
+    "like": "cluster_legacy_gpumd_model_graph:construct.eval5"
+   },
+   "label": "construct.eval5"
+  },
+  {
+   "aten": {
+    "same_as": "construct.capture4"
+   },
+   "entries": {
+    "same_as": "construct.eval5"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval5"
+   },
+   "label": "construct.capture6"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval5"
+   },
+   "entries": {
+    "ints": {
+     "117": 119
+    },
+    "like": "cluster_legacy_gpumd_model_graph:construct.eval7"
+   },
+   "fallbacks": {
+    "ints": {
+     "117": 119,
+     "24576": 16384
+    },
+    "like": "cluster_legacy_gpumd_model_graph:construct.eval1"
+   },
+   "label": "construct.eval7"
+  },
+  {
+   "aten": {
+    "same_as": "construct.capture6"
+   },
+   "entries": {
+    "same_as": "construct.eval7"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval7"
+   },
+   "label": "construct.capture8"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval7"
+   },
+   "entries": {
+    "ints": {
+     "117": 119,
+     "24576": 16384
+    },
+    "like": "cluster_legacy_gpumd_model_graph:construct.eval5"
+   },
+   "fallbacks": {
+    "ints": {
+     "117": 119,
+     "24576": 16384
+    },
+    "like": "cluster_legacy_gpumd_model_graph:construct.eval5"
+   },
+   "label": "construct.eval9"
+  },
+  {
+   "aten": {
+    "same_as": "cluster_legacy_gpumd_model_graph:construct.capture10"
+   },
+   "entries": {
+    "same_as": "construct.eval9"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval9"
+   },
+   "label": "construct.capture10"
+  },
+  {
+   "aten": {
+    "same_as": "cluster_legacy_gpumd_model_graph:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "execution": "model_graph",
+  "gpus": 1,
+  "kind": "gpumd",
+  "model": "rdx",
+  "profile": "legacy",
+  "structure": "isolated"
+ }
+}

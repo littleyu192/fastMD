@@ -1,0 +1,147 @@
+{
+ "config": "synth_e10000_topology_fusion",
+ "info": {
+  "configuration_warnings": [
+   "ConfigurationWarning: InferenceConfig(checkpoint='auto') is deprecated and will be removed in the next version: use saved_tensor_recompute ('on', 'deep' or 'auto', the default) to reduce inference memory. Layer checkpointing stays available for training and fine-tuning through MatRIS(enable_checkpoint=...)."
+  ],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "c56b3866d6e6b99b"
+  ],
+  "python": "3.12.3",
+  "seconds": 6.6,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 1250,
+   "directed_edges": 10000,
+   "triplets": 1000
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "fingerprint": "8d91d2b94984a20e"
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "like": "synth_e9998_topology_fusion:cold.eval1",
+    "set": {
+     "bwd:AddmmBackward0": "aten::add_=6 aten::as_strided=24 aten::mm=24 aten::t=24 aten::transpose=24",
+     "bwd:MmBackward0": "aten::add_=4 aten::as_strided=19 aten::mm=19 aten::t=19 aten::transpose=19",
+     "bwd:MulBackward0": "aten::add_=2 aten::mul=30 aten::sum=5",
+     "bwd:NativeLayerNormBackward0": "aten::empty=10 aten::native_layer_norm_backward=10",
+     "bwd:_GatedLNBackward": "aten::empty_like=4 aten::empty_strided=4",
+     "bwd:fusion_silu_fwdBackward": "aten::empty=23",
+     "bwd:sigmoid_fwdBackward": "aten::empty=4",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update": "aten::empty=4 aten::empty_like=1 aten::empty_strided=1",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.mlp_core": "aten::addmm=1 aten::as_strided=2 aten::linear=2 aten::matmul=1 aten::mm=1 aten::t=2 aten::transpose=2",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.mlp_gate": "aten::addmm=1 aten::as_strided=2 aten::linear=2 aten::matmul=1 aten::mm=1 aten::t=2 aten::transpose=2",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update": "aten::empty=4 aten::empty_like=1 aten::empty_strided=1",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.mlp_core": "aten::addmm=1 aten::as_strided=2 aten::linear=2 aten::matmul=1 aten::mm=1 aten::t=2 aten::transpose=2",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.mlp_gate": "aten::addmm=1 aten::as_strided=2 aten::linear=2 aten::matmul=1 aten::mm=1 aten::t=2 aten::transpose=2"
+    },
+    "unset": [
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.activation_func",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.activation_gate",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.core_norm",
+     "interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.gate_norm",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.activation_func",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.activation_gate",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.core_norm",
+     "interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.gate_norm"
+    ]
+   },
+   "entries": {
+    "ints": {
+     "4999": 5000,
+     "9998": 10000
+    },
+    "like": "synth_e9998_topology_fusion:cold.eval1",
+    "patch": [
+     [
+      27,
+      30,
+      [
+       "fwd interaction_block.0.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=10000 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      59,
+      62,
+      [
+       "fwd interaction_block.0.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=10000 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      77,
+      79,
+      [
+       "bwd interaction_block.0.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=10000 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      98,
+      100,
+      [
+       "bwd interaction_block.0.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=10000 tile=\"2d\" width=128"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "ints": {
+     "1432": 10000,
+     "179": 1250,
+     "716": 5000,
+     "9999": 1000
+    },
+    "like": "synth_t9999_topology_fusion:cold.eval1"
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "same_as": "cold.eval1"
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "warm.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "auto",
+  "edges": 10000,
+  "fusion_scope": true,
+  "gpus": 1,
+  "kind": "synthetic",
+  "model": "equal_width_1layer",
+  "profile": "topology",
+  "triplets": 1000
+ }
+}

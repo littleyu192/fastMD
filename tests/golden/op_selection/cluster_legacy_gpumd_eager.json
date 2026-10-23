@@ -1,0 +1,504 @@
+{
+ "config": "cluster_legacy_gpumd_eager",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "8dc161852fac16c3"
+  ],
+  "python": "3.12.3",
+  "seconds": 6.7,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 53,
+   "directed_edges": 1816,
+   "triplets": 14672
+  },
+  "model_graph": null
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "eager",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 0,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "1d23d4ce6d589544",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "eager",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "legacy",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_gpumd_eager:construct"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "<outside>": "aten::_local_scalar_dense=2 aten::_to_copy=15 aten::_unique2=1 aten::add=23 aten::arange=10 aten::argsort=1 aten::as_strided=77 aten::bincount=1 aten::cat=1 aten::clamp=1 aten::copy_=20 aten::cumsum=2 aten::empty=27 aten::empty_strided=15 aten::expand=1 aten::fill_=14 aten::full=2 aten::index=18 aten::item=2 aten::linalg_vector_norm=1 aten::lt=3 aten::max=1 aten::min=1 aten::minimum=1 aten::mul=23 aten::neg=3 aten::nonzero=8 aten::nonzero_numpy=1 aten::prod=1 aten::remainder=2 aten::reshape=21 aten::resize_=15 aten::resolve_conj=1 aten::resolve_neg=1 aten::scatter_=1 aten::scatter_reduce_=1 aten::searchsorted=1 aten::select=21 aten::set_=16 aten::slice=6 aten::sort=2 aten::squeeze=1 aten::stack=1 aten::sub=2 aten::sum=3 aten::t=8 aten::to=31 aten::transpose=8 aten::unbind=1 aten::unsqueeze=12 aten::view=22 aten::where=1 aten::zero_=11 aten::zeros=8 nvalchemiops::batch_build_cell_list=1 nvalchemiops::batch_query_cell_list=1"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_generic_gpumd_eager:cold.eval1",
+    "set": {
+     "MatRIS": "aten::_local_scalar_dense=3 aten::_reshape_alias=2 aten::_to_copy=11 aten::add=7 aten::add_=3 aten::arange=8 aten::argsort=3 aten::as_strided=57 aten::bitwise_not=1 aten::cat=10 aten::clone=1 aten::copy_=27 aten::cumsum=1 aten::detach_=1 aten::div=3 aten::empty=30 aten::empty_like=6 aten::empty_strided=18 aten::expand=2 aten::fill_=21 aten::full=1 aten::index=7 aten::index_add_=5 aten::item=3 aten::lift_fresh=4 aten::linalg_cross=1 aten::linalg_vector_norm=1 aten::masked_fill=1 aten::masked_fill_=1 aten::mul=3 aten::narrow=9 aten::ne=5 aten::new_empty=7 aten::new_ones=4 aten::new_zeros=3 aten::ones_like=5 aten::reshape=11 aten::resize_=11 aten::searchsorted=3 aten::select=25 aten::slice=9 aten::sort=6 aten::sub=4 aten::sum=7 aten::to=24 aten::unsqueeze=8 aten::view=10 aten::where=4 aten::zero_=8 aten::zeros=5",
+     "bwd:AddmmBackward0": "aten::add_=24 aten::as_strided=84 aten::mm=84 aten::t=84 aten::transpose=84",
+     "bwd:DivBackward0": "aten::add_=2 aten::div=12 aten::mul=3 aten::neg=3 aten::sum=3",
+     "bwd:IndexBackward0": "aten::_index_put_impl_=2 aten::add_=1 aten::arange=4 aten::as_strided=2 aten::div_=4 aten::divide_=2 aten::empty=8 aten::empty_like=4 aten::expand=2 aten::fill_=2 aten::mul=4 aten::new_empty=2 aten::new_zeros=2 aten::remainder=4 aten::reshape=2 aten::resize_=2 aten::to=2 aten::view=2 aten::zero_=2",
+     "bwd:IndexSelectBackward0": "aten::add_=39 aten::empty=45 aten::fill_=45 aten::index_add_=45 aten::index_select_backward=45 aten::new_empty=45 aten::new_zeros=45 aten::zero_=45",
+     "bwd:MmBackward0": "aten::add_=16 aten::as_strided=73 aten::mm=73 aten::t=73 aten::transpose=73",
+     "bwd:MulBackward0": "aten::add_=2 aten::mul=60 aten::sum=5",
+     "bwd:NativeLayerNormBackward0": "aten::empty=34 aten::native_layer_norm_backward=34",
+     "bwd:SubBackward0": "aten::neg=1",
+     "bwd:_CsrSegmentSumBackward": "aten::add_=22 aten::clone=16 aten::contiguous=16 aten::copy_=16 aten::empty=64 aten::empty_like=16",
+     "bwd:_DirectedPairAverageBackward": "aten::empty=7",
+     "bwd:_GatedLNBackward": "aten::empty_like=16 aten::empty_strided=16",
+     "bwd:_ResidualAddBackward": "aten::clone=1 aten::contiguous=1 aten::copy_=1 aten::empty=1 aten::empty_like=31 aten::empty_strided=30",
+     "bwd:_SegSoftmaxCSRBackward": "aten::empty_like=16 aten::empty_strided=16",
+     "bwd:_UndirectedPairExpandBackward": "aten::add_=10 aten::clone=4 aten::contiguous=4 aten::copy_=4 aten::empty=16 aten::empty_like=4",
+     "bwd:fusion_silu_fwdBackward": "aten::empty=83",
+     "bwd:sigmoid_fwdBackward": "aten::empty=16",
+     "edge_embedding": "aten::as_strided=3 aten::empty=1 aten::expand=1 aten::gather=1 aten::index_select=1 aten::resize_=1 aten::view=1",
+     "interaction_block.0.attn_block_atom_graph": "aten::arange=10 aten::argsort=3 aten::as_strided=8 aten::cat=2 aten::copy_=9 aten::empty=13 aten::empty_like=4 aten::empty_strided=4 aten::expand=2 aten::gather=2 aten::index=2 aten::index_select=2 aten::reshape=5 aten::resize_=9 aten::searchsorted=2 aten::sort=6 aten::to=2 aten::view=10",
+     "interaction_block.0.attn_block_line_graph": "aten::arange=4 aten::argsort=2 aten::as_strided=8 aten::cat=2 aten::copy_=4 aten::empty=8 aten::empty_like=4 aten::empty_strided=6 aten::expand=2 aten::gather=2 aten::index=2 aten::index_select=2 aten::reshape=4 aten::resize_=6 aten::searchsorted=2 aten::sort=4 aten::to=2 aten::view=6",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update": "aten::empty=4 aten::empty_like=1 aten::empty_strided=1",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_core": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_atom_graph": "aten::as_strided=6 aten::cat=1 aten::empty=6 aten::empty_like=2 aten::empty_strided=2 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=2 aten::resize_=2 aten::view=4",
+     "interaction_block.0.refine_block_line_graph": "aten::as_strided=15 aten::cat=1 aten::empty=6 aten::empty_like=2 aten::empty_strided=2 aten::expand=5 aten::gather=5 aten::index_select=5 aten::mul=1 aten::reshape=2 aten::resize_=5 aten::view=7",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update": "aten::empty=4 aten::empty_like=1 aten::empty_strided=1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_core": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.1.attn_block_atom_graph": "aten::arange=8 aten::argsort=2 aten::as_strided=8 aten::cat=2 aten::copy_=6 aten::empty=12 aten::empty_like=4 aten::empty_strided=4 aten::expand=2 aten::gather=2 aten::index=2 aten::index_select=2 aten::reshape=4 aten::resize_=8 aten::searchsorted=2 aten::sort=4 aten::to=2 aten::view=8",
+     "interaction_block.1.attn_block_line_graph": "aten::arange=4 aten::argsort=2 aten::as_strided=8 aten::cat=2 aten::copy_=4 aten::empty=8 aten::empty_like=4 aten::empty_strided=6 aten::expand=2 aten::gather=2 aten::index=2 aten::index_select=2 aten::reshape=4 aten::resize_=6 aten::searchsorted=2 aten::sort=4 aten::to=2 aten::view=6",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update": "aten::empty=4 aten::empty_like=1 aten::empty_strided=1",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.mlp_core": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.1.refine_block_atom_graph": "aten::as_strided=6 aten::cat=1 aten::empty=6 aten::empty_like=2 aten::empty_strided=2 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=2 aten::resize_=2 aten::view=4",
+     "interaction_block.1.refine_block_line_graph": "aten::as_strided=15 aten::cat=1 aten::empty=6 aten::empty_like=2 aten::empty_strided=2 aten::expand=5 aten::gather=5 aten::index_select=5 aten::mul=1 aten::reshape=2 aten::resize_=5 aten::view=7",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update": "aten::empty=4 aten::empty_like=1 aten::empty_strided=1",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.mlp_core": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.2.attn_block_atom_graph": "aten::arange=8 aten::argsort=2 aten::as_strided=8 aten::cat=2 aten::copy_=6 aten::empty=12 aten::empty_like=4 aten::empty_strided=4 aten::expand=2 aten::gather=2 aten::index=2 aten::index_select=2 aten::reshape=4 aten::resize_=8 aten::searchsorted=2 aten::sort=4 aten::to=2 aten::view=8",
+     "interaction_block.2.attn_block_line_graph": "aten::arange=4 aten::argsort=2 aten::as_strided=8 aten::cat=2 aten::copy_=4 aten::empty=8 aten::empty_like=4 aten::empty_strided=6 aten::expand=2 aten::gather=2 aten::index=2 aten::index_select=2 aten::reshape=4 aten::resize_=6 aten::searchsorted=2 aten::sort=4 aten::to=2 aten::view=6",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update": "aten::empty=4 aten::empty_like=1 aten::empty_strided=1",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.mlp_core": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.2.refine_block_atom_graph": "aten::as_strided=6 aten::cat=1 aten::empty=6 aten::empty_like=2 aten::empty_strided=2 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=2 aten::resize_=2 aten::view=4",
+     "interaction_block.2.refine_block_line_graph": "aten::as_strided=15 aten::cat=1 aten::empty=6 aten::empty_like=2 aten::empty_strided=2 aten::expand=5 aten::gather=5 aten::index_select=5 aten::mul=1 aten::reshape=2 aten::resize_=5 aten::view=7",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update": "aten::empty=4 aten::empty_like=1 aten::empty_strided=1",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.mlp_core": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.3.attn_block_atom_graph": "aten::arange=8 aten::argsort=2 aten::as_strided=8 aten::cat=2 aten::copy_=6 aten::empty=12 aten::empty_like=4 aten::empty_strided=4 aten::expand=2 aten::gather=2 aten::index=2 aten::index_select=2 aten::reshape=4 aten::resize_=8 aten::searchsorted=2 aten::sort=4 aten::to=2 aten::view=8",
+     "interaction_block.3.attn_block_line_graph": "aten::arange=4 aten::argsort=2 aten::as_strided=8 aten::cat=2 aten::copy_=4 aten::empty=8 aten::empty_like=4 aten::empty_strided=6 aten::expand=2 aten::gather=2 aten::index=2 aten::index_select=2 aten::reshape=4 aten::resize_=6 aten::searchsorted=2 aten::sort=4 aten::to=2 aten::view=6",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update": "aten::empty=4 aten::empty_like=1 aten::empty_strided=1",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.mlp_core": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.3.refine_block_atom_graph": "aten::as_strided=6 aten::cat=1 aten::empty=5 aten::empty_like=1 aten::empty_strided=1 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=1 aten::resize_=2 aten::view=3",
+     "interaction_block.3.refine_block_line_graph": "aten::as_strided=15 aten::cat=1 aten::empty=6 aten::empty_like=1 aten::empty_strided=1 aten::expand=5 aten::gather=5 aten::index_select=5 aten::mul=1 aten::reshape=1 aten::resize_=5 aten::view=6",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update": "aten::empty=4 aten::empty_like=1 aten::empty_strided=1",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.mlp_core": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::as_strided=1 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1"
+    },
+    "unset": [
+     "bwd:ExpBackward0",
+     "bwd:IndexAddBackward0",
+     "bwd:PermuteBackward0",
+     "bwd:ScatterReduceBackward0",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.activation_func",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.activation_gate",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.core_norm",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.gate_norm",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_core.layers.3",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_gate.layers.3",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.activation_func",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.activation_gate",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.core_norm",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.gate_norm",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_core.layers.3",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_gate.layers.3",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.activation_func",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.activation_gate",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.core_norm",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.gate_norm",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.mlp_core.layers.3",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.mlp_gate.layers.3",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.activation_func",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.activation_gate",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.core_norm",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.gate_norm",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.mlp_core.layers.3",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.mlp_gate.layers.3",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.activation_func",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.activation_gate",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.core_norm",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.gate_norm",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.mlp_core.layers.3",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.mlp_gate.layers.3",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.activation_func",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.activation_gate",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.core_norm",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.gate_norm",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.mlp_core.layers.3",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.mlp_gate.layers.3",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.activation_func",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.activation_gate",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.core_norm",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.gate_norm",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.mlp_core.layers.3",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.mlp_gate.layers.3",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.activation_func",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.activation_gate",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.core_norm",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.gate_norm",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.mlp_core.layers.3",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.mlp_gate.layers.3"
+    ]
+   },
+   "entries": {
+    "ints": {
+     "121778": 1816,
+     "1344": 53,
+     "60889": 908,
+     "951366": 14672
+    },
+    "like": "rdx1344_legacy_gpumd_eager:cold.eval1",
+    "patch": [
+     [
+      18,
+      19,
+      [
+       "fwd interaction_block.0.attn_block_line_graph.node_nonlinear_update gated_ln/torch norm=LayerNorm rows=908 width=32",
+       "fwd interaction_block.0.attn_block_line_graph.node_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[908,32]",
+       "fwd interaction_block.0.attn_block_line_graph.node_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[908,32]",
+       "fwd interaction_block.0.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=908 width=32"
+      ]
+     ],
+     [
+      25,
+      26,
+      [
+       "fwd interaction_block.0.attn_block_atom_graph.edge_nonlinear_update gated_ln/torch norm=LayerNorm rows=1816 width=32",
+       "fwd interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[1816,32]",
+       "fwd interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[1816,32]"
+      ]
+     ],
+     [
+      56,
+      57,
+      [
+       "fwd interaction_block.0.refine_block_atom_graph.edge_nonlinear_update gated_ln/torch norm=LayerNorm rows=1816 width=32",
+       "fwd interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[1816,32]",
+       "fwd interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[1816,32]"
+      ]
+     ],
+     [
+      75,
+      76,
+      [
+       "fwd interaction_block.1.attn_block_line_graph.node_nonlinear_update gated_ln/torch norm=LayerNorm rows=908 width=32",
+       "fwd interaction_block.1.attn_block_line_graph.node_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[908,32]",
+       "fwd interaction_block.1.attn_block_line_graph.node_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[908,32]",
+       "fwd interaction_block.1.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=908 width=32"
+      ]
+     ],
+     [
+      82,
+      83,
+      [
+       "fwd interaction_block.1.attn_block_atom_graph.edge_nonlinear_update gated_ln/torch norm=LayerNorm rows=1816 width=32",
+       "fwd interaction_block.1.attn_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[1816,32]",
+       "fwd interaction_block.1.attn_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[1816,32]"
+      ]
+     ],
+     [
+      113,
+      114,
+      [
+       "fwd interaction_block.1.refine_block_atom_graph.edge_nonlinear_update gated_ln/torch norm=LayerNorm rows=1816 width=32",
+       "fwd interaction_block.1.refine_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[1816,32]",
+       "fwd interaction_block.1.refine_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[1816,32]"
+      ]
+     ],
+     [
+      132,
+      133,
+      [
+       "fwd interaction_block.2.attn_block_line_graph.node_nonlinear_update gated_ln/torch norm=LayerNorm rows=908 width=32",
+       "fwd interaction_block.2.attn_block_line_graph.node_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[908,32]",
+       "fwd interaction_block.2.attn_block_line_graph.node_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[908,32]",
+       "fwd interaction_block.2.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=908 width=32"
+      ]
+     ],
+     [
+      139,
+      140,
+      [
+       "fwd interaction_block.2.attn_block_atom_graph.edge_nonlinear_update gated_ln/torch norm=LayerNorm rows=1816 width=32",
+       "fwd interaction_block.2.attn_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[1816,32]",
+       "fwd interaction_block.2.attn_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[1816,32]"
+      ]
+     ],
+     [
+      170,
+      171,
+      [
+       "fwd interaction_block.2.refine_block_atom_graph.edge_nonlinear_update gated_ln/torch norm=LayerNorm rows=1816 width=32",
+       "fwd interaction_block.2.refine_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[1816,32]",
+       "fwd interaction_block.2.refine_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[1816,32]"
+      ]
+     ],
+     [
+      189,
+      190,
+      [
+       "fwd interaction_block.3.attn_block_line_graph.node_nonlinear_update gated_ln/torch norm=LayerNorm rows=908 width=32",
+       "fwd interaction_block.3.attn_block_line_graph.node_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[908,32]",
+       "fwd interaction_block.3.attn_block_line_graph.node_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[908,32]",
+       "fwd interaction_block.3.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=908 width=32"
+      ]
+     ],
+     [
+      196,
+      197,
+      [
+       "fwd interaction_block.3.attn_block_atom_graph.edge_nonlinear_update gated_ln/torch norm=LayerNorm rows=1816 width=32",
+       "fwd interaction_block.3.attn_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[1816,32]",
+       "fwd interaction_block.3.attn_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[1816,32]"
+      ]
+     ],
+     [
+      226,
+      227,
+      [
+       "fwd interaction_block.3.refine_block_atom_graph.edge_nonlinear_update gated_ln/torch norm=LayerNorm rows=1816 width=32",
+       "fwd interaction_block.3.refine_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[1816,32]",
+       "fwd interaction_block.3.refine_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator dtype=torch.float32 kernel=aten.sigmoid shape=[1816,32]"
+      ]
+     ],
+     [
+      240,
+      241,
+      [
+       "bwd interaction_block.3.refine_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[1816,32]",
+       "bwd interaction_block.3.refine_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[1816,32]"
+      ]
+     ],
+     [
+      262,
+      263,
+      [
+       "bwd interaction_block.3.attn_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[1816,32]",
+       "bwd interaction_block.3.attn_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[1816,32]"
+      ]
+     ],
+     [
+      267,
+      268,
+      [
+       "bwd interaction_block.3.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=908 width=32",
+       "bwd interaction_block.3.attn_block_line_graph.node_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[908,32]",
+       "bwd interaction_block.3.attn_block_line_graph.node_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[908,32]"
+      ]
+     ],
+     [
+      283,
+      284,
+      [
+       "bwd interaction_block.2.refine_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[1816,32]",
+       "bwd interaction_block.2.refine_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[1816,32]"
+      ]
+     ],
+     [
+      307,
+      308,
+      [
+       "bwd interaction_block.2.attn_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[1816,32]",
+       "bwd interaction_block.2.attn_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[1816,32]"
+      ]
+     ],
+     [
+      312,
+      313,
+      [
+       "bwd interaction_block.2.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=908 width=32",
+       "bwd interaction_block.2.attn_block_line_graph.node_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[908,32]",
+       "bwd interaction_block.2.attn_block_line_graph.node_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[908,32]"
+      ]
+     ],
+     [
+      328,
+      329,
+      [
+       "bwd interaction_block.1.refine_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[1816,32]",
+       "bwd interaction_block.1.refine_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[1816,32]"
+      ]
+     ],
+     [
+      352,
+      353,
+      [
+       "bwd interaction_block.1.attn_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[1816,32]",
+       "bwd interaction_block.1.attn_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[1816,32]"
+      ]
+     ],
+     [
+      357,
+      358,
+      [
+       "bwd interaction_block.1.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=908 width=32",
+       "bwd interaction_block.1.attn_block_line_graph.node_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[908,32]",
+       "bwd interaction_block.1.attn_block_line_graph.node_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[908,32]"
+      ]
+     ],
+     [
+      373,
+      374,
+      [
+       "bwd interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[1816,32]",
+       "bwd interaction_block.0.refine_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[1816,32]"
+      ]
+     ],
+     [
+      397,
+      398,
+      [
+       "bwd interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[1816,32]",
+       "bwd interaction_block.0.attn_block_atom_graph.edge_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[1816,32]"
+      ]
+     ],
+     [
+      402,
+      403,
+      [
+       "bwd interaction_block.0.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=908 width=32",
+       "bwd interaction_block.0.attn_block_line_graph.node_nonlinear_update.activation_gate sigmoid/jiterator kernel=sigmoid_bwd shape=[908,32]",
+       "bwd interaction_block.0.attn_block_line_graph.node_nonlinear_update.activation_func silu/jiterator kernel=silu_bwd shape=[908,32]"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "ints": {
+     "121778": 1816,
+     "1344": 53,
+     "951366": 14672
+    },
+    "like": "rdx1344_legacy_gpumd_eager:cold.eval1",
+    "patch": [
+     [
+      1,
+      1,
+      [
+       "fwd interaction_block.0.attn_block_line_graph gated_ln_residual/triton !below_min_rows shape=[908,32]"
+      ]
+     ],
+     [
+      6,
+      6,
+      [
+       "fwd interaction_block.1.attn_block_line_graph gated_ln_residual/triton !below_min_rows shape=[908,32]"
+      ]
+     ],
+     [
+      11,
+      11,
+      [
+       "fwd interaction_block.2.attn_block_line_graph gated_ln_residual/triton !below_min_rows shape=[908,32]"
+      ]
+     ],
+     [
+      16,
+      16,
+      [
+       "fwd interaction_block.3.attn_block_line_graph gated_ln_residual/triton !below_min_rows shape=[908,32]"
+      ]
+     ]
+    ]
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "same_as": "cold.eval1"
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "warm.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "execution": "eager",
+  "gpus": 1,
+  "kind": "gpumd",
+  "model": "rdx",
+  "profile": "legacy",
+  "structure": "rdx_cluster"
+ }
+}

@@ -1,0 +1,207 @@
+{
+ "config": "rdx1344_default_calc",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "c56b3866d6e6b99b"
+  ],
+  "python": "3.12.3",
+  "seconds": 7.5,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "model_graph": {
+   "cache_fit_reuses": 0,
+   "cached_buckets": [
+    [
+     61440,
+     958464
+    ]
+   ],
+   "captures": 1,
+   "enable_model_fusions": true
+  },
+  "topology_reuse": "skin"
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "auto_execution": {
+    "decisions": [
+     "model_graph"
+    ],
+    "mode": "model_graph"
+   },
+   "checkpoint": false,
+   "execution": "model_graph",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 8,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "topology_reuse": {
+    "fallbacks": 0,
+    "last_call": "skin",
+    "reason": null,
+    "requested": "auto",
+    "runner": {
+     "buffer_max": 1504,
+     "cache_fit_reuses": 0,
+     "cached_buckets": [
+      [
+       61440,
+       958464
+      ]
+     ],
+     "calls": 1,
+     "capture": true,
+     "captures": 1,
+     "check_ties": 0,
+     "checks": 0,
+     "enable_model_fusions": true,
+     "last_edge_count": 121778,
+     "last_triplet_count": 951366,
+     "max_host_displacement": 0.0,
+     "pool_resets": 0,
+     "redo_capacity": 0,
+     "redo_skin": 0,
+     "refreshes": 1,
+     "shared_graph_pool": true,
+     "shrinks": 0,
+     "skin": 2.0,
+     "warmup_runs": 3
+    }
+   },
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "7084a61776fe54fb",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": null,
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": null,
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_calc_eager:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_topology_calc_eager:cold.eval1"
+   },
+   "entries": {
+    "same_as": "rdx1344_topology_gpumd_eager:cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "rdx1344_topology_gpumd_eager:cold.eval1"
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_calc_model_graph:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_topology_calc_model_graph:cold.eval2"
+   },
+   "entries": {
+    "same_as": "rdx1344_topology_gpumd_model_graph:construct.eval9"
+   },
+   "fallbacks": {
+    "same_as": "rdx1344_topology_gpumd_model_graph:construct.eval5"
+   },
+   "label": "warm.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "warm.eval1"
+   },
+   "entries": {
+    "same_as": "warm.eval1"
+   },
+   "fallbacks": {
+    "same_as": "warm.eval1"
+   },
+   "label": "warm.eval2"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_topology_calc_model_graph:cold.eval3"
+   },
+   "entries": {
+    "same_as": "warm.eval2"
+   },
+   "fallbacks": {
+    "same_as": "warm.eval2"
+   },
+   "label": "warm.eval3"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_topology_calc_model_graph:cold.capture4"
+   },
+   "entries": {
+    "same_as": "warm.eval3"
+   },
+   "fallbacks": {
+    "same_as": "warm.eval3"
+   },
+   "label": "warm.capture4"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "gpus": 1,
+  "kind": "calculator",
+  "model": "rdx",
+  "profile": null,
+  "structure": "rdx_1344"
+ }
+}

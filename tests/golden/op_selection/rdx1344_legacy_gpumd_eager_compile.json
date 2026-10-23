@@ -1,0 +1,569 @@
+{
+ "config": "rdx1344_legacy_gpumd_eager_compile",
+ "dynamo": {
+  "aot_autograd": {
+   "ok": 31,
+   "total": 36
+  },
+  "frames": {
+   "ok": 75,
+   "total": 75
+  },
+  "graph_breaks": {
+   "Attempted to inline function marked as skipped | Explanation: Dynamo developers have intentionally marked that the function `_JittedFunction.__call__` should not be traced. | Developer debug context: qualname: _JittedFunction.__call__, name: __call__, filename: `jiterator.py`, skip reason: file matches MOD_SKIPLIST (cuda)": 49
+  },
+  "recompiles": {
+   "_finish_gate": 1,
+   "_module_forward": 1,
+   "_policy_residual": 1,
+   "attention_nodes": 6,
+   "attention_rows": 6,
+   "forward": 4,
+   "refinement_edges": 4,
+   "refinement_nodes": 2,
+   "refinement_rows": 2,
+   "torch_dynamo_resume_in_attention_nodes": 1,
+   "torch_dynamo_resume_in_forward": 9,
+   "torch_dynamo_resume_in_refinement_edges": 1,
+   "torch_dynamo_resume_in_refinement_nodes": 1
+  },
+  "resumes": {
+   "torch_dynamo_resume_in__finish_gate": 2,
+   "torch_dynamo_resume_in_attention_nodes": 3,
+   "torch_dynamo_resume_in_attention_rows": 3,
+   "torch_dynamo_resume_in_forward": 15,
+   "torch_dynamo_resume_in_forward_with_residual": 2,
+   "torch_dynamo_resume_in_refinement_edges": 1,
+   "torch_dynamo_resume_in_refinement_nodes": 2,
+   "torch_dynamo_resume_in_refinement_rows": 4
+  },
+  "stats": {
+   "calls_captured": 136,
+   "unique_graphs": 31
+  },
+  "unimplemented": {}
+ },
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "8dc161852fac16c3"
+  ],
+  "python": "3.12.3",
+  "seconds": 46.6,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 1344,
+   "directed_edges": 121778,
+   "triplets": 951366
+  },
+  "model_graph": null
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": false,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "eager",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 0,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "1d23d4ce6d589544",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "eager",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "legacy",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {},
+   "entries": {
+    "like": "rdx1344_legacy_gpumd_eager:cold.eval1",
+    "patch": [
+     [
+      6,
+      7,
+      [
+       "fwd interaction_block.0 layer_checkpoint/off compiled=true enable_checkpoint=false layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      10,
+      11,
+      [
+       "fwd interaction_block.0.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      14,
+      16,
+      [
+       "fwd interaction_block.0.attn_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32",
+       "fwd interaction_block.0.attn_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      18,
+      19,
+      [
+       "fwd interaction_block.0.attn_block_line_graph gated_ln_residual/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 num_warps=1 rows=60889 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      20,
+      21,
+      [
+       "fwd interaction_block.0 layer_checkpoint/off compiled=true enable_checkpoint=false layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      25,
+      26,
+      [
+       "fwd interaction_block.0.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=121778 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      29,
+      31,
+      [
+       "fwd interaction_block.0.attn_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32",
+       "fwd interaction_block.0.attn_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      39,
+      40,
+      [
+       "fwd interaction_block.0 layer_checkpoint/off compiled=true enable_checkpoint=false layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      44,
+      46,
+      [
+       "fwd interaction_block.0.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "fwd interaction_block.0.refine_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      50,
+      51,
+      [
+       "fwd interaction_block.0 layer_checkpoint/off compiled=true enable_checkpoint=false layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      56,
+      58,
+      [
+       "fwd interaction_block.0.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=121778 tile=\"2d\" width=32",
+       "fwd interaction_block.0.refine_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      63,
+      64,
+      [
+       "fwd interaction_block.1 layer_checkpoint/off compiled=true enable_checkpoint=false layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      67,
+      68,
+      [
+       "fwd interaction_block.1.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      71,
+      73,
+      [
+       "fwd interaction_block.1.attn_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32",
+       "fwd interaction_block.1.attn_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      75,
+      76,
+      [
+       "fwd interaction_block.1.attn_block_line_graph gated_ln_residual/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 num_warps=1 rows=60889 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      77,
+      78,
+      [
+       "fwd interaction_block.1 layer_checkpoint/off compiled=true enable_checkpoint=false layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      82,
+      83,
+      [
+       "fwd interaction_block.1.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=121778 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      86,
+      88,
+      [
+       "fwd interaction_block.1.attn_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32",
+       "fwd interaction_block.1.attn_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      96,
+      97,
+      [
+       "fwd interaction_block.1 layer_checkpoint/off compiled=true enable_checkpoint=false layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      101,
+      103,
+      [
+       "fwd interaction_block.1.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "fwd interaction_block.1.refine_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      107,
+      108,
+      [
+       "fwd interaction_block.1 layer_checkpoint/off compiled=true enable_checkpoint=false layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      113,
+      115,
+      [
+       "fwd interaction_block.1.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=121778 tile=\"2d\" width=32",
+       "fwd interaction_block.1.refine_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      120,
+      121,
+      [
+       "fwd interaction_block.2 layer_checkpoint/off compiled=true enable_checkpoint=false layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      124,
+      125,
+      [
+       "fwd interaction_block.2.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      128,
+      130,
+      [
+       "fwd interaction_block.2.attn_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32",
+       "fwd interaction_block.2.attn_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      132,
+      133,
+      [
+       "fwd interaction_block.2.attn_block_line_graph gated_ln_residual/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 num_warps=1 rows=60889 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      134,
+      135,
+      [
+       "fwd interaction_block.2 layer_checkpoint/off compiled=true enable_checkpoint=false layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      139,
+      140,
+      [
+       "fwd interaction_block.2.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=121778 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      143,
+      145,
+      [
+       "fwd interaction_block.2.attn_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32",
+       "fwd interaction_block.2.attn_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      153,
+      154,
+      [
+       "fwd interaction_block.2 layer_checkpoint/off compiled=true enable_checkpoint=false layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      158,
+      160,
+      [
+       "fwd interaction_block.2.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "fwd interaction_block.2.refine_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      164,
+      165,
+      [
+       "fwd interaction_block.2 layer_checkpoint/off compiled=true enable_checkpoint=false layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      170,
+      172,
+      [
+       "fwd interaction_block.2.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=121778 tile=\"2d\" width=32",
+       "fwd interaction_block.2.refine_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      177,
+      178,
+      [
+       "fwd interaction_block.3 layer_checkpoint/off compiled=true enable_checkpoint=false layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      181,
+      182,
+      [
+       "fwd interaction_block.3.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      185,
+      187,
+      [
+       "fwd interaction_block.3.attn_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32",
+       "fwd interaction_block.3.attn_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      189,
+      190,
+      [
+       "fwd interaction_block.3.attn_block_line_graph gated_ln_residual/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 num_warps=1 rows=60889 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      191,
+      192,
+      [
+       "fwd interaction_block.3 layer_checkpoint/off compiled=true enable_checkpoint=false layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      196,
+      197,
+      [
+       "fwd interaction_block.3.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=121778 tile=\"2d\" width=32"
+      ]
+     ],
+     [
+      200,
+      202,
+      [
+       "fwd interaction_block.3.attn_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32",
+       "fwd interaction_block.3.attn_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      210,
+      211,
+      [
+       "fwd interaction_block.3 layer_checkpoint/off compiled=true enable_checkpoint=false layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      215,
+      217,
+      [
+       "fwd interaction_block.3.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "fwd interaction_block.3.refine_block_line_graph weighted_segment_sum/torch_aggregate rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      220,
+      221,
+      [
+       "fwd interaction_block.3 layer_checkpoint/off compiled=true enable_checkpoint=false layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      226,
+      228,
+      [
+       "fwd interaction_block.3.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=121778 tile=\"2d\" width=32",
+       "fwd interaction_block.3.refine_block_atom_graph weighted_segment_sum/torch_aggregate rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      239,
+      240,
+      []
+     ],
+     [
+      247,
+      248,
+      []
+     ],
+     [
+      258,
+      260,
+      []
+     ],
+     [
+      270,
+      272,
+      []
+     ],
+     [
+      282,
+      283,
+      []
+     ],
+     [
+      292,
+      293,
+      []
+     ],
+     [
+      303,
+      305,
+      []
+     ],
+     [
+      315,
+      317,
+      []
+     ],
+     [
+      327,
+      328,
+      []
+     ],
+     [
+      337,
+      338,
+      []
+     ],
+     [
+      348,
+      350,
+      []
+     ],
+     [
+      360,
+      362,
+      []
+     ],
+     [
+      372,
+      373,
+      []
+     ],
+     [
+      382,
+      383,
+      []
+     ],
+     [
+      393,
+      395,
+      []
+     ],
+     [
+      405,
+      407,
+      []
+     ]
+    ]
+   },
+   "fallbacks": {
+    "same_as": "rdx1344_legacy_gpumd_eager:cold.eval1"
+   },
+   "label": "warm.eval1"
+  },
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm2"
+  },
+  {
+   "aten": {},
+   "entries": {
+    "same_as": "warm.eval1"
+   },
+   "fallbacks": {
+    "same_as": "warm.eval1"
+   },
+   "label": "warm2.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "compile": true,
+  "execution": "eager",
+  "gpus": 1,
+  "kind": "gpumd",
+  "model": "rdx",
+  "profile": "legacy",
+  "structure": "rdx_1344"
+ }
+}

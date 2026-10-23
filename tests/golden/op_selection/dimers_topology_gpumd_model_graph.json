@@ -1,0 +1,484 @@
+{
+ "config": "dimers_topology_gpumd_model_graph",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "c56b3866d6e6b99b"
+  ],
+  "python": "3.12.3",
+  "seconds": 8.0,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 16,
+   "directed_edges": 16,
+   "triplets": 0
+  },
+  "model_graph": {
+   "cache_fit_reuses": 0,
+   "cached_buckets": [
+    [
+     512,
+     8192
+    ],
+    [
+     512,
+     16384
+    ],
+    [
+     1024,
+     8192
+    ],
+    [
+     1024,
+     16384
+    ]
+   ],
+   "captures": 4,
+   "enable_model_fusions": true
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "model_graph",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 0,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "7084a61776fe54fb",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "model_graph",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "topology",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "dimers_legacy_gpumd_model_graph:construct"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "same_as": "cluster_topology_gpumd_model_graph:construct.eval1"
+   },
+   "entries": {
+    "ints": {
+     "117": 80,
+     "2048": 1024,
+     "4096": 2048
+    },
+    "like": "cluster_topology_gpumd_model_graph:construct.eval7"
+   },
+   "fallbacks": {
+    "ints": {
+     "14672": 16384,
+     "1816": 2048,
+     "53": 80,
+     "908": 1024
+    },
+    "like": "cluster_topology_gpumd_eager:cold.eval1"
+   },
+   "label": "construct.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval1"
+   },
+   "entries": {
+    "same_as": "construct.eval1"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval1"
+   },
+   "label": "construct.eval2"
+  },
+  {
+   "aten": {
+    "same_as": "cluster_topology_gpumd_model_graph:construct.eval3"
+   },
+   "entries": {
+    "same_as": "construct.eval2"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval2"
+   },
+   "label": "construct.eval3"
+  },
+  {
+   "aten": {
+    "like": "cluster_topology_gpumd_model_graph:construct.eval1",
+    "set": {
+     "<outside>": "aten::_local_scalar_dense=1 aten::add=6 aten::arange=16 aten::as_strided=18 aten::cat=2 aten::clone=1 aten::copy_=14 aten::empty=20 aten::empty_like=1 aten::expand=1 aten::fill_=8 aten::flatten=2 aten::floor_divide=4 aten::item=1 aten::lift_fresh=1 aten::mul=5 aten::new_empty=7 aten::new_ones=1 aten::new_zeros=6 aten::remainder=2 aten::repeat_interleave=1 aten::resize_=8 aten::select=7 aten::slice=9 aten::unsqueeze=1 aten::view=1 aten::zero_=6"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval3"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval3"
+   },
+   "label": "construct.capture4"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval3"
+   },
+   "entries": {
+    "ints": {
+     "117": 80,
+     "2048": 512,
+     "4096": 1024
+    },
+    "like": "cluster_topology_gpumd_model_graph:construct.eval7",
+    "patch": [
+     [
+      251,
+      252,
+      [
+       "bwd interaction_block.3.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 num_warps=1 rows=1024 segments=80 tiles=[1,16,32] vjp=runs width=32"
+      ]
+     ],
+     [
+      292,
+      293,
+      [
+       "bwd interaction_block.2.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 num_warps=1 rows=1024 segments=80 tiles=[1,16,32] vjp=runs width=32"
+      ]
+     ],
+     [
+      335,
+      336,
+      [
+       "bwd interaction_block.1.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 num_warps=1 rows=1024 segments=80 tiles=[1,16,32] vjp=runs width=32"
+      ]
+     ],
+     [
+      378,
+      379,
+      [
+       "bwd interaction_block.0.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 num_warps=1 rows=1024 segments=80 tiles=[1,16,32] vjp=runs width=32"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "ints": {
+     "14672": 16384,
+     "1816": 1024,
+     "53": 80,
+     "908": 512
+    },
+    "like": "cluster_topology_gpumd_eager:cold.eval1"
+   },
+   "label": "construct.eval5"
+  },
+  {
+   "aten": {
+    "same_as": "construct.capture4"
+   },
+   "entries": {
+    "same_as": "construct.eval5"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval5"
+   },
+   "label": "construct.capture6"
+  },
+  {
+   "aten": {
+    "like": "cluster_topology_gpumd_model_graph:construct.eval3",
+    "set": {
+     "bwd:AddmmBackward0": "aten::add_=24 aten::as_strided=100 aten::mm=100 aten::t=100 aten::transpose=100",
+     "bwd:MmBackward0": "aten::add_=16 aten::as_strided=51 aten::mm=51 aten::t=51 aten::transpose=51",
+     "bwd:MulBackward0": "aten::add_=2 aten::mul=76 aten::sum=5",
+     "bwd:NativeLayerNormBackward0": "aten::empty=50 aten::native_layer_norm_backward=50",
+     "bwd:fusion_silu_fwdBackward": "aten::empty=88",
+     "bwd:sigmoid_fwdBackward": "aten::empty=24",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update": "aten::mul=1",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.activation_func": "aten::silu=1",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.activation_gate": "aten::sigmoid=1",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.core_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.gate_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_core": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update": "aten::mul=1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.activation_func": "aten::silu=1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.activation_gate": "aten::sigmoid=1",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.core_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.gate_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_core": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update": "aten::mul=1",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.activation_func": "aten::silu=1",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.activation_gate": "aten::sigmoid=1",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.core_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.gate_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.mlp_core": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.1.attn_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update": "aten::mul=1",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.activation_func": "aten::silu=1",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.activation_gate": "aten::sigmoid=1",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.core_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.gate_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.mlp_core": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.1.refine_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update": "aten::mul=1",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.activation_func": "aten::silu=1",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.activation_gate": "aten::sigmoid=1",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.core_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.gate_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.mlp_core": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.2.attn_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update": "aten::mul=1",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.activation_func": "aten::silu=1",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.activation_gate": "aten::sigmoid=1",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.core_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.gate_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.mlp_core": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.2.refine_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update": "aten::mul=1",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.activation_func": "aten::silu=1",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.activation_gate": "aten::sigmoid=1",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.core_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.gate_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.mlp_core": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.3.attn_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update": "aten::mul=1",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.activation_func": "aten::silu=1",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.activation_gate": "aten::sigmoid=1",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.core_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.gate_norm": "aten::empty=3 aten::layer_norm=1 aten::native_layer_norm=1 aten::view=2",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.mlp_core": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2",
+     "interaction_block.3.refine_block_line_graph.edge_nonlinear_update.mlp_gate": "aten::addmm=2 aten::as_strided=2 aten::linear=2 aten::t=2 aten::transpose=2"
+    },
+    "unset": [
+     "bwd:_GatedLNBackward"
+    ]
+   },
+   "entries": {
+    "like": "dimers_legacy_gpumd_model_graph:construct.eval7",
+    "patch": [
+     [
+      52,
+      53,
+      [
+       "fwd interaction_block.0.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 num_warps=8 rows=8192 stride=32"
+      ]
+     ],
+     [
+      116,
+      117,
+      [
+       "fwd interaction_block.1.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 num_warps=8 rows=8192 stride=32"
+      ]
+     ],
+     [
+      180,
+      181,
+      [
+       "fwd interaction_block.2.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 num_warps=8 rows=8192 stride=32"
+      ]
+     ],
+     [
+      318,
+      319,
+      [
+       "bwd interaction_block.2.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 grad_stride=32 num_warps=8 rows=8192"
+      ]
+     ],
+     [
+      363,
+      364,
+      [
+       "bwd interaction_block.1.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 grad_stride=32 num_warps=8 rows=8192"
+      ]
+     ],
+     [
+      408,
+      409,
+      [
+       "bwd interaction_block.0.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 grad_stride=32 num_warps=8 rows=8192"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "ints": {
+     "14672": 8192,
+     "1816": 2048,
+     "53": 80,
+     "908": 1024
+    },
+    "like": "cluster_topology_gpumd_eager:cold.eval1"
+   },
+   "label": "construct.eval7"
+  },
+  {
+   "aten": {
+    "like": "construct.eval7",
+    "set": {
+     "<outside>": "aten::_local_scalar_dense=1 aten::add=6 aten::arange=16 aten::as_strided=18 aten::cat=2 aten::clone=1 aten::copy_=14 aten::empty=20 aten::empty_like=1 aten::expand=1 aten::fill_=8 aten::flatten=2 aten::floor_divide=4 aten::item=1 aten::lift_fresh=1 aten::mul=5 aten::new_empty=7 aten::new_ones=1 aten::new_zeros=6 aten::remainder=2 aten::repeat_interleave=1 aten::resize_=8 aten::select=7 aten::slice=9 aten::unsqueeze=1 aten::view=1 aten::zero_=6"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval7"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval7"
+   },
+   "label": "construct.capture8"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval7"
+   },
+   "entries": {
+    "like": "dimers_legacy_gpumd_model_graph:construct.eval9",
+    "patch": [
+     [
+      52,
+      53,
+      [
+       "fwd interaction_block.0.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 num_warps=8 rows=8192 stride=32"
+      ]
+     ],
+     [
+      116,
+      117,
+      [
+       "fwd interaction_block.1.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 num_warps=8 rows=8192 stride=32"
+      ]
+     ],
+     [
+      180,
+      181,
+      [
+       "fwd interaction_block.2.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 num_warps=8 rows=8192 stride=32"
+      ]
+     ],
+     [
+      318,
+      319,
+      [
+       "bwd interaction_block.2.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 grad_stride=32 num_warps=8 rows=8192"
+      ]
+     ],
+     [
+      363,
+      364,
+      [
+       "bwd interaction_block.1.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 grad_stride=32 num_warps=8 rows=8192"
+      ]
+     ],
+     [
+      408,
+      409,
+      [
+       "bwd interaction_block.0.refine_block_line_graph edge_ffn/triton BM=128 D=32 PRECISION=tf32x3 grad_stride=32 num_warps=8 rows=8192"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "ints": {
+     "14672": 8192,
+     "1816": 1024,
+     "53": 80,
+     "908": 512
+    },
+    "like": "cluster_topology_gpumd_eager:cold.eval1"
+   },
+   "label": "construct.eval9"
+  },
+  {
+   "aten": {
+    "like": "construct.eval7",
+    "set": {
+     "<outside>": "aten::clone=1 aten::copy_=1 aten::empty_strided=1"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval9"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval9"
+   },
+   "label": "construct.capture10"
+  },
+  {
+   "aten": {
+    "same_as": "dimers_legacy_gpumd_model_graph:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "execution": "model_graph",
+  "gpus": 1,
+  "kind": "gpumd",
+  "model": "rdx",
+  "profile": "topology",
+  "structure": "dimers"
+ }
+}

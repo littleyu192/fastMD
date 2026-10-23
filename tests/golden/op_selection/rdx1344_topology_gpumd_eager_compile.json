@@ -1,0 +1,524 @@
+{
+ "config": "rdx1344_topology_gpumd_eager_compile",
+ "dynamo": {
+  "aot_autograd": {
+   "ok": 52,
+   "total": 58
+  },
+  "frames": {
+   "ok": 111,
+   "total": 111
+  },
+  "graph_breaks": {
+   "Attempted to inline function marked as skipped | Explanation: Dynamo developers have intentionally marked that the function `_JittedFunction.__call__` should not be traced. | Developer debug context: qualname: _JittedFunction.__call__, name: __call__, filename: `jiterator.py`, skip reason: file matches MOD_SKIPLIST (cuda)": 46,
+   "Unsupported call_id() without source | Explanation: call_id() not supported for sourceless TensorVariable. | Developer debug context: call_id TensorVariable() | Skipping frame due to graph break in a generator's next() call.": 1,
+   "Unsupported call_id() without source | Explanation: call_id() not supported for sourceless TensorVariable. | Developer debug context: call_id TensorVariable() | Skipping frame due to graph break in a generator's next() call. | Skipping frame due to graph break in a generator's next() call.": 1,
+   "Unsupported method call | Explanation: Dynamo does not know how to trace method `get` of class `ContextVar` | Developer debug context: call_method UserDefinedObjectVariable(ContextVar) get [] {}": 2,
+   "builtin isinstance() cannot determine type of argument | Explanation: Dynamo doesn't have a rule to determine the type of argument DataPtrVariable() | Developer debug context: isinstance(DataPtrVariable(), BuiltinVariable(type))": 2,
+   "torch.* op returned non-Tensor | Explanation: torch.* ops that return a non-Tensor cannot be traced into the Dynamo FX graph output | Developer debug context: example_value type: bool; op: call_function; target: <function is_current_stream_capturing>": 7
+  },
+  "recompiles": {
+   "_finish_gate": 1,
+   "_module_forward": 1,
+   "_policy_residual": 1,
+   "_split_first_linear_params": 1,
+   "attention_nodes": 6,
+   "attention_rows": 6,
+   "forward": 4,
+   "publish_projection_cache": 28,
+   "refinement_edges": 4,
+   "refinement_nodes": 2,
+   "refinement_rows": 2,
+   "torch_dynamo_resume_in__merged_attention_projection": 1,
+   "torch_dynamo_resume_in_attention_nodes": 1,
+   "torch_dynamo_resume_in_forward": 9,
+   "torch_dynamo_resume_in_refinement_edges": 1,
+   "torch_dynamo_resume_in_refinement_nodes": 1
+  },
+  "resumes": {
+   "torch_dynamo_resume_in__debug_check_index": 1,
+   "torch_dynamo_resume_in__finish_gate": 2,
+   "torch_dynamo_resume_in__merged_attention_projection": 3,
+   "torch_dynamo_resume_in__split_first_linear_params": 2,
+   "torch_dynamo_resume_in_aligned_first_linear_block": 1,
+   "torch_dynamo_resume_in_attention_nodes": 3,
+   "torch_dynamo_resume_in_attention_rows": 4,
+   "torch_dynamo_resume_in_forward": 15,
+   "torch_dynamo_resume_in_forward_aligned_gather_cat3": 2,
+   "torch_dynamo_resume_in_forward_with_residual": 2,
+   "torch_dynamo_resume_in_refinement_edges": 1,
+   "torch_dynamo_resume_in_refinement_nodes": 2,
+   "torch_dynamo_resume_in_refinement_rows": 4
+  },
+  "stats": {
+   "calls_captured": 217,
+   "unique_graphs": 52
+  },
+  "unimplemented": {
+   "Unsupported call_id() without source | Explanation: call_id() not supported for sourceless TensorVariable. | Developer debug context: call_id TensorVariable()": 2,
+   "Unsupported method call | Explanation: Dynamo does not know how to trace method `get` of class `ContextVar` | Developer debug context: call_method UserDefinedObjectVariable(ContextVar) get [] {}": 1,
+   "builtin isinstance() cannot determine type of argument | Explanation: Dynamo doesn't have a rule to determine the type of argument DataPtrVariable() | Developer debug context: isinstance(DataPtrVariable(), BuiltinVariable(type))": 2
+  }
+ },
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "c56b3866d6e6b99b"
+  ],
+  "python": "3.12.3",
+  "seconds": 57.3,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 1344,
+   "directed_edges": 121778,
+   "triplets": 951366
+  },
+  "model_graph": null
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": false,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "eager",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 8,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "b76daf1c17aa675e",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "eager",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "topology",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {},
+   "entries": {
+    "like": "rdx1344_legacy_gpumd_eager_compile:warm.eval1",
+    "patch": [
+     [
+      3,
+      5,
+      [
+       "fwd three_body_embedding threebody_fourier_basis/triton BM=128 SCALE=1.7724538509055159 contiguous_copy=[false,true,true,false] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=951366 vectors=121778",
+       "fwd three_body_embedding threebody_linear/combined_cached allow_fused=true policy=false rows=951366 width=7"
+      ]
+     ],
+     [
+      7,
+      16,
+      [
+       "fwd interaction_block.0.attn_block_line_graph merged_frozen_projections/torch_linear dtype=torch.float32 in_width=32 input_contiguous=true out_stride0=128 rows=951366 splits=[64,32,32]",
+       "fwd interaction_block.0.attn_block_line_graph cat3_gather_add_silu/triton BLK=32 BM=8 H=32 HAS_BIAS=true M=951366 N=64 SIA=5 SIB=5 SP0=128 dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1",
+       "fwd interaction_block.0.attn_block_line_graph indexed_cat3/decomposed_indexed_silu HAS_BIAS=true SORTED_A=false dtype=torch.float32 gathered_rows=[60889] gemm_backend=torch index_a_sorted=false index_dtype=[torch.int64,torch.int64] p0_stride0=128 precomputed_p0=true projection_width=64 rows=951366 strict_errors=false width=32",
+       "fwd interaction_block.0.attn_block_line_graph gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "fwd interaction_block.0.attn_block_line_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=false LOGA_S=[128,1] LOGB_S=[128,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,provided] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      27,
+      31,
+      [
+       "fwd interaction_block.0.attn_block_atom_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=true LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,identity] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      40,
+      41,
+      [
+       "fwd interaction_block.0.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=[false,true,true] dtype=torch.float32 grid_BD=128 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      45,
+      46,
+      [
+       "fwd interaction_block.0.refine_block_line_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=[false,false] dtype=torch.float32 index_dtype=torch.int64 num_warps=4 rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      57,
+      58,
+      [
+       "fwd interaction_block.0.refine_block_atom_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=[false,false] dtype=torch.float32 index_dtype=torch.int64 num_warps=4 rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      64,
+      73,
+      [
+       "fwd interaction_block.1.attn_block_line_graph merged_frozen_projections/torch_linear dtype=torch.float32 in_width=32 input_contiguous=true out_stride0=128 rows=951366 splits=[64,32,32]",
+       "fwd interaction_block.1.attn_block_line_graph cat3_gather_add_silu/triton BLK=32 BM=8 H=32 HAS_BIAS=true M=951366 N=64 SIA=5 SIB=5 SP0=128 dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1",
+       "fwd interaction_block.1.attn_block_line_graph indexed_cat3/decomposed_indexed_silu HAS_BIAS=true SORTED_A=false dtype=torch.float32 gathered_rows=[60889] gemm_backend=torch index_a_sorted=false index_dtype=[torch.int64,torch.int64] p0_stride0=128 precomputed_p0=true projection_width=64 rows=951366 strict_errors=false width=32",
+       "fwd interaction_block.1.attn_block_line_graph gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "fwd interaction_block.1.attn_block_line_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=false LOGA_S=[128,1] LOGB_S=[128,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,provided] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      84,
+      88,
+      [
+       "fwd interaction_block.1.attn_block_atom_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=true LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,identity] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      97,
+      98,
+      [
+       "fwd interaction_block.1.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=[false,true,true] dtype=torch.float32 grid_BD=128 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      102,
+      103,
+      [
+       "fwd interaction_block.1.refine_block_line_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=[false,false] dtype=torch.float32 index_dtype=torch.int64 num_warps=4 rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      114,
+      115,
+      [
+       "fwd interaction_block.1.refine_block_atom_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=[false,false] dtype=torch.float32 index_dtype=torch.int64 num_warps=4 rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      121,
+      130,
+      [
+       "fwd interaction_block.2.attn_block_line_graph merged_frozen_projections/torch_linear dtype=torch.float32 in_width=32 input_contiguous=true out_stride0=128 rows=951366 splits=[64,32,32]",
+       "fwd interaction_block.2.attn_block_line_graph cat3_gather_add_silu/triton BLK=32 BM=8 H=32 HAS_BIAS=true M=951366 N=64 SIA=5 SIB=5 SP0=128 dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1",
+       "fwd interaction_block.2.attn_block_line_graph indexed_cat3/decomposed_indexed_silu HAS_BIAS=true SORTED_A=false dtype=torch.float32 gathered_rows=[60889] gemm_backend=torch index_a_sorted=false index_dtype=[torch.int64,torch.int64] p0_stride0=128 precomputed_p0=true projection_width=64 rows=951366 strict_errors=false width=32",
+       "fwd interaction_block.2.attn_block_line_graph gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "fwd interaction_block.2.attn_block_line_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=false LOGA_S=[128,1] LOGB_S=[128,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,provided] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      141,
+      145,
+      [
+       "fwd interaction_block.2.attn_block_atom_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=true LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,identity] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      154,
+      155,
+      [
+       "fwd interaction_block.2.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=[false,true,true] dtype=torch.float32 grid_BD=128 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      159,
+      160,
+      [
+       "fwd interaction_block.2.refine_block_line_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=[false,false] dtype=torch.float32 index_dtype=torch.int64 num_warps=4 rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      171,
+      172,
+      [
+       "fwd interaction_block.2.refine_block_atom_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=[false,false] dtype=torch.float32 index_dtype=torch.int64 num_warps=4 rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      178,
+      187,
+      [
+       "fwd interaction_block.3.attn_block_line_graph merged_frozen_projections/torch_linear dtype=torch.float32 in_width=32 input_contiguous=true out_stride0=128 rows=951366 splits=[64,32,32]",
+       "fwd interaction_block.3.attn_block_line_graph cat3_gather_add_silu/triton BLK=32 BM=8 H=32 HAS_BIAS=true M=951366 N=64 SIA=5 SIB=5 SP0=128 dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1",
+       "fwd interaction_block.3.attn_block_line_graph indexed_cat3/decomposed_indexed_silu HAS_BIAS=true SORTED_A=false dtype=torch.float32 gathered_rows=[60889] gemm_backend=torch index_a_sorted=false index_dtype=[torch.int64,torch.int64] p0_stride0=128 precomputed_p0=true projection_width=64 rows=951366 strict_errors=false width=32",
+       "fwd interaction_block.3.attn_block_line_graph gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "fwd interaction_block.3.attn_block_line_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=false LOGA_S=[128,1] LOGB_S=[128,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,provided] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      198,
+      202,
+      [
+       "fwd interaction_block.3.attn_block_atom_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=true LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,identity] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      211,
+      212,
+      [
+       "fwd interaction_block.3.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=[false,true,true] dtype=torch.float32 grid_BD=128 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      216,
+      217,
+      [
+       "fwd interaction_block.3.refine_block_line_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=[false,false] dtype=torch.float32 index_dtype=torch.int64 num_warps=4 rows=951366 segments=60889 width=32"
+      ]
+     ],
+     [
+      227,
+      228,
+      [
+       "fwd interaction_block.3.refine_block_atom_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=[false,false] dtype=torch.float32 index_dtype=torch.int64 num_warps=4 rows=121778 segments=1344 width=32"
+      ]
+     ],
+     [
+      239,
+      239,
+      [
+       "bwd interaction_block.3.refine_block_atom_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=121778 width=32"
+      ]
+     ],
+     [
+      246,
+      246,
+      [
+       "bwd interaction_block.3.refine_block_line_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      249,
+      249,
+      [
+       "bwd interaction_block.3.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=false dtype=torch.float32 grid_BD=128 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      256,
+      258,
+      [
+       "bwd interaction_block.3.attn_block_atom_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=121778 width=32"
+      ]
+     ],
+     [
+      266,
+      271,
+      [
+       "bwd interaction_block.3.attn_block_line_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[128,1] LOGB_S=[128,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=951366 width=32",
+       "bwd interaction_block.3.attn_block_line_graph gated_ln/triton BLK=32 BM=16 HAS_RESIDUAL=false contiguous_copy=false num_warps=4 rows=951366 tile=\"2d\" width=32",
+       "bwd interaction_block.3.attn_block_line_graph cat3_gather_add_silu/triton BLK=32 BM=8 H=32 M=951366 N=64 SIA=5 SIB=5 SORTED_A=false contiguous_copy=[false,false] num_warps=1",
+       "bwd interaction_block.3.attn_block_line_graph merged_frozen_projections/torch_linear live_grads=[true,true,true] splits=[64,32,32]"
+      ]
+     ],
+     [
+      276,
+      276,
+      [
+       "bwd interaction_block.2.refine_block_atom_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=121778 width=32"
+      ]
+     ],
+     [
+      285,
+      285,
+      [
+       "bwd interaction_block.2.refine_block_line_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      288,
+      288,
+      [
+       "bwd interaction_block.2.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=false dtype=torch.float32 grid_BD=128 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      295,
+      297,
+      [
+       "bwd interaction_block.2.attn_block_atom_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=121778 width=32"
+      ]
+     ],
+     [
+      305,
+      310,
+      [
+       "bwd interaction_block.2.attn_block_line_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[128,1] LOGB_S=[128,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=951366 width=32",
+       "bwd interaction_block.2.attn_block_line_graph gated_ln/triton BLK=32 BM=16 HAS_RESIDUAL=false contiguous_copy=false num_warps=4 rows=951366 tile=\"2d\" width=32",
+       "bwd interaction_block.2.attn_block_line_graph cat3_gather_add_silu/triton BLK=32 BM=8 H=32 M=951366 N=64 SIA=5 SIB=5 SORTED_A=false contiguous_copy=[false,false] num_warps=1",
+       "bwd interaction_block.2.attn_block_line_graph merged_frozen_projections/torch_linear live_grads=[true,true,true] splits=[64,32,32]"
+      ]
+     ],
+     [
+      315,
+      315,
+      [
+       "bwd interaction_block.1.refine_block_atom_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=121778 width=32"
+      ]
+     ],
+     [
+      324,
+      324,
+      [
+       "bwd interaction_block.1.refine_block_line_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      327,
+      327,
+      [
+       "bwd interaction_block.1.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=false dtype=torch.float32 grid_BD=128 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      334,
+      336,
+      [
+       "bwd interaction_block.1.attn_block_atom_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=121778 width=32"
+      ]
+     ],
+     [
+      344,
+      349,
+      [
+       "bwd interaction_block.1.attn_block_line_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[128,1] LOGB_S=[128,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=951366 width=32",
+       "bwd interaction_block.1.attn_block_line_graph gated_ln/triton BLK=32 BM=16 HAS_RESIDUAL=false contiguous_copy=false num_warps=4 rows=951366 tile=\"2d\" width=32",
+       "bwd interaction_block.1.attn_block_line_graph cat3_gather_add_silu/triton BLK=32 BM=8 H=32 M=951366 N=64 SIA=5 SIB=5 SORTED_A=false contiguous_copy=[false,false] num_warps=1",
+       "bwd interaction_block.1.attn_block_line_graph merged_frozen_projections/torch_linear live_grads=[true,true,true] splits=[64,32,32]"
+      ]
+     ],
+     [
+      354,
+      354,
+      [
+       "bwd interaction_block.0.refine_block_atom_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=121778 width=32"
+      ]
+     ],
+     [
+      363,
+      363,
+      [
+       "bwd interaction_block.0.refine_block_line_graph weighted_segment_sum/triton BD=32 BM=4 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      366,
+      366,
+      [
+       "bwd interaction_block.0.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=false dtype=torch.float32 grid_BD=128 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      373,
+      375,
+      [
+       "bwd interaction_block.0.attn_block_atom_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=121778 width=32"
+      ]
+     ],
+     [
+      383,
+      388,
+      [
+       "bwd interaction_block.0.attn_block_line_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[128,1] LOGB_S=[128,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=951366 width=32",
+       "bwd interaction_block.0.attn_block_line_graph gated_ln/triton BLK=32 BM=16 HAS_RESIDUAL=false contiguous_copy=false num_warps=4 rows=951366 tile=\"2d\" width=32",
+       "bwd interaction_block.0.attn_block_line_graph cat3_gather_add_silu/triton BLK=32 BM=8 H=32 M=951366 N=64 SIA=5 SIB=5 SORTED_A=false contiguous_copy=[false,false] num_warps=1",
+       "bwd interaction_block.0.attn_block_line_graph merged_frozen_projections/torch_linear live_grads=[true,true,true] splits=[64,32,32]"
+      ]
+     ],
+     [
+      389,
+      389,
+      [
+       "bwd three_body_embedding threebody_fourier_basis/triton BM=128 SCALE=1.7724538509055159 contiguous_copy=false num_warps=4 rows=951366 vectors=121778"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": [
+    "fwd interaction_block.0.attn_block_atom_graph aligned_first_linear_block/decomposed_indexed_silu !split_params:mixed_width_under_compile parts=3 rows=121778 width=32",
+    "fwd interaction_block.0.attn_block_atom_graph merged_attention_projection/merged_frozen_projections !first_linear_block_unavailable rows=121778 width=32",
+    "fwd interaction_block.0.attn_block_atom_graph indexed_cat3/decomposed_indexed_silu !split_params:mixed_width_under_compile rows=121778 width=32",
+    "fwd interaction_block.0.attn_block_atom_graph gated_ln_residual/triton !below_min_rows shape=[1344,128]",
+    "fwd interaction_block.0.refine_block_atom_graph indexed_cat3/decomposed_indexed_silu !split_params:mixed_width_under_compile rows=121778 width=32",
+    "fwd interaction_block.1.attn_block_atom_graph aligned_first_linear_block/decomposed_indexed_silu !split_params:mixed_width_under_compile parts=3 rows=121778 width=32",
+    "fwd interaction_block.1.attn_block_atom_graph merged_attention_projection/merged_frozen_projections !first_linear_block_unavailable rows=121778 width=32",
+    "fwd interaction_block.1.attn_block_atom_graph indexed_cat3/decomposed_indexed_silu !split_params:mixed_width_under_compile rows=121778 width=32",
+    "fwd interaction_block.1.attn_block_atom_graph gated_ln_residual/triton !below_min_rows shape=[1344,128]",
+    "fwd interaction_block.1.refine_block_atom_graph indexed_cat3/decomposed_indexed_silu !split_params:mixed_width_under_compile rows=121778 width=32",
+    "fwd interaction_block.2.attn_block_atom_graph aligned_first_linear_block/decomposed_indexed_silu !split_params:mixed_width_under_compile parts=3 rows=121778 width=32",
+    "fwd interaction_block.2.attn_block_atom_graph merged_attention_projection/merged_frozen_projections !first_linear_block_unavailable rows=121778 width=32",
+    "fwd interaction_block.2.attn_block_atom_graph indexed_cat3/decomposed_indexed_silu !split_params:mixed_width_under_compile rows=121778 width=32",
+    "fwd interaction_block.2.attn_block_atom_graph gated_ln_residual/triton !below_min_rows shape=[1344,128]",
+    "fwd interaction_block.2.refine_block_atom_graph indexed_cat3/decomposed_indexed_silu !split_params:mixed_width_under_compile rows=121778 width=32",
+    "fwd interaction_block.3.attn_block_atom_graph aligned_first_linear_block/decomposed_indexed_silu !split_params:mixed_width_under_compile parts=3 rows=121778 width=32",
+    "fwd interaction_block.3.attn_block_atom_graph merged_attention_projection/merged_frozen_projections !first_linear_block_unavailable rows=121778 width=32",
+    "fwd interaction_block.3.attn_block_atom_graph indexed_cat3/decomposed_indexed_silu !split_params:mixed_width_under_compile rows=121778 width=32",
+    "fwd interaction_block.3.attn_block_atom_graph gated_ln_residual/triton !below_min_rows shape=[1344,128]",
+    "fwd interaction_block.3.refine_block_atom_graph indexed_cat3/decomposed_indexed_silu !split_params:mixed_width_under_compile rows=121778 width=32"
+   ],
+   "label": "warm.eval1"
+  },
+  {
+   "aten": {},
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm2"
+  },
+  {
+   "aten": {},
+   "entries": {
+    "same_as": "warm.eval1"
+   },
+   "fallbacks": {
+    "same_as": "warm.eval1"
+   },
+   "label": "warm2.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "compile": true,
+  "execution": "eager",
+  "gpus": 1,
+  "kind": "gpumd",
+  "model": "rdx",
+  "profile": "topology",
+  "structure": "rdx_1344"
+ }
+}

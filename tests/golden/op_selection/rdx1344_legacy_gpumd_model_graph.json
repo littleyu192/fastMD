@@ -1,0 +1,678 @@
+{
+ "config": "rdx1344_legacy_gpumd_model_graph",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "8dc161852fac16c3"
+  ],
+  "python": "3.12.3",
+  "seconds": 8.9,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 1344,
+   "directed_edges": 121778,
+   "triplets": 951366
+  },
+  "model_graph": {
+   "cache_fit_reuses": 0,
+   "cached_buckets": [
+    [
+     61440,
+     958464
+    ],
+    [
+     61440,
+     966656
+    ],
+    [
+     61952,
+     958464
+    ],
+    [
+     61952,
+     966656
+    ]
+   ],
+   "captures": 4,
+   "enable_model_fusions": true
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "model_graph",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 0,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "3a7f716550a67b0c",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "model_graph",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "legacy",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "<outside>": "aten::_has_compatible_shallow_copy_type=806 aten::_linalg_check_errors=1 aten::_linalg_det=1 aten::_linalg_solve_ex=1 aten::_local_scalar_dense=6 aten::_to_copy=28 aten::_unique2=1 aten::abs=2 aten::add=29 aten::add_=2 aten::any=2 aten::arange=30 aten::argsort=1 aten::as_strided=116 aten::as_strided_=3 aten::bincount=1 aten::cat=3 aten::clamp=1 aten::clone=1 aten::copy_=54 aten::cumsum=2 aten::det=1 aten::diagonal=2 aten::empty=64 aten::empty_like=1 aten::empty_strided=28 aten::eq=1 aten::expand=6 aten::expand_as=4 aten::fill_=35 aten::flatten=2 aten::floor_divide=4 aten::fmod_=2 aten::full=4 aten::index=18 aten::is_nonzero=1 aten::item=6 aten::lift_fresh=7 aten::linalg_det=1 aten::linalg_inv=1 aten::linalg_inv_ex=1 aten::linalg_lu_factor_ex=2 aten::linalg_lu_solve=1 aten::linalg_solve_ex=1 aten::linalg_vector_norm=1 aten::lt=3 aten::mH=1 aten::mT=1 aten::max=1 aten::min=1 aten::minimum=1 aten::mul=30 aten::mul_=1 aten::ne=1 aten::neg=3 aten::new_empty=9 aten::new_ones=1 aten::new_zeros=6 aten::nonzero=8 aten::nonzero_numpy=1 aten::prod=2 aten::remainder=4 aten::repeat_interleave=1 aten::reshape=22 aten::resize_=29 aten::resolve_conj=1 aten::resolve_neg=1 aten::scatter_=1 aten::scatter_reduce_=1 aten::searchsorted=1 aten::select=28 aten::set_=16 aten::slice=21 aten::sort=2 aten::squeeze=1 aten::stack=1 aten::sub=2 aten::sum=6 aten::t=8 aten::to=451 aten::transpose=10 aten::unbind=1 aten::unsqueeze=17 aten::view=25 aten::view_as=2 aten::where=1 aten::zero_=27 aten::zeros=17 nvalchemiops::batch_build_cell_list=1 nvalchemiops::batch_query_cell_list=1"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_legacy_gpumd_eager:cold.eval1",
+    "set": {
+     "MatRIS": "aten::__and__=1 aten::_local_scalar_dense=3 aten::_reshape_alias=3 aten::_to_copy=11 aten::add=7 aten::add_=3 aten::any=1 aten::arange=8 aten::argsort=3 aten::as_strided=61 aten::bitwise_and=1 aten::bitwise_not=1 aten::cat=11 aten::clone=1 aten::copy_=26 aten::cumsum=1 aten::detach_=1 aten::div=3 aten::empty=35 aten::empty_like=6 aten::empty_strided=19 aten::expand=2 aten::fill_=24 aten::full=2 aten::index=8 aten::index_add_=5 aten::item=3 aten::lift_fresh=4 aten::linalg_cross=1 aten::linalg_vector_norm=1 aten::lt=1 aten::masked_fill=1 aten::masked_fill_=1 aten::mul=3 aten::narrow=10 aten::ne=5 aten::new_empty=7 aten::new_ones=4 aten::new_zeros=3 aten::ones_like=5 aten::reshape=13 aten::resize_=13 aten::scalar_tensor=2 aten::searchsorted=3 aten::select=26 aten::slice=10 aten::sort=6 aten::sub=4 aten::sum=7 aten::to=26 aten::unsqueeze=8 aten::view=10 aten::where=8 aten::zero_=8 aten::zeros=5",
+     "bwd:CatBackward0": "aten::add_=14 aten::as_strided=64 aten::narrow=64 aten::slice=64",
+     "bwd:DivBackward0": "aten::add_=2 aten::div=11 aten::mul=3 aten::neg=3 aten::sum=3",
+     "bwd:IndexSelectBackward0": "aten::add_=26 aten::empty=27 aten::fill_=27 aten::index_add_=27 aten::index_select_backward=27 aten::new_empty=27 aten::new_zeros=27 aten::zero_=27",
+     "bwd:MmBackward0": "aten::add_=16 aten::as_strided=96 aten::mm=96 aten::t=96 aten::transpose=96",
+     "bwd:MulBackward0": "aten::add_=2 aten::mul=24 aten::sum=4",
+     "bwd:SinBackward0": "aten::cos=2 aten::mul=2",
+     "bwd:ViewBackward0": "aten::reshape=2 aten::view=2",
+     "bwd:WhereBackward0": "aten::add_=4 aten::empty=38 aten::fill_=19 aten::resize_=19 aten::scalar_tensor=19 aten::to=19 aten::where=38",
+     "bwd:_AlignedGatherCat3Backward": "aten::add_=8 aten::empty=8 aten::fill_=4 aten::zero_=4 aten::zeros=4",
+     "bwd:_CsrSegmentSumBackward": "aten::add_=6 aten::empty=16",
+     "bwd:_GatedLNResidualBackward": "aten::add_=4 aten::empty_like=12 aten::empty_strided=12",
+     "bwd:_LineEnvelopeProductBackward": "aten::empty_like=4 aten::empty_strided=4 aten::fill_=4 aten::zero_=4 aten::zeros_like=4",
+     "bwd:_PairedSegmentAttentionBackward": "aten::add_=8 aten::clone=16 aten::contiguous=16 aten::copy_=16 aten::empty=40 aten::empty_like=16",
+     "bwd:_ThreebodyFourierBasisBackward": "aten::empty_like=1 aten::empty_strided=1 aten::fill_=1 aten::zero_=1 aten::zeros_like=1",
+     "interaction_block.0": "aten::empty=2 aten::resize_=2 aten::where=2",
+     "interaction_block.0.attn_block_atom_graph": "aten::argsort=1 aten::as_strided=6 aten::cat=2 aten::clone=2 aten::contiguous=2 aten::copy_=3 aten::empty=7 aten::empty_like=9 aten::empty_strided=7 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=3 aten::resize_=2 aten::sort=2 aten::to=2 aten::view=5",
+     "interaction_block.0.attn_block_line_graph": "aten::cat=1 aten::clone=4 aten::contiguous=4 aten::copy_=4 aten::empty=10 aten::empty_like=11 aten::empty_strided=7 aten::reshape=2 aten::to=2 aten::view=2",
+     "interaction_block.0.refine_block_line_graph": "aten::as_strided=9 aten::cat=1 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=7 aten::empty_like=4 aten::empty_strided=2 aten::expand=3 aten::gather=3 aten::index_select=3 aten::reshape=2 aten::resize_=3 aten::view=5",
+     "interaction_block.1": "aten::empty=2 aten::resize_=2 aten::where=2",
+     "interaction_block.1.attn_block_atom_graph": "aten::as_strided=6 aten::cat=2 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=7 aten::empty_like=9 aten::empty_strided=7 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=2 aten::resize_=2 aten::to=2 aten::view=4",
+     "interaction_block.1.attn_block_line_graph": "aten::cat=1 aten::clone=4 aten::contiguous=4 aten::copy_=4 aten::empty=10 aten::empty_like=11 aten::empty_strided=7 aten::reshape=2 aten::to=2 aten::view=2",
+     "interaction_block.1.refine_block_line_graph": "aten::as_strided=9 aten::cat=1 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=7 aten::empty_like=4 aten::empty_strided=2 aten::expand=3 aten::gather=3 aten::index_select=3 aten::reshape=2 aten::resize_=3 aten::view=5",
+     "interaction_block.2": "aten::empty=2 aten::resize_=2 aten::where=2",
+     "interaction_block.2.attn_block_atom_graph": "aten::as_strided=6 aten::cat=2 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=7 aten::empty_like=9 aten::empty_strided=7 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=2 aten::resize_=2 aten::to=2 aten::view=4",
+     "interaction_block.2.attn_block_line_graph": "aten::cat=1 aten::clone=4 aten::contiguous=4 aten::copy_=4 aten::empty=10 aten::empty_like=11 aten::empty_strided=7 aten::reshape=2 aten::to=2 aten::view=2",
+     "interaction_block.2.refine_block_line_graph": "aten::as_strided=9 aten::cat=1 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=7 aten::empty_like=4 aten::empty_strided=2 aten::expand=3 aten::gather=3 aten::index_select=3 aten::reshape=2 aten::resize_=3 aten::view=5",
+     "interaction_block.3": "aten::empty=2 aten::resize_=2 aten::where=2",
+     "interaction_block.3.attn_block_atom_graph": "aten::as_strided=6 aten::cat=2 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=7 aten::empty_like=9 aten::empty_strided=7 aten::expand=2 aten::gather=2 aten::index_select=2 aten::reshape=2 aten::resize_=2 aten::to=2 aten::view=4",
+     "interaction_block.3.attn_block_line_graph": "aten::cat=1 aten::clone=4 aten::contiguous=4 aten::copy_=4 aten::empty=10 aten::empty_like=11 aten::empty_strided=7 aten::reshape=2 aten::to=2 aten::view=2",
+     "interaction_block.3.refine_block_line_graph": "aten::as_strided=9 aten::cat=1 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=7 aten::empty_like=3 aten::empty_strided=1 aten::expand=3 aten::gather=3 aten::index_select=3 aten::reshape=1 aten::resize_=3 aten::view=4",
+     "three_body_embedding": "aten::as_strided=1 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::detach=2 aten::empty=3 aten::empty_like=2 aten::linear=1 aten::matmul=2 aten::mm=2 aten::t=1 aten::transpose=1"
+    },
+    "unset": [
+     "<outside>",
+     "bwd:AcosBackward0",
+     "bwd:CosBackward0",
+     "bwd:SumBackward1",
+     "bwd:_SegSoftmaxCSRBackward",
+     "bwd:torch::autograd::CopySlices",
+     "three_body_embedding.angle_embedding",
+     "three_body_embedding.expansion",
+     "three_body_embedding.swish_layer.linear"
+    ]
+   },
+   "entries": {
+    "ints": {
+     "121778": 123904,
+     "1344": 1408,
+     "60889": 61952,
+     "951366": 966656
+    },
+    "like": "rdx1344_legacy_gpumd_eager:cold.eval1",
+    "patch": [
+     [
+      3,
+      5,
+      [
+       "fwd three_body_embedding threebody_fourier_basis/triton BM=128 SCALE=1.7724538509055159 contiguous_copy=[false,true,true,false] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=966656 vectors=123904",
+       "fwd three_body_embedding threebody_linear/combined_cached allow_fused=true policy=false rows=966656 width=7"
+      ]
+     ],
+     [
+      7,
+      8,
+      [
+       "fwd interaction_block.0.attn_block_line_graph gather_cat3/triton BLK=32 contiguous_copy=[false,false,true,true] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 rows=966656 source_rows=61952 width=32"
+      ]
+     ],
+     [
+      12,
+      16,
+      [
+       "fwd interaction_block.0.attn_block_line_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=false LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,provided] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=966656 segments=61952 width=32"
+      ]
+     ],
+     [
+      20,
+      20,
+      [
+       "fwd interaction_block.0 line_graph_select/torch_where stage=attention"
+      ]
+     ],
+     [
+      27,
+      31,
+      [
+       "fwd interaction_block.0.attn_block_atom_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=true LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,identity] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=123904 segments=1408 width=32"
+      ]
+     ],
+     [
+      40,
+      41,
+      [
+       "fwd interaction_block.0.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=[false,true,true] dtype=torch.float32 grid_BD=128 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      50,
+      50,
+      [
+       "fwd interaction_block.0 line_graph_select/torch_where stage=refinement"
+      ]
+     ],
+     [
+      64,
+      65,
+      [
+       "fwd interaction_block.1.attn_block_line_graph gather_cat3/triton BLK=32 contiguous_copy=[false,false,true,true] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 rows=966656 source_rows=61952 width=32"
+      ]
+     ],
+     [
+      69,
+      73,
+      [
+       "fwd interaction_block.1.attn_block_line_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=false LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,provided] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=966656 segments=61952 width=32"
+      ]
+     ],
+     [
+      77,
+      77,
+      [
+       "fwd interaction_block.1 line_graph_select/torch_where stage=attention"
+      ]
+     ],
+     [
+      84,
+      88,
+      [
+       "fwd interaction_block.1.attn_block_atom_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=true LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,identity] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=123904 segments=1408 width=32"
+      ]
+     ],
+     [
+      97,
+      98,
+      [
+       "fwd interaction_block.1.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=[false,true,true] dtype=torch.float32 grid_BD=128 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      107,
+      107,
+      [
+       "fwd interaction_block.1 line_graph_select/torch_where stage=refinement"
+      ]
+     ],
+     [
+      121,
+      122,
+      [
+       "fwd interaction_block.2.attn_block_line_graph gather_cat3/triton BLK=32 contiguous_copy=[false,false,true,true] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 rows=966656 source_rows=61952 width=32"
+      ]
+     ],
+     [
+      126,
+      130,
+      [
+       "fwd interaction_block.2.attn_block_line_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=false LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,provided] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=966656 segments=61952 width=32"
+      ]
+     ],
+     [
+      134,
+      134,
+      [
+       "fwd interaction_block.2 line_graph_select/torch_where stage=attention"
+      ]
+     ],
+     [
+      141,
+      145,
+      [
+       "fwd interaction_block.2.attn_block_atom_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=true LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,identity] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=123904 segments=1408 width=32"
+      ]
+     ],
+     [
+      154,
+      155,
+      [
+       "fwd interaction_block.2.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=[false,true,true] dtype=torch.float32 grid_BD=128 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      164,
+      164,
+      [
+       "fwd interaction_block.2 line_graph_select/torch_where stage=refinement"
+      ]
+     ],
+     [
+      178,
+      179,
+      [
+       "fwd interaction_block.3.attn_block_line_graph gather_cat3/triton BLK=32 contiguous_copy=[false,false,true,true] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 rows=966656 source_rows=61952 width=32"
+      ]
+     ],
+     [
+      183,
+      187,
+      [
+       "fwd interaction_block.3.attn_block_line_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=false LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,provided] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=966656 segments=61952 width=32"
+      ]
+     ],
+     [
+      191,
+      191,
+      [
+       "fwd interaction_block.3 line_graph_select/torch_where stage=attention"
+      ]
+     ],
+     [
+      198,
+      202,
+      [
+       "fwd interaction_block.3.attn_block_atom_graph paired_segment_attention/triton_csr BLK=32 IDENTITY_A=false IDENTITY_B=true LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[false,false,false] csr=[provided,identity] dtype=torch.float32 index_dtype=[torch.int64,torch.int64] num_warps=1 offsets_dtype=[torch.int64,torch.int64] rows=123904 segments=1408 width=32"
+      ]
+     ],
+     [
+      211,
+      212,
+      [
+       "fwd interaction_block.3.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=[false,true,true] dtype=torch.float32 grid_BD=128 index_dtype=[torch.int64,torch.int64] num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      220,
+      220,
+      [
+       "fwd interaction_block.3 line_graph_select/torch_where stage=refinement"
+      ]
+     ],
+     [
+      251,
+      251,
+      [
+       "bwd interaction_block.3.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=false dtype=torch.float32 grid_BD=128 num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      258,
+      262,
+      [
+       "bwd interaction_block.3.attn_block_atom_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=123904 width=32"
+      ]
+     ],
+     [
+      270,
+      274,
+      [
+       "bwd interaction_block.3.attn_block_line_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      277,
+      277,
+      [
+       "bwd interaction_block.3.attn_block_line_graph gather_cat3/triton BLK=32 contiguous_copy=false num_warps=1 rows=966656 source_rows=61952 width=32"
+      ]
+     ],
+     [
+      296,
+      296,
+      [
+       "bwd interaction_block.2.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=false dtype=torch.float32 grid_BD=128 num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      303,
+      307,
+      [
+       "bwd interaction_block.2.attn_block_atom_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=123904 width=32"
+      ]
+     ],
+     [
+      315,
+      319,
+      [
+       "bwd interaction_block.2.attn_block_line_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      322,
+      322,
+      [
+       "bwd interaction_block.2.attn_block_line_graph gather_cat3/triton BLK=32 contiguous_copy=false num_warps=1 rows=966656 source_rows=61952 width=32"
+      ]
+     ],
+     [
+      341,
+      341,
+      [
+       "bwd interaction_block.1.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=false dtype=torch.float32 grid_BD=128 num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      348,
+      352,
+      [
+       "bwd interaction_block.1.attn_block_atom_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=123904 width=32"
+      ]
+     ],
+     [
+      360,
+      364,
+      [
+       "bwd interaction_block.1.attn_block_line_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      367,
+      367,
+      [
+       "bwd interaction_block.1.attn_block_line_graph gather_cat3/triton BLK=32 contiguous_copy=false num_warps=1 rows=966656 source_rows=61952 width=32"
+      ]
+     ],
+     [
+      386,
+      386,
+      [
+       "bwd interaction_block.0.refine_block_line_graph line_envelope/triton BD=32 BM=32 base_stride0=32 contiguous_copy=false dtype=torch.float32 grid_BD=128 num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      393,
+      397,
+      [
+       "bwd interaction_block.0.attn_block_atom_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=123904 width=32"
+      ]
+     ],
+     [
+      405,
+      409,
+      [
+       "bwd interaction_block.0.attn_block_line_graph paired_segment_attention/triton_csr BD=32 BM=8 LOGA_S=[32,1] LOGB_S=[32,1] VAL_S=[32,1] contiguous_copy=[true,true] num_warps=4 rows=966656 width=32"
+      ]
+     ],
+     [
+      412,
+      412,
+      [
+       "bwd interaction_block.0.attn_block_line_graph gather_cat3/triton BLK=32 contiguous_copy=false num_warps=1 rows=966656 source_rows=61952 width=32"
+      ]
+     ],
+     [
+      413,
+      413,
+      [
+       "bwd three_body_embedding threebody_fourier_basis/triton BM=128 SCALE=1.7724538509055159 contiguous_copy=false num_warps=4 rows=966656 vectors=123904"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "ints": {
+     "121778": 123904,
+     "1344": 1408
+    },
+    "like": "rdx1344_legacy_gpumd_eager:cold.eval1",
+    "patch": [
+     [
+      0,
+      1,
+      [
+       "fwd interaction_block.0.attn_block_line_graph aligned_first_linear_block/decomposed_indexed_silu !split_params:disabled parts=3 rows=966656 width=32",
+       "fwd interaction_block.0.attn_block_line_graph merged_attention_projection/merged_frozen_projections !first_linear_block_unavailable rows=966656 width=32",
+       "fwd interaction_block.0.attn_block_line_graph indexed_cat3/decomposed_indexed_silu !split_params:disabled rows=966656 width=32"
+      ]
+     ],
+     [
+      6,
+      6,
+      [
+       "fwd interaction_block.1.attn_block_line_graph aligned_first_linear_block/decomposed_indexed_silu !split_params:disabled parts=3 rows=966656 width=32",
+       "fwd interaction_block.1.attn_block_line_graph merged_attention_projection/merged_frozen_projections !first_linear_block_unavailable rows=966656 width=32",
+       "fwd interaction_block.1.attn_block_line_graph indexed_cat3/decomposed_indexed_silu !split_params:disabled rows=966656 width=32"
+      ]
+     ],
+     [
+      11,
+      11,
+      [
+       "fwd interaction_block.2.attn_block_line_graph aligned_first_linear_block/decomposed_indexed_silu !split_params:disabled parts=3 rows=966656 width=32",
+       "fwd interaction_block.2.attn_block_line_graph merged_attention_projection/merged_frozen_projections !first_linear_block_unavailable rows=966656 width=32",
+       "fwd interaction_block.2.attn_block_line_graph indexed_cat3/decomposed_indexed_silu !split_params:disabled rows=966656 width=32"
+      ]
+     ],
+     [
+      16,
+      16,
+      [
+       "fwd interaction_block.3.attn_block_line_graph aligned_first_linear_block/decomposed_indexed_silu !split_params:disabled parts=3 rows=966656 width=32",
+       "fwd interaction_block.3.attn_block_line_graph merged_attention_projection/merged_frozen_projections !first_linear_block_unavailable rows=966656 width=32",
+       "fwd interaction_block.3.attn_block_line_graph indexed_cat3/decomposed_indexed_silu !split_params:disabled rows=966656 width=32"
+      ]
+     ]
+    ]
+   },
+   "label": "construct.eval1"
+  },
+  {
+   "aten": {
+    "like": "construct.eval1",
+    "set": {
+     "three_body_embedding": "aten::as_strided=1 aten::clone=2 aten::contiguous=2 aten::copy_=2 aten::empty=3 aten::empty_like=2 aten::linear=1 aten::matmul=1 aten::mm=1 aten::t=1 aten::transpose=1"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval1"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval1"
+   },
+   "label": "construct.eval2"
+  },
+  {
+   "aten": {
+    "like": "construct.eval2",
+    "set": {
+     "<outside>": "aten::empty=2"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval2"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval2"
+   },
+   "label": "construct.eval3"
+  },
+  {
+   "aten": {
+    "like": "construct.eval2",
+    "set": {
+     "<outside>": "aten::_local_scalar_dense=1 aten::add=6 aten::arange=16 aten::as_strided=24 aten::cat=2 aten::clone=1 aten::copy_=15 aten::empty=20 aten::empty_like=1 aten::expand=1 aten::fill_=8 aten::flatten=2 aten::floor_divide=4 aten::item=1 aten::lift_fresh=1 aten::mul=5 aten::new_empty=7 aten::new_ones=1 aten::new_zeros=6 aten::remainder=2 aten::repeat_interleave=1 aten::resize_=8 aten::select=7 aten::slice=15 aten::unsqueeze=1 aten::view=1 aten::zero_=6"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval3"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval3"
+   },
+   "label": "construct.capture4"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval3"
+   },
+   "entries": {
+    "ints": {
+     "123904": 122880,
+     "61952": 61440
+    },
+    "like": "construct.eval1"
+   },
+   "fallbacks": {
+    "ints": {
+     "123904": 122880
+    },
+    "like": "construct.eval1"
+   },
+   "label": "construct.eval5"
+  },
+  {
+   "aten": {
+    "same_as": "construct.capture4"
+   },
+   "entries": {
+    "same_as": "construct.eval5"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval5"
+   },
+   "label": "construct.capture6"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval5"
+   },
+   "entries": {
+    "ints": {
+     "966656": 958464
+    },
+    "like": "construct.eval1"
+   },
+   "fallbacks": {
+    "ints": {
+     "966656": 958464
+    },
+    "like": "construct.eval1"
+   },
+   "label": "construct.eval7"
+  },
+  {
+   "aten": {
+    "same_as": "construct.capture6"
+   },
+   "entries": {
+    "same_as": "construct.eval7"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval7"
+   },
+   "label": "construct.capture8"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval7"
+   },
+   "entries": {
+    "ints": {
+     "966656": 958464
+    },
+    "like": "construct.eval5"
+   },
+   "fallbacks": {
+    "ints": {
+     "966656": 958464
+    },
+    "like": "construct.eval5"
+   },
+   "label": "construct.eval9"
+  },
+  {
+   "aten": {
+    "like": "construct.eval2",
+    "set": {
+     "<outside>": "aten::clone=1 aten::copy_=1 aten::empty_strided=1"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval9"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval9"
+   },
+   "label": "construct.capture10"
+  },
+  {
+   "aten": {
+    "<outside>": "aten::_local_scalar_dense=2 aten::_to_copy=15 aten::_unique2=1 aten::add=29 aten::arange=8 aten::argsort=1 aten::as_strided=109 aten::bincount=1 aten::cat=1 aten::clamp=1 aten::copy_=36 aten::cumsum=2 aten::detach=2 aten::empty=28 aten::empty_strided=15 aten::expand=1 aten::fill_=15 aten::floor_divide=2 aten::full=2 aten::index=18 aten::item=2 aten::linalg_vector_norm=1 aten::lt=3 aten::max=1 aten::min=1 aten::minimum=1 aten::mul=28 aten::neg=3 aten::nonzero=8 aten::nonzero_numpy=1 aten::prod=1 aten::remainder=4 aten::reshape=22 aten::resize_=14 aten::resolve_conj=1 aten::resolve_neg=1 aten::scatter_=1 aten::scatter_reduce_=1 aten::searchsorted=1 aten::select=29 aten::set_=16 aten::slice=30 aten::sort=2 aten::squeeze=1 aten::stack=1 aten::sub=2 aten::sum=3 aten::t=8 aten::to=31 aten::transpose=8 aten::unbind=1 aten::unsqueeze=12 aten::view=22 aten::where=1 aten::zero_=11 aten::zeros=8 nvalchemiops::batch_build_cell_list=1 nvalchemiops::batch_query_cell_list=1"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "execution": "model_graph",
+  "gpus": 1,
+  "kind": "gpumd",
+  "model": "rdx",
+  "profile": "legacy",
+  "structure": "rdx_1344"
+ }
+}

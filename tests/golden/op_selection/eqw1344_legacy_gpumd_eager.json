@@ -1,0 +1,850 @@
+{
+ "config": "eqw1344_legacy_gpumd_eager",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "8dc161852fac16c3"
+  ],
+  "python": "3.12.3",
+  "seconds": 7.0,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 1344,
+   "directed_edges": 121778,
+   "triplets": 951366
+  },
+  "model_graph": null
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "eager",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 0,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "1d23d4ce6d589544",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "eager",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "legacy",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_gpumd_eager:construct"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_gpumd_eager:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_gpumd_eager:cold.eval1"
+   },
+   "entries": {
+    "ints": {
+     "16": 8,
+     "32": 128
+    },
+    "like": "rdx1344_legacy_gpumd_eager:cold.eval1",
+    "patch": [
+     [
+      10,
+      11,
+      [
+       "fwd interaction_block.0.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      14,
+      16,
+      [
+       "fwd interaction_block.0.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128",
+       "fwd interaction_block.0.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      18,
+      20,
+      [
+       "fwd interaction_block.0.attn_block_line_graph gated_ln_residual/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=60889 tile=\"2d\" width=128",
+       "fwd interaction_block.0.attn_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=128"
+      ]
+     ],
+     [
+      21,
+      22,
+      [
+       "fwd interaction_block.0.attn_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 rows=121778 width=128"
+      ]
+     ],
+     [
+      25,
+      26,
+      [
+       "fwd interaction_block.0.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      29,
+      31,
+      [
+       "fwd interaction_block.0.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128",
+       "fwd interaction_block.0.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      37,
+      39,
+      [
+       "fwd interaction_block.0.attn_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 width=128",
+       "fwd interaction_block.0.attn_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      44,
+      46,
+      [
+       "fwd interaction_block.0.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=951366 tile=\"2d\" width=128",
+       "fwd interaction_block.0.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      47,
+      48,
+      [
+       "fwd interaction_block.0.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      49,
+      50,
+      [
+       "fwd interaction_block.0.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=128"
+      ]
+     ],
+     [
+      51,
+      52,
+      [
+       "fwd interaction_block.0.refine_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 rows=121778 width=128"
+      ]
+     ],
+     [
+      56,
+      58,
+      [
+       "fwd interaction_block.0.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=121778 tile=\"2d\" width=128",
+       "fwd interaction_block.0.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      61,
+      63,
+      [
+       "fwd interaction_block.0.refine_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 width=128",
+       "fwd interaction_block.0.refine_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      67,
+      68,
+      [
+       "fwd interaction_block.1.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      71,
+      73,
+      [
+       "fwd interaction_block.1.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128",
+       "fwd interaction_block.1.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      75,
+      77,
+      [
+       "fwd interaction_block.1.attn_block_line_graph gated_ln_residual/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=60889 tile=\"2d\" width=128",
+       "fwd interaction_block.1.attn_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=128"
+      ]
+     ],
+     [
+      78,
+      79,
+      [
+       "fwd interaction_block.1.attn_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 rows=121778 width=128"
+      ]
+     ],
+     [
+      82,
+      83,
+      [
+       "fwd interaction_block.1.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      86,
+      88,
+      [
+       "fwd interaction_block.1.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128",
+       "fwd interaction_block.1.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      94,
+      96,
+      [
+       "fwd interaction_block.1.attn_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 width=128",
+       "fwd interaction_block.1.attn_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      101,
+      103,
+      [
+       "fwd interaction_block.1.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=951366 tile=\"2d\" width=128",
+       "fwd interaction_block.1.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      104,
+      105,
+      [
+       "fwd interaction_block.1.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      106,
+      107,
+      [
+       "fwd interaction_block.1.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=128"
+      ]
+     ],
+     [
+      108,
+      109,
+      [
+       "fwd interaction_block.1.refine_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 rows=121778 width=128"
+      ]
+     ],
+     [
+      113,
+      115,
+      [
+       "fwd interaction_block.1.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=121778 tile=\"2d\" width=128",
+       "fwd interaction_block.1.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      118,
+      120,
+      [
+       "fwd interaction_block.1.refine_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 width=128",
+       "fwd interaction_block.1.refine_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      124,
+      125,
+      [
+       "fwd interaction_block.2.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      128,
+      130,
+      [
+       "fwd interaction_block.2.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128",
+       "fwd interaction_block.2.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      132,
+      134,
+      [
+       "fwd interaction_block.2.attn_block_line_graph gated_ln_residual/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=60889 tile=\"2d\" width=128",
+       "fwd interaction_block.2.attn_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=128"
+      ]
+     ],
+     [
+      135,
+      136,
+      [
+       "fwd interaction_block.2.attn_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 rows=121778 width=128"
+      ]
+     ],
+     [
+      139,
+      140,
+      [
+       "fwd interaction_block.2.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      143,
+      145,
+      [
+       "fwd interaction_block.2.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128",
+       "fwd interaction_block.2.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      151,
+      153,
+      [
+       "fwd interaction_block.2.attn_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 width=128",
+       "fwd interaction_block.2.attn_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      158,
+      160,
+      [
+       "fwd interaction_block.2.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=951366 tile=\"2d\" width=128",
+       "fwd interaction_block.2.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      161,
+      162,
+      [
+       "fwd interaction_block.2.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      163,
+      164,
+      [
+       "fwd interaction_block.2.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=128"
+      ]
+     ],
+     [
+      165,
+      166,
+      [
+       "fwd interaction_block.2.refine_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 rows=121778 width=128"
+      ]
+     ],
+     [
+      170,
+      172,
+      [
+       "fwd interaction_block.2.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=121778 tile=\"2d\" width=128",
+       "fwd interaction_block.2.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      175,
+      177,
+      [
+       "fwd interaction_block.2.refine_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 width=128",
+       "fwd interaction_block.2.refine_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      181,
+      182,
+      [
+       "fwd interaction_block.3.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      185,
+      187,
+      [
+       "fwd interaction_block.3.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128",
+       "fwd interaction_block.3.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      189,
+      191,
+      [
+       "fwd interaction_block.3.attn_block_line_graph gated_ln_residual/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=60889 tile=\"2d\" width=128",
+       "fwd interaction_block.3.attn_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=128"
+      ]
+     ],
+     [
+      192,
+      193,
+      [
+       "fwd interaction_block.3.attn_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 rows=121778 width=128"
+      ]
+     ],
+     [
+      196,
+      197,
+      [
+       "fwd interaction_block.3.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      200,
+      202,
+      [
+       "fwd interaction_block.3.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128",
+       "fwd interaction_block.3.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      208,
+      210,
+      [
+       "fwd interaction_block.3.attn_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 width=128",
+       "fwd interaction_block.3.attn_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      215,
+      217,
+      [
+       "fwd interaction_block.3.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=951366 tile=\"2d\" width=128",
+       "fwd interaction_block.3.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      218,
+      219,
+      [
+       "fwd interaction_block.3.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      221,
+      222,
+      [
+       "fwd interaction_block.3.refine_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false data_stride0=128 dtype=torch.float32 index_dtype=torch.int64 num_warps=4 pairs=60889 rows=121778 width=128"
+      ]
+     ],
+     [
+      226,
+      228,
+      [
+       "fwd interaction_block.3.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=2 rows=121778 tile=\"2d\" width=128",
+       "fwd interaction_block.3.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=4 offsets_dtype=torch.int64 rows=121778 segments=1344 tiles=[1,16,128] width=128"
+      ]
+     ],
+     [
+      239,
+      241,
+      [
+       "bwd interaction_block.3.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 num_warps=8 rows=121778 segments=1344 tiles=[1,32,128] vjp=runs width=128",
+       "bwd interaction_block.3.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      244,
+      246,
+      [
+       "bwd interaction_block.3.refine_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=true dtype=torch.float32 num_warps=4 pairs=60889 width=128",
+       "bwd interaction_block.3.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      247,
+      249,
+      [
+       "bwd interaction_block.3.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128",
+       "bwd interaction_block.3.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      251,
+      253,
+      [
+       "bwd interaction_block.3.attn_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128",
+       "bwd interaction_block.3.attn_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128"
+      ]
+     ],
+     [
+      258,
+      260,
+      [
+       "bwd interaction_block.3.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=true dtype=torch.float32 num_warps=8 rows=121778 segments=1344 tiles=[1,32,128] vjp=runs width=128",
+       "bwd interaction_block.3.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=121778 segments=1344 tiles=[32,128] vjp=rows width=128"
+      ]
+     ],
+     [
+      262,
+      263,
+      [
+       "bwd interaction_block.3.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      265,
+      268,
+      [
+       "bwd interaction_block.3.attn_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128",
+       "bwd interaction_block.3.attn_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=true dtype=torch.float32 num_warps=4 rows=951366 width=128",
+       "bwd interaction_block.3.attn_block_line_graph gated_ln_residual/triton BLK=128 BM=8 HAS_RESIDUAL=true contiguous_copy=false num_warps=8 rows=60889 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      270,
+      272,
+      [
+       "bwd interaction_block.3.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128",
+       "bwd interaction_block.3.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128"
+      ]
+     ],
+     [
+      274,
+      275,
+      [
+       "bwd interaction_block.3.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      277,
+      279,
+      [
+       "bwd interaction_block.2.refine_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128",
+       "bwd interaction_block.2.refine_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128"
+      ]
+     ],
+     [
+      282,
+      284,
+      [
+       "bwd interaction_block.2.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 num_warps=8 rows=121778 segments=1344 tiles=[1,32,128] vjp=runs width=128",
+       "bwd interaction_block.2.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      287,
+      289,
+      [
+       "bwd interaction_block.2.refine_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=true dtype=torch.float32 num_warps=4 pairs=60889 width=128",
+       "bwd interaction_block.2.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 width=128"
+      ]
+     ],
+     [
+      290,
+      291,
+      [
+       "bwd interaction_block.2.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      292,
+      294,
+      [
+       "bwd interaction_block.2.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128",
+       "bwd interaction_block.2.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      296,
+      298,
+      [
+       "bwd interaction_block.2.attn_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128",
+       "bwd interaction_block.2.attn_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128"
+      ]
+     ],
+     [
+      303,
+      305,
+      [
+       "bwd interaction_block.2.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=true dtype=torch.float32 num_warps=8 rows=121778 segments=1344 tiles=[1,32,128] vjp=runs width=128",
+       "bwd interaction_block.2.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=121778 segments=1344 tiles=[32,128] vjp=rows width=128"
+      ]
+     ],
+     [
+      307,
+      308,
+      [
+       "bwd interaction_block.2.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      310,
+      313,
+      [
+       "bwd interaction_block.2.attn_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128",
+       "bwd interaction_block.2.attn_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 width=128",
+       "bwd interaction_block.2.attn_block_line_graph gated_ln_residual/triton BLK=128 BM=8 HAS_RESIDUAL=true contiguous_copy=false num_warps=8 rows=60889 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      315,
+      317,
+      [
+       "bwd interaction_block.2.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128",
+       "bwd interaction_block.2.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128"
+      ]
+     ],
+     [
+      319,
+      320,
+      [
+       "bwd interaction_block.2.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      322,
+      324,
+      [
+       "bwd interaction_block.1.refine_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128",
+       "bwd interaction_block.1.refine_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128"
+      ]
+     ],
+     [
+      327,
+      329,
+      [
+       "bwd interaction_block.1.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 num_warps=8 rows=121778 segments=1344 tiles=[1,32,128] vjp=runs width=128",
+       "bwd interaction_block.1.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      332,
+      334,
+      [
+       "bwd interaction_block.1.refine_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=true dtype=torch.float32 num_warps=4 pairs=60889 width=128",
+       "bwd interaction_block.1.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 width=128"
+      ]
+     ],
+     [
+      335,
+      336,
+      [
+       "bwd interaction_block.1.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      337,
+      339,
+      [
+       "bwd interaction_block.1.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128",
+       "bwd interaction_block.1.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      341,
+      343,
+      [
+       "bwd interaction_block.1.attn_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128",
+       "bwd interaction_block.1.attn_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128"
+      ]
+     ],
+     [
+      348,
+      350,
+      [
+       "bwd interaction_block.1.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=true dtype=torch.float32 num_warps=8 rows=121778 segments=1344 tiles=[1,32,128] vjp=runs width=128",
+       "bwd interaction_block.1.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=121778 segments=1344 tiles=[32,128] vjp=rows width=128"
+      ]
+     ],
+     [
+      352,
+      353,
+      [
+       "bwd interaction_block.1.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      355,
+      358,
+      [
+       "bwd interaction_block.1.attn_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128",
+       "bwd interaction_block.1.attn_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 width=128",
+       "bwd interaction_block.1.attn_block_line_graph gated_ln_residual/triton BLK=128 BM=8 HAS_RESIDUAL=true contiguous_copy=false num_warps=8 rows=60889 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      360,
+      362,
+      [
+       "bwd interaction_block.1.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128",
+       "bwd interaction_block.1.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128"
+      ]
+     ],
+     [
+      364,
+      365,
+      [
+       "bwd interaction_block.1.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      367,
+      369,
+      [
+       "bwd interaction_block.0.refine_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128",
+       "bwd interaction_block.0.refine_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128"
+      ]
+     ],
+     [
+      372,
+      374,
+      [
+       "bwd interaction_block.0.refine_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=false dtype=torch.float32 num_warps=8 rows=121778 segments=1344 tiles=[1,32,128] vjp=runs width=128",
+       "bwd interaction_block.0.refine_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      377,
+      379,
+      [
+       "bwd interaction_block.0.refine_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=true dtype=torch.float32 num_warps=4 pairs=60889 width=128",
+       "bwd interaction_block.0.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 width=128"
+      ]
+     ],
+     [
+      380,
+      381,
+      [
+       "bwd interaction_block.0.refine_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128"
+      ]
+     ],
+     [
+      382,
+      384,
+      [
+       "bwd interaction_block.0.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128",
+       "bwd interaction_block.0.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=951366 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      386,
+      388,
+      [
+       "bwd interaction_block.0.attn_block_atom_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=60889 width=128",
+       "bwd interaction_block.0.attn_block_atom_graph pair_average/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128"
+      ]
+     ],
+     [
+      393,
+      395,
+      [
+       "bwd interaction_block.0.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=true contiguous_copy=true dtype=torch.float32 num_warps=8 rows=121778 segments=1344 tiles=[1,32,128] vjp=runs width=128",
+       "bwd interaction_block.0.attn_block_atom_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=121778 segments=1344 tiles=[32,128] vjp=rows width=128"
+      ]
+     ],
+     [
+      397,
+      398,
+      [
+       "bwd interaction_block.0.attn_block_atom_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=121778 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      400,
+      403,
+      [
+       "bwd interaction_block.0.attn_block_atom_graph pair_expand/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 pairs=60889 width=128",
+       "bwd interaction_block.0.attn_block_line_graph residual_add/triton BD=128 BM=8 contiguous_copy=false dtype=torch.float32 num_warps=4 rows=951366 width=128",
+       "bwd interaction_block.0.attn_block_line_graph gated_ln_residual/triton BLK=128 BM=8 HAS_RESIDUAL=true contiguous_copy=false num_warps=8 rows=60889 tile=\"2d\" width=128"
+      ]
+     ],
+     [
+      405,
+      407,
+      [
+       "bwd interaction_block.0.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128",
+       "bwd interaction_block.0.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=true dtype=torch.float32 num_warps=4 rows=951366 segments=60889 tiles=[32,128] vjp=rows width=128"
+      ]
+     ],
+     [
+      409,
+      410,
+      [
+       "bwd interaction_block.0.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=128 BM=8 HAS_RESIDUAL=false contiguous_copy=false num_warps=8 rows=951366 tile=\"2d\" width=128"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "ints": {
+     "32": 128
+    },
+    "like": "rdx1344_legacy_gpumd_eager:cold.eval1"
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "same_as": "cold.eval1"
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "warm.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "execution": "eager",
+  "gpus": 1,
+  "kind": "gpumd",
+  "model": "equal_width",
+  "profile": "legacy",
+  "structure": "rdx_1344"
+ }
+}

@@ -1,0 +1,202 @@
+{
+ "config": "rdx1344_generic_calc_model_graph",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "b2a5329f92eaf818"
+  ],
+  "python": "3.12.3",
+  "seconds": 7.8,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "model_graph": {
+   "cache_fit_reuses": 0,
+   "cached_buckets": [
+    [
+     61440,
+     958464
+    ]
+   ],
+   "captures": 1,
+   "enable_model_fusions": false
+  },
+  "topology_reuse": "skin"
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "model_graph",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 0,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "topology_reuse": {
+    "fallbacks": 0,
+    "last_call": "skin",
+    "reason": null,
+    "requested": "auto",
+    "runner": {
+     "buffer_max": 1504,
+     "cache_fit_reuses": 0,
+     "cached_buckets": [
+      [
+       61440,
+       958464
+      ]
+     ],
+     "calls": 2,
+     "capture": true,
+     "captures": 1,
+     "check_ties": 0,
+     "checks": 0,
+     "enable_model_fusions": false,
+     "last_edge_count": 121778,
+     "last_triplet_count": 951366,
+     "max_host_displacement": 0.0,
+     "pool_resets": 0,
+     "redo_capacity": 0,
+     "redo_skin": 0,
+     "refreshes": 1,
+     "shared_graph_pool": true,
+     "shrinks": 0,
+     "skin": 2.0,
+     "warmup_runs": 3
+    }
+   },
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "c8f6c7905e26f6cf",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "model_graph",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "generic",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_calc_model_graph:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_generic_gpumd_model_graph:construct.eval1",
+    "set": {
+     "<outside>": "aten::__and__=5 aten::__or__=7 aten::_to_copy=15 aten::add=25 aten::any=1 aten::as_strided=64 aten::bitwise_and=5 aten::bitwise_not=2 aten::bitwise_or=7 aten::cat=1 aten::clamp=8 aten::clamp_min=2 aten::copy_=38 aten::cumsum=5 aten::empty=17 aten::empty_strided=15 aten::eq=1 aten::fill_=7 aten::floor=1 aten::floor_divide=4 aten::ge=2 aten::gt=2 aten::index=8 aten::le=2 aten::linalg_vector_norm=1 aten::lt=3 aten::max=1 aten::minimum=1 aten::mul=23 aten::ne=2 aten::neg=4 aten::remainder=2 aten::reshape=14 aten::resize_=12 aten::round=1 aten::scatter_reduce_=2 aten::searchsorted=1 aten::select=25 aten::slice=11 aten::sort=2 aten::sub=12 aten::sub_=1 aten::sum=6 aten::to=39 aten::unsqueeze=8 aten::view=14 aten::where=11 aten::zero_=5"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "rdx1344_generic_gpumd_model_graph:construct.eval9"
+   },
+   "fallbacks": {
+    "same_as": "rdx1344_generic_gpumd_model_graph:construct.eval9"
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "cold.eval1"
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "cold.eval2"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_generic_gpumd_model_graph:construct.eval1",
+    "set": {
+     "<outside>": "aten::__and__=5 aten::__or__=7 aten::_to_copy=15 aten::add=25 aten::any=1 aten::as_strided=64 aten::bitwise_and=5 aten::bitwise_not=2 aten::bitwise_or=7 aten::cat=1 aten::clamp=8 aten::clamp_min=2 aten::copy_=38 aten::cumsum=5 aten::empty=19 aten::empty_strided=15 aten::eq=1 aten::fill_=7 aten::floor=1 aten::floor_divide=4 aten::ge=2 aten::gt=2 aten::index=8 aten::le=2 aten::linalg_vector_norm=1 aten::lt=3 aten::max=1 aten::minimum=1 aten::mul=23 aten::ne=2 aten::neg=4 aten::remainder=2 aten::reshape=14 aten::resize_=12 aten::round=1 aten::scatter_reduce_=2 aten::searchsorted=1 aten::select=25 aten::slice=11 aten::sort=2 aten::sub=12 aten::sub_=1 aten::sum=6 aten::to=39 aten::unsqueeze=8 aten::view=14 aten::where=11 aten::zero_=5"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "cold.eval2"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval2"
+   },
+   "label": "cold.eval3"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_generic_gpumd_model_graph:construct.eval1",
+    "set": {
+     "<outside>": "aten::__or__=2 aten::_to_copy=4 aten::as_strided=8 aten::bitwise_or=2 aten::cat=2 aten::copy_=7 aten::detach=2 aten::empty_strided=4 aten::ge=1 aten::gt=1 aten::reshape=3 aten::resolve_conj=3 aten::resolve_neg=3 aten::select=3 aten::slice=5 aten::to=9 aten::view=3"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "cold.eval3"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval3"
+   },
+   "label": "cold.capture4"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_calc_model_graph:warm"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "execution": "model_graph",
+  "gpus": 1,
+  "kind": "calculator",
+  "model": "rdx",
+  "profile": "generic",
+  "structure": "rdx_1344"
+ }
+}

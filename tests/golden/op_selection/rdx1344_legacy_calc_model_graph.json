@@ -1,0 +1,206 @@
+{
+ "config": "rdx1344_legacy_calc_model_graph",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "8dc161852fac16c3"
+  ],
+  "python": "3.12.3",
+  "seconds": 7.9,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "model_graph": {
+   "cache_fit_reuses": 0,
+   "cached_buckets": [
+    [
+     61440,
+     958464
+    ]
+   ],
+   "captures": 1,
+   "enable_model_fusions": true
+  },
+  "topology_reuse": "skin"
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "model_graph",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 0,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "topology_reuse": {
+    "fallbacks": 0,
+    "last_call": "skin",
+    "reason": null,
+    "requested": "auto",
+    "runner": {
+     "buffer_max": 1504,
+     "cache_fit_reuses": 0,
+     "cached_buckets": [
+      [
+       61440,
+       958464
+      ]
+     ],
+     "calls": 2,
+     "capture": true,
+     "captures": 1,
+     "check_ties": 0,
+     "checks": 0,
+     "enable_model_fusions": true,
+     "last_edge_count": 121778,
+     "last_triplet_count": 951366,
+     "max_host_displacement": 0.0,
+     "pool_resets": 0,
+     "redo_capacity": 0,
+     "redo_skin": 0,
+     "refreshes": 1,
+     "shared_graph_pool": true,
+     "shrinks": 0,
+     "skin": 2.0,
+     "warmup_runs": 3
+    }
+   },
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "3a7f716550a67b0c",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "model_graph",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "legacy",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "<outside>": "aten::__and__=10 aten::__or__=10 aten::_linalg_check_errors=2 aten::_linalg_det=3 aten::_linalg_solve_ex=2 aten::_local_scalar_dense=6 aten::_to_copy=63 aten::abs=6 aten::add=54 aten::add_=6 aten::all=1 aten::any=5 aten::arange=28 aten::as_strided=222 aten::as_strided_=5 aten::bitwise_and=10 aten::bitwise_not=4 aten::bitwise_or=10 aten::cat=9 aten::clamp=18 aten::clamp_min=4 aten::clone=2 aten::copy_=128 aten::cumsum=10 aten::det=1 aten::detach=1 aten::detach_=2 aten::diagonal=5 aten::div=2 aten::empty=133 aten::empty_like=15 aten::empty_strided=80 aten::eq=5 aten::equal=2 aten::expand=15 aten::expand_as=1 aten::fill_=76 aten::floor=3 aten::floor_divide=16 aten::fmod_=6 aten::full=1 aten::ge=2 aten::gt=2 aten::index=18 aten::is_nonzero=1 aten::item=6 aten::le=5 aten::lift_fresh=3 aten::linalg_cross=6 aten::linalg_det=3 aten::linalg_inv=2 aten::linalg_inv_ex=2 aten::linalg_lu_factor_ex=5 aten::linalg_lu_solve=2 aten::linalg_solve_ex=2 aten::linalg_vector_norm=8 aten::lt=6 aten::mH=3 aten::mT=2 aten::max=2 aten::min=2 aten::minimum=2 aten::mul=66 aten::mul_=3 aten::narrow=10 aten::ne=7 aten::neg=10 aten::new_empty=4 aten::ones=2 aten::ones_like=4 aten::prod=4 aten::remainder=8 aten::reshape=31 aten::resize_=50 aten::resolve_conj=2 aten::resolve_neg=2 aten::round=2 aten::scatter_reduce_=4 aten::searchsorted=2 aten::select=56 aten::slice=32 aten::sort=4 aten::stack=6 aten::sub=27 aten::sub_=2 aten::sum=19 aten::to=120 aten::transpose=5 aten::unsqueeze=48 aten::view=35 aten::view_as=3 aten::where=24 aten::zero_=62 aten::zeros=39 aten::zeros_like=7 nvalchemiops::batch_build_cell_list=1 nvalchemiops::batch_query_cell_list=1"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_legacy_whole_step_nve:construct.eval1",
+    "set": {
+     "<outside>": "aten::__and__=5 aten::__or__=7 aten::_to_copy=15 aten::add=25 aten::any=1 aten::as_strided=64 aten::bitwise_and=5 aten::bitwise_not=2 aten::bitwise_or=7 aten::cat=1 aten::clamp=8 aten::clamp_min=2 aten::copy_=38 aten::cumsum=5 aten::empty=17 aten::empty_strided=15 aten::eq=1 aten::fill_=7 aten::floor=1 aten::floor_divide=4 aten::ge=2 aten::gt=2 aten::index=8 aten::le=2 aten::linalg_vector_norm=1 aten::lt=3 aten::max=1 aten::minimum=1 aten::mul=23 aten::ne=2 aten::neg=4 aten::remainder=2 aten::reshape=14 aten::resize_=12 aten::round=1 aten::scatter_reduce_=2 aten::searchsorted=1 aten::select=25 aten::slice=11 aten::sort=2 aten::sub=12 aten::sub_=1 aten::sum=6 aten::to=39 aten::unsqueeze=8 aten::view=14 aten::where=11 aten::zero_=5"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "rdx1344_legacy_gpumd_model_graph:construct.eval9"
+   },
+   "fallbacks": {
+    "same_as": "rdx1344_legacy_gpumd_model_graph:construct.eval9"
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_legacy_gpumd_model_graph:construct.eval2",
+    "set": {
+     "<outside>": "aten::__and__=5 aten::__or__=7 aten::_to_copy=15 aten::add=25 aten::any=1 aten::as_strided=64 aten::bitwise_and=5 aten::bitwise_not=2 aten::bitwise_or=7 aten::cat=1 aten::clamp=8 aten::clamp_min=2 aten::copy_=38 aten::cumsum=5 aten::empty=17 aten::empty_strided=15 aten::eq=1 aten::fill_=7 aten::floor=1 aten::floor_divide=4 aten::ge=2 aten::gt=2 aten::index=8 aten::le=2 aten::linalg_vector_norm=1 aten::lt=3 aten::max=1 aten::minimum=1 aten::mul=23 aten::ne=2 aten::neg=4 aten::remainder=2 aten::reshape=14 aten::resize_=12 aten::round=1 aten::scatter_reduce_=2 aten::searchsorted=1 aten::select=25 aten::slice=11 aten::sort=2 aten::sub=12 aten::sub_=1 aten::sum=6 aten::to=39 aten::unsqueeze=8 aten::view=14 aten::where=11 aten::zero_=5"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "cold.eval2"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_legacy_gpumd_model_graph:construct.eval2",
+    "set": {
+     "<outside>": "aten::__and__=5 aten::__or__=7 aten::_to_copy=15 aten::add=25 aten::any=1 aten::as_strided=64 aten::bitwise_and=5 aten::bitwise_not=2 aten::bitwise_or=7 aten::cat=1 aten::clamp=8 aten::clamp_min=2 aten::copy_=38 aten::cumsum=5 aten::empty=19 aten::empty_strided=15 aten::eq=1 aten::fill_=7 aten::floor=1 aten::floor_divide=4 aten::ge=2 aten::gt=2 aten::index=8 aten::le=2 aten::linalg_vector_norm=1 aten::lt=3 aten::max=1 aten::minimum=1 aten::mul=23 aten::ne=2 aten::neg=4 aten::remainder=2 aten::reshape=14 aten::resize_=12 aten::round=1 aten::scatter_reduce_=2 aten::searchsorted=1 aten::select=25 aten::slice=11 aten::sort=2 aten::sub=12 aten::sub_=1 aten::sum=6 aten::to=39 aten::unsqueeze=8 aten::view=14 aten::where=11 aten::zero_=5"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "cold.eval2"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval2"
+   },
+   "label": "cold.eval3"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_legacy_gpumd_model_graph:construct.eval2",
+    "set": {
+     "<outside>": "aten::__or__=2 aten::_to_copy=4 aten::as_strided=8 aten::bitwise_or=2 aten::cat=2 aten::copy_=7 aten::detach=2 aten::empty_strided=4 aten::ge=1 aten::gt=1 aten::reshape=3 aten::resolve_conj=3 aten::resolve_neg=3 aten::select=3 aten::slice=5 aten::to=9 aten::view=3"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "cold.eval3"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval3"
+   },
+   "label": "cold.capture4"
+  },
+  {
+   "aten": {
+    "<outside>": "aten::as_strided=5 aten::cat=1 aten::copy_=4 aten::detach=3 aten::reshape=2 aten::resolve_conj=4 aten::resolve_neg=4 aten::slice=5 aten::to=4 aten::view=2"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "execution": "model_graph",
+  "gpus": 1,
+  "kind": "calculator",
+  "model": "rdx",
+  "profile": "legacy",
+  "structure": "rdx_1344"
+ }
+}

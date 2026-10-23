@@ -1,0 +1,393 @@
+{
+ "config": "rdx1344_legacy_gpumd_eager_ckpt_on",
+ "info": {
+  "configuration_warnings": [
+   "ConfigurationWarning: InferenceConfig(checkpoint='on') is deprecated and will be removed in the next version: use saved_tensor_recompute ('on', 'deep' or 'auto', the default) to reduce inference memory. Layer checkpointing stays available for training and fine-tuning through MatRIS(enable_checkpoint=...)."
+  ],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "8dc161852fac16c3"
+  ],
+  "python": "3.12.3",
+  "seconds": 7.3,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 1344,
+   "directed_edges": 121778,
+   "triplets": 951366
+  },
+  "model_graph": null
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": true,
+   "execution": "eager",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 0,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "536c5cb530a93d02",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "on",
+   "execution": "eager",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "legacy",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_gpumd_eager:construct"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_gpumd_eager:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_legacy_gpumd_eager:cold.eval1",
+    "set": {
+     "bwd:_ResidualAddBackward": "aten::addmm=24 aten::arange=16 aten::argsort=8 aten::as_strided=166 aten::cat=12 aten::clone=1 aten::contiguous=1 aten::copy_=17 aten::detach=95 aten::dropout=31 aten::empty=105 aten::empty_like=58 aten::empty_strided=65 aten::expand=28 aten::gather=28 aten::index=8 aten::index_select=28 aten::linear=74 aten::matmul=50 aten::mm=50 aten::mul=4 aten::reshape=23 aten::resize_=44 aten::searchsorted=8 aten::silu=31 aten::sort=16 aten::t=74 aten::to=8 aten::transpose=74 aten::view=51"
+    },
+    "unset": []
+   },
+   "entries": {
+    "like": "rdx1344_legacy_gpumd_eager:cold.eval1",
+    "patch": [
+     [
+      6,
+      7,
+      [
+       "fwd interaction_block.0 layer_checkpoint/on compiled=false enable_checkpoint=true layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      20,
+      21,
+      [
+       "fwd interaction_block.0 layer_checkpoint/off compiled=false enable_checkpoint=true layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      39,
+      40,
+      [
+       "fwd interaction_block.0 layer_checkpoint/on compiled=false enable_checkpoint=true layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      50,
+      51,
+      [
+       "fwd interaction_block.0 layer_checkpoint/off compiled=false enable_checkpoint=true layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      63,
+      64,
+      [
+       "fwd interaction_block.1 layer_checkpoint/on compiled=false enable_checkpoint=true layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      77,
+      78,
+      [
+       "fwd interaction_block.1 layer_checkpoint/off compiled=false enable_checkpoint=true layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      96,
+      97,
+      [
+       "fwd interaction_block.1 layer_checkpoint/on compiled=false enable_checkpoint=true layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      107,
+      108,
+      [
+       "fwd interaction_block.1 layer_checkpoint/off compiled=false enable_checkpoint=true layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      120,
+      121,
+      [
+       "fwd interaction_block.2 layer_checkpoint/on compiled=false enable_checkpoint=true layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      134,
+      135,
+      [
+       "fwd interaction_block.2 layer_checkpoint/off compiled=false enable_checkpoint=true layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      153,
+      154,
+      [
+       "fwd interaction_block.2 layer_checkpoint/on compiled=false enable_checkpoint=true layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      164,
+      165,
+      [
+       "fwd interaction_block.2 layer_checkpoint/off compiled=false enable_checkpoint=true layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      177,
+      178,
+      [
+       "fwd interaction_block.3 layer_checkpoint/on compiled=false enable_checkpoint=true layer=attn_block_line_graph"
+      ]
+     ],
+     [
+      191,
+      192,
+      [
+       "fwd interaction_block.3 layer_checkpoint/off compiled=false enable_checkpoint=true layer=attn_block_atom_graph"
+      ]
+     ],
+     [
+      210,
+      211,
+      [
+       "fwd interaction_block.3 layer_checkpoint/on compiled=false enable_checkpoint=true layer=refine_block_line_graph"
+      ]
+     ],
+     [
+      220,
+      221,
+      [
+       "fwd interaction_block.3 layer_checkpoint/off compiled=false enable_checkpoint=true layer=refine_block_atom_graph"
+      ]
+     ],
+     [
+      245,
+      245,
+      [
+       "recompute interaction_block.3.refine_block_line_graph line_envelope/torch_index_select_product rows=951366 width=32",
+       "recompute interaction_block.3.refine_block_line_graph gather_cat4/torch rows=951366 width=32",
+       "recompute interaction_block.3.refine_block_line_graph.edge_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.3.refine_block_line_graph.edge_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.3.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "recompute interaction_block.3.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.3.refine_block_line_graph.node_FFN.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.3.refine_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=32"
+      ]
+     ],
+     [
+      266,
+      266,
+      [
+       "recompute interaction_block.3.attn_block_line_graph gather_cat3/torch rows=951366 width=32",
+       "recompute interaction_block.3.attn_block_line_graph.edge_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.3.attn_block_line_graph.edge_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.3.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "recompute interaction_block.3.attn_block_line_graph attention_projection/torch_linear rows=951366 width=32",
+       "recompute interaction_block.3.attn_block_line_graph segment_softmax/triton_csr BLK=32 contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 rows=951366 segments=60889 width=32",
+       "recompute interaction_block.3.attn_block_line_graph segment_softmax/triton_csr BLK=32 contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 rows=951366 segments=60889 width=32",
+       "recompute interaction_block.3.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.3.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.3.attn_block_line_graph.node_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.3.attn_block_line_graph.node_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.3.attn_block_line_graph gated_ln_residual/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=60889 tile=\"2d\" width=32",
+       "recompute interaction_block.3.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      288,
+      288,
+      [
+       "recompute interaction_block.2.refine_block_line_graph line_envelope/torch_index_select_product rows=951366 width=32",
+       "recompute interaction_block.2.refine_block_line_graph gather_cat4/torch rows=951366 width=32",
+       "recompute interaction_block.2.refine_block_line_graph.edge_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.2.refine_block_line_graph.edge_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.2.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "recompute interaction_block.2.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.2.refine_block_line_graph.node_FFN.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.2.refine_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=32",
+       "recompute interaction_block.2.refine_block_line_graph.edge_FFN.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.2.refine_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      311,
+      311,
+      [
+       "recompute interaction_block.2.attn_block_line_graph gather_cat3/torch rows=951366 width=32",
+       "recompute interaction_block.2.attn_block_line_graph.edge_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.2.attn_block_line_graph.edge_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.2.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "recompute interaction_block.2.attn_block_line_graph attention_projection/torch_linear rows=951366 width=32",
+       "recompute interaction_block.2.attn_block_line_graph segment_softmax/triton_csr BLK=32 contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 rows=951366 segments=60889 width=32",
+       "recompute interaction_block.2.attn_block_line_graph segment_softmax/triton_csr BLK=32 contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 rows=951366 segments=60889 width=32",
+       "recompute interaction_block.2.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.2.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.2.attn_block_line_graph.node_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.2.attn_block_line_graph.node_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.2.attn_block_line_graph gated_ln_residual/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=60889 tile=\"2d\" width=32",
+       "recompute interaction_block.2.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      333,
+      333,
+      [
+       "recompute interaction_block.1.refine_block_line_graph line_envelope/torch_index_select_product rows=951366 width=32",
+       "recompute interaction_block.1.refine_block_line_graph gather_cat4/torch rows=951366 width=32",
+       "recompute interaction_block.1.refine_block_line_graph.edge_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.1.refine_block_line_graph.edge_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.1.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "recompute interaction_block.1.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.1.refine_block_line_graph.node_FFN.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.1.refine_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=32",
+       "recompute interaction_block.1.refine_block_line_graph.edge_FFN.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.1.refine_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      356,
+      356,
+      [
+       "recompute interaction_block.1.attn_block_line_graph gather_cat3/torch rows=951366 width=32",
+       "recompute interaction_block.1.attn_block_line_graph.edge_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.1.attn_block_line_graph.edge_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.1.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "recompute interaction_block.1.attn_block_line_graph attention_projection/torch_linear rows=951366 width=32",
+       "recompute interaction_block.1.attn_block_line_graph segment_softmax/triton_csr BLK=32 contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 rows=951366 segments=60889 width=32",
+       "recompute interaction_block.1.attn_block_line_graph segment_softmax/triton_csr BLK=32 contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 rows=951366 segments=60889 width=32",
+       "recompute interaction_block.1.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.1.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.1.attn_block_line_graph.node_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.1.attn_block_line_graph.node_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.1.attn_block_line_graph gated_ln_residual/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=60889 tile=\"2d\" width=32",
+       "recompute interaction_block.1.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      378,
+      378,
+      [
+       "recompute interaction_block.0.refine_block_line_graph line_envelope/torch_index_select_product rows=951366 width=32",
+       "recompute interaction_block.0.refine_block_line_graph gather_cat4/torch rows=951366 width=32",
+       "recompute interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.0.refine_block_line_graph.edge_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.0.refine_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "recompute interaction_block.0.refine_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.0.refine_block_line_graph.node_FFN.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.0.refine_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=60889 width=32",
+       "recompute interaction_block.0.refine_block_line_graph.edge_FFN.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.0.refine_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ],
+     [
+      401,
+      401,
+      [
+       "recompute interaction_block.0.attn_block_line_graph gather_cat3/torch rows=951366 width=32",
+       "recompute interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.0.attn_block_line_graph.edge_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[951366,32]",
+       "recompute interaction_block.0.attn_block_line_graph.edge_nonlinear_update gated_ln/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=false contiguous_copy=[false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=951366 tile=\"2d\" width=32",
+       "recompute interaction_block.0.attn_block_line_graph attention_projection/torch_linear rows=951366 width=32",
+       "recompute interaction_block.0.attn_block_line_graph segment_softmax/triton_csr BLK=32 contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 rows=951366 segments=60889 width=32",
+       "recompute interaction_block.0.attn_block_line_graph segment_softmax/triton_csr BLK=32 contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 rows=951366 segments=60889 width=32",
+       "recompute interaction_block.0.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.0.attn_block_line_graph weighted_segment_sum/triton_csr IDENTITY=false contiguous_copy=false dtype=torch.float32 index_dtype=torch.int64 num_warps=1 offsets_dtype=torch.int64 rows=951366 segments=60889 tiles=[1,16,32] width=32",
+       "recompute interaction_block.0.attn_block_line_graph.node_nonlinear_update.mlp_core.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.0.attn_block_line_graph.node_nonlinear_update.mlp_gate.layers.1 silu/jiterator dtype=torch.float32 kernel=aten.silu shape=[60889,32]",
+       "recompute interaction_block.0.attn_block_line_graph gated_ln_residual/triton BLK=32 BM=16 EPS=[1e-05,1e-05] HAS_RESIDUAL=true contiguous_copy=[false,false,false] dtype=torch.float32 linear_bias=true num_warps=1 rows=60889 tile=\"2d\" width=32",
+       "recompute interaction_block.0.attn_block_line_graph residual_add/triton BD=32 BM=32 contiguous_copy=[false,false] dtype=torch.float32 num_warps=4 rows=951366 width=32"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "same_as": "rdx1344_legacy_gpumd_eager:cold.eval1"
+   },
+   "label": "cold.eval1"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  },
+  {
+   "aten": {
+    "same_as": "cold.eval1"
+   },
+   "entries": {
+    "same_as": "cold.eval1"
+   },
+   "fallbacks": {
+    "same_as": "cold.eval1"
+   },
+   "label": "warm.eval1"
+  }
+ ],
+ "spec": {
+  "checkpoint": "on",
+  "execution": "eager",
+  "gpus": 1,
+  "kind": "gpumd",
+  "model": "rdx",
+  "profile": "legacy",
+  "structure": "rdx_1344"
+ }
+}

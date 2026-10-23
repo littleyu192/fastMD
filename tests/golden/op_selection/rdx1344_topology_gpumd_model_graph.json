@@ -1,0 +1,370 @@
+{
+ "config": "rdx1344_topology_gpumd_model_graph",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "c56b3866d6e6b99b"
+  ],
+  "python": "3.12.3",
+  "seconds": 9.0,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "graph": {
+   "atoms": 1344,
+   "directed_edges": 121778,
+   "triplets": 951366
+  },
+  "model_graph": {
+   "cache_fit_reuses": 0,
+   "cached_buckets": [
+    [
+     61440,
+     958464
+    ],
+    [
+     61440,
+     966656
+    ],
+    [
+     61952,
+     958464
+    ],
+    [
+     61952,
+     966656
+    ]
+   ],
+   "captures": 4,
+   "enable_model_fusions": true
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "model_graph",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 8,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "7084a61776fe54fb",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "model_graph",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "topology",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_gpumd_model_graph:construct"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_topology_gpumd_eager:cold.eval1",
+    "set": {
+     "MatRIS": "aten::__and__=1 aten::_local_scalar_dense=3 aten::_reshape_alias=3 aten::_to_copy=11 aten::add=7 aten::add_=3 aten::any=1 aten::arange=8 aten::argsort=3 aten::as_strided=61 aten::bitwise_and=1 aten::bitwise_not=1 aten::cat=11 aten::clone=1 aten::copy_=26 aten::cumsum=1 aten::detach_=1 aten::div=3 aten::empty=35 aten::empty_like=6 aten::empty_strided=19 aten::expand=2 aten::fill_=24 aten::full=2 aten::index=8 aten::index_add_=5 aten::item=3 aten::lift_fresh=4 aten::linalg_cross=1 aten::linalg_vector_norm=1 aten::lt=1 aten::masked_fill=1 aten::masked_fill_=1 aten::mul=3 aten::narrow=10 aten::ne=5 aten::new_empty=7 aten::new_ones=4 aten::new_zeros=3 aten::ones_like=5 aten::reshape=13 aten::resize_=13 aten::scalar_tensor=2 aten::searchsorted=3 aten::select=26 aten::slice=10 aten::sort=6 aten::sub=4 aten::sum=7 aten::to=26 aten::unsqueeze=8 aten::view=10 aten::where=8 aten::zero_=8 aten::zeros=5",
+     "bwd:WhereBackward0": "aten::add_=4 aten::empty=38 aten::fill_=19 aten::resize_=19 aten::scalar_tensor=19 aten::to=19 aten::where=38",
+     "bwd:_GatedLNResidualBackward": "aten::add_=4 aten::empty_like=12 aten::empty_strided=12",
+     "interaction_block.0": "aten::empty=2 aten::resize_=2 aten::where=2",
+     "interaction_block.1": "aten::empty=2 aten::resize_=2 aten::where=2",
+     "interaction_block.2": "aten::empty=2 aten::resize_=2 aten::where=2",
+     "interaction_block.3": "aten::empty=2 aten::resize_=2 aten::where=2"
+    },
+    "unset": [
+     "<outside>"
+    ]
+   },
+   "entries": {
+    "ints": {
+     "121778": 123904,
+     "1344": 1408,
+     "60889": 61952,
+     "951366": 966656
+    },
+    "like": "rdx1344_topology_gpumd_eager:cold.eval1",
+    "patch": [
+     [
+      16,
+      16,
+      [
+       "fwd interaction_block.0 line_graph_select/torch_where stage=attention"
+      ]
+     ],
+     [
+      42,
+      42,
+      [
+       "fwd interaction_block.0 line_graph_select/torch_where stage=refinement"
+      ]
+     ],
+     [
+      64,
+      64,
+      [
+       "fwd interaction_block.1 line_graph_select/torch_where stage=attention"
+      ]
+     ],
+     [
+      90,
+      90,
+      [
+       "fwd interaction_block.1 line_graph_select/torch_where stage=refinement"
+      ]
+     ],
+     [
+      112,
+      112,
+      [
+       "fwd interaction_block.2 line_graph_select/torch_where stage=attention"
+      ]
+     ],
+     [
+      138,
+      138,
+      [
+       "fwd interaction_block.2 line_graph_select/torch_where stage=refinement"
+      ]
+     ],
+     [
+      160,
+      160,
+      [
+       "fwd interaction_block.3 line_graph_select/torch_where stage=attention"
+      ]
+     ],
+     [
+      185,
+      185,
+      [
+       "fwd interaction_block.3 line_graph_select/torch_where stage=refinement"
+      ]
+     ]
+    ]
+   },
+   "fallbacks": {
+    "ints": {
+     "121778": 123904,
+     "1344": 1408
+    },
+    "like": "rdx1344_topology_gpumd_eager:cold.eval1"
+   },
+   "label": "construct.eval1"
+  },
+  {
+   "aten": {
+    "like": "rdx1344_topology_gpumd_eager:warm.eval1",
+    "set": {
+     "MatRIS": "aten::__and__=1 aten::_local_scalar_dense=3 aten::_reshape_alias=3 aten::_to_copy=11 aten::add=7 aten::add_=3 aten::any=1 aten::arange=8 aten::argsort=3 aten::as_strided=61 aten::bitwise_and=1 aten::bitwise_not=1 aten::cat=11 aten::clone=1 aten::copy_=26 aten::cumsum=1 aten::detach_=1 aten::div=3 aten::empty=35 aten::empty_like=6 aten::empty_strided=19 aten::expand=2 aten::fill_=24 aten::full=2 aten::index=8 aten::index_add_=5 aten::item=3 aten::lift_fresh=4 aten::linalg_cross=1 aten::linalg_vector_norm=1 aten::lt=1 aten::masked_fill=1 aten::masked_fill_=1 aten::mul=3 aten::narrow=10 aten::ne=5 aten::new_empty=7 aten::new_ones=4 aten::new_zeros=3 aten::ones_like=5 aten::reshape=13 aten::resize_=13 aten::scalar_tensor=2 aten::searchsorted=3 aten::select=26 aten::slice=10 aten::sort=6 aten::sub=4 aten::sum=7 aten::to=26 aten::unsqueeze=8 aten::view=10 aten::where=8 aten::zero_=8 aten::zeros=5",
+     "bwd:WhereBackward0": "aten::add_=4 aten::empty=38 aten::fill_=19 aten::resize_=19 aten::scalar_tensor=19 aten::to=19 aten::where=38",
+     "bwd:_GatedLNResidualBackward": "aten::add_=4 aten::empty_like=12 aten::empty_strided=12",
+     "interaction_block.0": "aten::empty=2 aten::resize_=2 aten::where=2",
+     "interaction_block.1": "aten::empty=2 aten::resize_=2 aten::where=2",
+     "interaction_block.2": "aten::empty=2 aten::resize_=2 aten::where=2",
+     "interaction_block.3": "aten::empty=2 aten::resize_=2 aten::where=2"
+    },
+    "unset": [
+     "<outside>"
+    ]
+   },
+   "entries": {
+    "same_as": "construct.eval1"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval1"
+   },
+   "label": "construct.eval2"
+  },
+  {
+   "aten": {
+    "like": "construct.eval2",
+    "set": {
+     "<outside>": "aten::empty=2"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval2"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval2"
+   },
+   "label": "construct.eval3"
+  },
+  {
+   "aten": {
+    "like": "construct.eval2",
+    "set": {
+     "<outside>": "aten::_local_scalar_dense=1 aten::add=6 aten::arange=16 aten::as_strided=24 aten::cat=2 aten::clone=1 aten::copy_=15 aten::empty=20 aten::empty_like=1 aten::expand=1 aten::fill_=8 aten::flatten=2 aten::floor_divide=4 aten::item=1 aten::lift_fresh=1 aten::mul=5 aten::new_empty=7 aten::new_ones=1 aten::new_zeros=6 aten::remainder=2 aten::repeat_interleave=1 aten::resize_=8 aten::select=7 aten::slice=15 aten::unsqueeze=1 aten::view=1 aten::zero_=6"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval3"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval3"
+   },
+   "label": "construct.capture4"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval3"
+   },
+   "entries": {
+    "ints": {
+     "123904": 122880,
+     "61952": 61440
+    },
+    "like": "construct.eval1"
+   },
+   "fallbacks": {
+    "ints": {
+     "123904": 122880
+    },
+    "like": "construct.eval1"
+   },
+   "label": "construct.eval5"
+  },
+  {
+   "aten": {
+    "same_as": "construct.capture4"
+   },
+   "entries": {
+    "same_as": "construct.eval5"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval5"
+   },
+   "label": "construct.capture6"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval5"
+   },
+   "entries": {
+    "ints": {
+     "966656": 958464
+    },
+    "like": "construct.eval1"
+   },
+   "fallbacks": {
+    "same_as": "construct.capture4"
+   },
+   "label": "construct.eval7"
+  },
+  {
+   "aten": {
+    "same_as": "construct.capture6"
+   },
+   "entries": {
+    "same_as": "construct.eval7"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval7"
+   },
+   "label": "construct.capture8"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval7"
+   },
+   "entries": {
+    "ints": {
+     "966656": 958464
+    },
+    "like": "construct.eval5"
+   },
+   "fallbacks": {
+    "same_as": "construct.capture6"
+   },
+   "label": "construct.eval9"
+  },
+  {
+   "aten": {
+    "like": "construct.eval2",
+    "set": {
+     "<outside>": "aten::clone=1 aten::copy_=1 aten::empty_strided=1"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval9"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval9"
+   },
+   "label": "construct.capture10"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_gpumd_model_graph:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "execution": "model_graph",
+  "gpus": 1,
+  "kind": "gpumd",
+  "model": "rdx",
+  "profile": "topology",
+  "structure": "rdx_1344"
+ }
+}

@@ -1,0 +1,205 @@
+{
+ "config": "eqw1344_topology_whole_step_nve",
+ "info": {
+  "configuration_warnings": [],
+  "cuda": "13.2",
+  "gpu": "NVIDIA GB200",
+  "policy_fingerprints": [
+   "c56b3866d6e6b99b"
+  ],
+  "python": "3.12.3",
+  "seconds": 7.5,
+  "torch": "2.12.0a0+5aff3928d8.nv26.05",
+  "triton": "3.7.0"
+ },
+ "observed": {
+  "whole_step": {
+   "candidate_refreshes": 1,
+   "capacity_recaptures": 0,
+   "fallback_windows": 0,
+   "launches": 2,
+   "recovery_replays": 0,
+   "steps_per_launch": 1,
+   "t_capacity": 958464,
+   "u_capacity": 61440
+  }
+ },
+ "outcome": "ok",
+ "recorder": {
+  "aten": true,
+  "invalid_params": 0,
+  "schema": "matris.op_selection/2"
+ },
+ "resolved": {
+  "effective": {
+   "checkpoint": false,
+   "execution": "whole_step",
+   "isolated_atoms": "reference",
+   "matmul": {
+    "float32_matmul_precision": "highest",
+    "fp32_gemm": "ieee"
+   },
+   "merged_projections": {
+    "materialized_module_count": 8,
+    "status": "observed"
+   },
+   "notes": [
+    "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+   ],
+   "triton_dot_precision": {
+    "act_linear": "tf32x3",
+    "edge_ffn": "tf32x3",
+    "gated_tail": "tf32x3",
+    "requested": "auto",
+    "row_gemm": "tf32x3",
+    "wide_gemm": "tf32x3"
+   }
+  },
+  "fingerprint": "699a9776094c90b2",
+  "requested": {
+   "capacity": {
+    "candidate_skin": 2.0,
+    "min_pad_t": 4096,
+    "min_pad_u": 256,
+    "n_dummy": 64,
+    "t_step": 8192,
+    "u_step": 512,
+    "warmup": 3
+   },
+   "checkpoint": "off",
+   "execution": "whole_step",
+   "expert_overrides": {},
+   "isolated_atoms": "reference",
+   "matmul_precision": "highest",
+   "optimization_profile": "topology",
+   "topology_reuse": "auto",
+   "triton_dot_precision": null
+  }
+ },
+ "schema": "fastmd.op_selection_golden/1",
+ "sections": [
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_whole_step_nve:construct"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "construct"
+  },
+  {
+   "aten": {
+    "like": "eqw1344_topology_gpumd_model_graph:construct.eval1",
+    "set": {
+     "<outside>": "aten::__and__=5 aten::__or__=7 aten::_local_scalar_dense=1 aten::_to_copy=10 aten::add=27 aten::any=1 aten::as_strided=60 aten::bitwise_and=5 aten::bitwise_not=2 aten::bitwise_or=7 aten::clamp=8 aten::clamp_min=2 aten::clone=4 aten::copy_=43 aten::cumsum=5 aten::div=2 aten::empty=17 aten::empty_strided=14 aten::eq=1 aten::fill_=12 aten::floor=1 aten::floor_divide=4 aten::ge=2 aten::gt=2 aten::index=8 aten::item=1 aten::le=2 aten::linalg_vector_norm=1 aten::lt=3 aten::max=1 aten::minimum=1 aten::mul=24 aten::ne=2 aten::neg=4 aten::remainder=2 aten::reshape=14 aten::resize_=12 aten::scatter_reduce_=2 aten::searchsorted=1 aten::select=25 aten::slice=13 aten::sort=2 aten::sub=12 aten::sum=5 aten::to=32 aten::unsqueeze=4 aten::view=14 aten::where=11 aten::zero_=10"
+    },
+    "unset": []
+   },
+   "entries": {
+    "ints": {
+     "123904": 122880,
+     "61952": 61440,
+     "966656": 958464
+    },
+    "like": "eqw1344_topology_gpumd_model_graph:construct.eval1"
+   },
+   "fallbacks": {
+    "ints": {
+     "123904": 122880,
+     "966656": 958464
+    },
+    "like": "eqw1344_topology_gpumd_model_graph:construct.eval1"
+   },
+   "label": "construct.eval1"
+  },
+  {
+   "aten": {
+    "like": "eqw1344_topology_gpumd_model_graph:construct.eval2",
+    "set": {
+     "<outside>": "aten::__and__=5 aten::__or__=9 aten::_to_copy=10 aten::add=28 aten::any=1 aten::as_strided=60 aten::bitwise_and=5 aten::bitwise_not=2 aten::bitwise_or=9 aten::clamp=8 aten::clamp_min=2 aten::copy_=50 aten::cumsum=5 aten::detach=2 aten::div=2 aten::empty=17 aten::empty_strided=10 aten::eq=1 aten::fill_=12 aten::floor=1 aten::floor_divide=4 aten::ge=2 aten::gt=2 aten::index=8 aten::le=2 aten::linalg_vector_norm=1 aten::lt=3 aten::max=1 aten::maximum=3 aten::minimum=1 aten::mul=25 aten::ne=2 aten::neg=4 aten::remainder=2 aten::reshape=15 aten::resize_=12 aten::scatter_reduce_=2 aten::searchsorted=1 aten::select=25 aten::slice=13 aten::sort=2 aten::sub=12 aten::sum=5 aten::to=32 aten::unsqueeze=4 aten::view=15 aten::where=11 aten::zero_=10"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval1"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval1"
+   },
+   "label": "construct.eval2"
+  },
+  {
+   "aten": {
+    "same_as": "construct.eval2"
+   },
+   "entries": {
+    "same_as": "construct.eval2"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval2"
+   },
+   "label": "construct.eval3"
+  },
+  {
+   "aten": {
+    "like": "construct.eval2",
+    "set": {
+     "<outside>": "aten::__and__=5 aten::__or__=9 aten::_to_copy=10 aten::add=28 aten::any=1 aten::as_strided=60 aten::bitwise_and=5 aten::bitwise_not=2 aten::bitwise_or=9 aten::clamp=8 aten::clamp_min=2 aten::copy_=54 aten::cumsum=5 aten::detach=2 aten::div=2 aten::empty=19 aten::empty_strided=10 aten::eq=1 aten::fill_=12 aten::floor=1 aten::floor_divide=4 aten::ge=2 aten::gt=2 aten::index=8 aten::le=2 aten::linalg_vector_norm=1 aten::lt=3 aten::max=1 aten::maximum=3 aten::minimum=1 aten::mul=25 aten::ne=2 aten::neg=4 aten::remainder=2 aten::reshape=15 aten::resize_=12 aten::scatter_reduce_=2 aten::searchsorted=1 aten::select=25 aten::slice=13 aten::sort=2 aten::sub=12 aten::sum=5 aten::to=32 aten::unsqueeze=4 aten::view=15 aten::where=11 aten::zero_=10"
+    },
+    "unset": []
+   },
+   "entries": {
+    "same_as": "construct.eval3"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval3"
+   },
+   "label": "construct.eval4"
+  },
+  {
+   "aten": {
+    "like": "eqw1344_topology_gpumd_model_graph:construct.capture4",
+    "set": {
+     "<outside>": "aten::__or__=4 aten::add=1 aten::as_strided=6 aten::bitwise_or=4 aten::clone=1 aten::copy_=14 aten::detach=2 aten::empty_strided=1 aten::ge=1 aten::gt=1 aten::maximum=3 aten::mul=2 aten::reshape=2 aten::select=4 aten::slice=2 aten::view=2"
+    },
+    "unset": []
+   },
+   "entries": {
+    "ints": {
+     "123904": 122880,
+     "61952": 61440,
+     "966656": 958464
+    },
+    "like": "eqw1344_topology_gpumd_model_graph:construct.capture4"
+   },
+   "fallbacks": {
+    "same_as": "construct.eval4"
+   },
+   "label": "construct.capture5"
+  },
+  {
+   "aten": {
+    "same_as": "rdx1344_legacy_whole_step_nve:cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "cold"
+  },
+  {
+   "aten": {
+    "same_as": "cold"
+   },
+   "entries": [],
+   "fallbacks": [],
+   "label": "warm"
+  }
+ ],
+ "spec": {
+  "checkpoint": "off",
+  "ensemble": "nve",
+  "gpus": 1,
+  "kind": "whole_step",
+  "model": "equal_width",
+  "profile": "topology",
+  "structure": "rdx_1344"
+ }
+}
