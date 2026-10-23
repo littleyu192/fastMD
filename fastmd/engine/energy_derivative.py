@@ -60,13 +60,19 @@ def engine_derivative(adapter) -> "EnergyDerivative | None":
                     "(evaluate, extensive_energy) nor an energy tap (node_energy or system_energy)")
 
 
+def geometry_dtype(adapter) -> torch.dtype:
+    """Geometry precision can exceed the saved neural-weight precision."""
+    default = torch.float64 if adapter.topology_spec().model_dtype == "float64" else torch.float32
+    return getattr(adapter, "geometry_dtype", default)
+
+
 def edges_only_builder_options(adapter) -> dict:
     """The options of an edges-only fixed-capacity builder for ``adapter`` beyond the defaults: float64
     positions and cell for a float64 model the engine differentiates, and no per-build sort for a model
     that needs its edge rows grouped by centre only (``TopologySpec.edge_order``)."""
     topology = adapter.topology_spec()
     options = {}
-    if engine_derivative(adapter) is not None and topology.model_dtype == "float64":
+    if engine_derivative(adapter) is not None and geometry_dtype(adapter) == torch.float64:
         options["positions_dtype"] = torch.float64
     if topology.edge_order != "sorted":
         options["sorted_edges"] = False

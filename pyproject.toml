@@ -22,8 +22,8 @@ mace = ["mace-torch==0.3.16"]
 sevennet = ["sevenn==0.13.0"]
 orb = ["orb-models==0.5.4", "dm-tree==0.1.8", "cached-path==1.8.10"]
 chgnet = ["chgnet==0.4.2"]
-# Prophet uses an isolated benchmark environment and requires Python >= 3.11.
-prophet = ["prophet-mlip @ git+https://github.com/kairosmaterial/prophet.git@62bc2769fa83214fd564c7df263ee254e73fc6e9"]
+# The released NequIP 0.1 foundation packages use the 0.14 eager model API.
+nequip = ["nequip==0.14.0", "torch>=2.8,<2.10"]
 # Acceleration is separate from the model extras because these wheels require CUDA 13.
 cueq-cu13 = ["cuequivariance==0.9.1", "cuequivariance-torch==0.9.1", "cuequivariance-ops-torch-cu13==0.9.1"]
 m3gnet = ["matgl==4.0.3"]

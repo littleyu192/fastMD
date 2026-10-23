@@ -46,7 +46,7 @@ class ModelEntry:
 
 
 MODELS = (
-    ModelEntry("prophet", "fastmd.models.prophet", claims="is_prophet_model", load="load_prophet"),
+    ModelEntry("nequip", "fastmd.models.nequip", claims="is_nequip_model", load="load_nequip"),
     ModelEntry("esen", "fastmd.models.esen", claims="is_esen_model", load="load_esen"),
     ModelEntry("mace", "fastmd.models.mace", claims="is_mace_model", load="load_mace"),
     ModelEntry("sevennet", "fastmd.models.sevennet", claims="is_sevennet_model", load="load_sevennet"),

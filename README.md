@@ -14,15 +14,11 @@ Checkpoint names link to official weight files or model pages.
 | ORB | [orb_v3](https://orbitalmaterials-public-models.s3.us-west-1.amazonaws.com/forcefields/orb-v3/orb-v3-conservative-inf-mpa-20250404.ckpt), with optional `model_path` | Optional `orb-models` package |
 | CHGNet | [chgnet_0_3_0](https://github.com/CederGroupHub/chgnet/blob/main/chgnet/pretrained/0.3.0/chgnet_0.3.0_e29f68s314m37.pth.tar) | Pretrained weights supplied by the optional `chgnet` package |
 | eSEN | [esen](https://huggingface.co/facebook/OMAT24#model-checkpoints) + `model_path` | Legacy `fairchem-core==1.10.0`; isolated environment and local weights required |
-| Prophet-OAME-MBD | [Prophet-OAME-MBD](https://huggingface.co/kairosmaterial/prophet/blob/e22a79d16726484b7b635221cfe2b84a7bdf8a33/prophet-oame-mbd.pt) + `model_path` | Official `prophet-mlip`; PyTorch energy interface with eager execution |
-
-The experimental M3GNet topology/sparse-operator integration is retained in `integrations/`; it is not yet a complete adapter for the unified MD interface. The TorchSim wrapper retains its original capability checks and does not support every MLIP.
+| NequIP | [nequip-oam-l](https://www.nequip.net/models/mir-group/NequIP-OAM-L:0.1), [nequip-oam-xl](https://www.nequip.net/models/mir-group/NequIP-OAM-XL:0.1), [nequip-mp-l](https://www.nequip.net/models/mir-group/NequIP-MP-L:0.1), or `nequip`, each with `model_path` | Official energy network; CPU/GPU eager, with opt-in validated padding and CUDA Graph capture |
 
 ## S01 benchmark results
 
-The tables below reproduce the completed S01 results in the development workspace's `records2610/README.md`, including its published ORB operator retests, as reviewed on **October 21, 2026**. Detailed result files and provenance snapshots remain in the local benchmark archive; the published comparison is reproduced here.
-
-These are historical S01 measurements from the recorded source snapshots. They are not a new run of every checkpoint against the current branch. The table contains **41 checkpoints across five model families**, with a complete official/FastMD pair for each checkpoint.
+The table contains **41 checkpoints across five model families**, with a complete official/FastMD pair for each checkpoint.
 
 | Setting | Value |
 | --- | --- |
@@ -36,7 +32,7 @@ These are historical S01 measurements from the recorded source snapshots. They a
 | Initial state | Shared coordinates, cell, and momenta; seed 0; no center-of-mass momentum removal |
 | Timing | GPU-synchronized wall time for the complete MD run, including trajectory output; model loading, compilation, capture, and post-run validation excluded |
 
-**Speedup = official full-run time / FastMD full-run time.** The displayed step times are the complete MD wall times divided by 80,000. Only complete runs enter these tables; short-run timings are excluded. FastMD's execution mode depends on the model and its capabilities. ORB direct/v2 and capped-neighbor retests use a compiled backbone and whole-step CUDA Graphs; SevenNet checkpoints that cannot meet exact padding requirements use eager execution.
+**Speedup = official full-run time / FastMD full-run time.** The displayed step times are the complete MD wall times divided by 80,000.
 
 <!-- s01-results:begin -->
 
@@ -114,13 +110,6 @@ These are historical S01 measurements from the recorded source snapshots. They a
 | [chgnet-0.2.0](https://github.com/CederGroupHub/chgnet/blob/main/chgnet/pretrained/0.2.0/chgnet_0.2.0_e30f77s348m32.pth.tar) | 52.0884 | 2.4750 | 21.0455× |
 | [chgnet-r2scan](https://github.com/CederGroupHub/chgnet/blob/main/chgnet/pretrained/r2scan/chgnet_r2scan_transfer_learning_e15f36s161m23.pth.tar) | 51.5925 | 2.7956 | 18.4548× |
 
-<!-- s01-results:end -->
-
-The S01 campaign excluded [mace-mh-0](https://github.com/ACEsuit/mace-foundations/releases/download/mace_mh_1/mace-mh-0.model), [mace-mh-1](https://github.com/ACEsuit/mace-foundations/releases/download/mace_mh_1/mace-mh-1.model), [7net-mf-0](https://github.com/MDIL-SNU/SevenNet/blob/main/sevenn/pretrained_potentials/SevenNet_MF_0/checkpoint_sevennet_mf_0.pth), [7net-mf-ompa](https://github.com/MDIL-SNU/SevenNet/releases/download/v0.11.0.cp/checkpoint_sevennet_mf_ompa.pth), [7net-omni](https://github.com/MDIL-SNU/SevenNet/releases/download/v0.12.0.cp/checkpoint_sevennet_omni.pth), [7net-omni-i8](https://github.com/MDIL-SNU/SevenNet/releases/download/v0.12.1.cp/checkpoint_sevennet_omni_i8.pth), and [7net-omni-i12](https://github.com/MDIL-SNU/SevenNet/releases/download/v0.12.1.cp/checkpoint_sevennet_omni_i12.pth); MACE molecular models were outside its scope. eSEN was an additional campaign model and is not part of the 41-row source table.
-
-The published ORB operator-retest replacements are [orb-v3-direct-20-omat](https://orbitalmaterials-public-models.s3.us-west-1.amazonaws.com/forcefields/orb-v3/orb-v3-direct-20-omat-20250404.ckpt), [orb-v3-conservative-20-mpa](https://orbitalmaterials-public-models.s3.us-west-1.amazonaws.com/forcefields/orb-v3/orb-v3-conservative-20-mpa-20250404.ckpt), and [orb-mptraj-only-v2](https://orbitalmaterials-public-models.s3.us-west-1.amazonaws.com/forcefields/orb-mptraj-only-v2-20241014.ckpt). Other rows retain their previously validated complete runs. The locally archived evidence includes CPU initial energy/force/stress checks for all 41 checkpoints, separate passing GPU initial-parity files for 40, and 17-frame trajectory checks for the 11 ORB capture/operator replacements. MatRIS OAM has no separate archived GPU initial-parity file. The full table does not imply 17-frame E/F/S validation for every model.
-
-At the October 21 snapshot, the separate Prophet S01 campaign had completed the official trajectory (**276.6853 ms/step**) while FastMD was still running, so no Prophet speedup is reported. GRACE had only completed its official smoke test and has no FastMD adapter in this branch; it is excluded from the comparison. These incomplete runs do not contribute to the completed-checkpoint counts above. A historical S01 result does not establish accuracy on other structures or newer source snapshots; current S03 limitations are listed under [Validation](#validation).
 
 ## Installation
 
@@ -144,13 +133,38 @@ The MACE and SevenNet `topology` profiles use cuEquivariance. The upstream CUDA 
 
 `requirements-{mace,sevennet,orb,chgnet}.txt` preserve upstream test-environment versions and hashes. They do not replace the base installation, contain Python/platform-specific wheel hashes, and are not complete dependency lockfiles. Use the extras above for normal installation. The upstream CI scripts mentioned in those records are not included here.
 
-The migrated third-party adapter paths currently require CUDA neighbor lists and three-dimensional periodic cells. MatRIS also retains a CPU calculator path. Model packages are loaded lazily. Loading a model by name may download weights; pass a local checkpoint to avoid the corresponding download.
 
-### eSEN and Prophet environments
+### eSEN environment
 
 Legacy eSEN uses an isolated environment because fairchem 1.10.0 conflicts with the base package's dependency constraints. The recorded environment uses Python 3.11, fairchem-core 1.10.0, Torch 2.8.0+cu128, NumPy 1.26.4, SciPy 1.14.1, e3nn 0.5.9, ASE 3.26.0, nvalchemi-toolkit-ops 0.2.0, and warp-lang 1.10.0, with PyG extensions matching Torch/CUDA. Torch 2.8 is an explicit override of fairchem's declared Torch 2.4 requirement. There is no `esen` extra: use the prepared environment and load this checkout through `PYTHONPATH`, for example `PYTHONPATH="$PWD" python your_script.py` from the repository root. Supply an [eSEN-30M-OAM](https://huggingface.co/facebook/OMAT24#model-checkpoints) checkpoint explicitly; fairchem 2.x/UMA and direct-force heads are not supported by this adapter.
 
-Prophet requires Python ≥ 3.11 and a separate environment with e3nn ≥ 0.6 and ASE ≥ 3.29. Install it with `python -m pip install -e '.[gpu-graph,prophet]'`; optional official CUDA tensor-product kernels are available through `openequivariance>=0.6` with a compatible CUDA toolchain. Supply the [Prophet-OAME-MBD](https://huggingface.co/kairosmaterial/prophet/blob/e22a79d16726484b7b635221cfe2b84a7bdf8a33/prophet-oame-mbd.pt) checkpoint through `model_path`. This adapter uses eager execution because the official network has dynamic masks. Controlled comparisons must use the same kernel backend for the official calculator and FastMD.
+### NequIP CPU usage
+
+Install `python -m pip install -e '.[nequip]'` in a separate environment. NequIP 0.14 requires e3nn < 0.6. Download the official local `.nequip.zip` package from the model page. Current `.ckpt` training checkpoints are also accepted; legacy deployed and compiled artifacts are not. The adapter preserves the saved weight precision, double-precision geometry, per-type energy shifts, and ZBL potential. FastMD builds the radius graph and differentiates the upstream atomic energies for forces and stress.
+
+```python
+import torch
+from ase.io import read
+from fastmd import InferenceConfig, MLIPCalculator
+
+torch.set_num_threads(4)
+atoms = read("S02.traj")
+with MLIPCalculator(
+    model="nequip-oam-l",
+    model_path="NequIP-OAM-L-0.1.nequip.zip",
+    device="cpu",
+    task="efs",
+    config=InferenceConfig(execution="eager", optimization_profile="generic"),
+) as calculator:
+    atoms.calc = calculator
+    print(atoms.get_potential_energy(), atoms.get_forces(), atoms.get_stress())
+```
+
+NequIP defaults to eager execution with dynamic edge filtering. To opt into CUDA Graph capture, load an adapter with `fastmd.models.nequip.load_nequip(..., fixed_shape=True)` and pass it as `model` to the calculator or GPU MD driver. This checks the supported upstream energy pipeline and verifies zero energy/gradient contributions from far self-loop padding before permitting capture; unsupported pipelines raise an error. CPU and GPU calculators preserve double-precision geometry independently of the FP32 neural weights. GPU-resident MD retains that precision with `ensemble="nvt_nhc"`, including whole-step force, energy, and stress buffers.
+
+The loader also accepts `kernel="cueq"` to apply NequIP's official cuEquivariance modifier. This optional path requires `cuequivariance`, `cuequivariance-torch` and matching CUDA ops (tested with version 0.9.1); the default is `kernel="upstream"`. Conversion verifies that every original saved state tensor is unchanged. The execution plan reports the actual backend, and CUDA loading rejects a fallback to naive kernels. Combine `kernel="cueq"` with `fixed_shape=True` to request both optimizations.
+
+The S01–S05 GPU validation and full MD campaign is recorded in [the benchmark manifest](../records2610/nequip_gpu_20261022/manifest.json) and [live results](../records2610/nequip_gpu_20261022/summary.json). The separate [S01 optimization experiment](../records2610/nequip_opt_s01_20261023/) distinguishes short correctness/timing checks from validated full trajectories.
 
 ## Unified calculator
 
@@ -218,6 +232,26 @@ Pass optimizer parameters through `optimizer_kwargs`, and `FrechetCellFilter` pa
 such as `mask`, `hydrostatic_strain`, or `scalar_pressure` through `filter_kwargs`.
 Pressure uses ASE units (eV/Å³).
 
+The relaxation factory and `StructOptimizer` default to `auto_policy="latency"`.
+With `execution="auto"`, a short task skips expensive online memory calibration
+when there is no compatible cached measurement. Set `auto_policy="throughput"`
+to permit calibration for a longer workload. Ordinary `MLIPCalculator` instances
+retain the throughput default, and a supplied calculator retains its policy.
+`calculator.memory_probe_summary()` reports measurements, cache hits, and skips.
+Measured bounds are reused within the process for the same adapter/model,
+configuration and exact geometry, subject to model mutation and capacity checks;
+they are not extrapolated to new cells or different structures.
+
+An experimental `auto_policy="latency_trial"` permits a normal model-graph
+capture when no fitted memory bound is cached. It uses the first eager peak
+and current device headroom for admission, measures every actual capture
+(including later growth), and falls back to eager on budget rejection or
+capture failure. The estimate is a heuristic, not a guaranteed memory bound.
+Inspect `calculator.capture_trial_summary()` for capture time and outcomes.
+This policy skips multi-point calibration but still pays capture cost; it may
+be slower for short tasks and does not retain graphs across atom-count changes.
+The default remains `latency` until the workload has been measured.
+
 `relax` copies the input atoms, retains constraints, and returns an independent final geometry
 with a `SinglePointCalculator`. Reusing or closing the inference calculator cannot invalidate
 previous results. It never closes a calculator supplied by the caller. `steps=0` evaluates
@@ -237,7 +271,11 @@ calculator manages its own execution state.
 | Path | Optimization reuse | Requirements |
 | --- | --- | --- |
 | `relax` / `StructOptimizer` | Common calculator, operator kernels, compilation where supported, `eager` or `model_graph` | Model's calculator support; stress and a full periodic cell for variable-cell relaxation |
+| `BatchedMLIPModel` / `relax_batch` | Borrowed model adapters and installed kernels; one heterogeneous GPU batch per forward with TorchSim FIRE | Optional `fastmd[torchsim]`; small, fully periodic, unconstrained structures; eager tensor batch |
 | `MultiSystemRelaxation` | Existing multi-system engine, slot batching, GPU FIRE and whole-step CUDA Graphs | CUDA, union/per-edge-shift adapter capabilities, full periodic cells, no ASE constraints |
+
+See [TorchSim batch relaxation](docs/torchsim_relaxation.md) for batching examples,
+timing boundaries and supported model families.
 
 `execution="auto"` uses the calculator's existing capability and memory decisions. Explicit
 `model_graph` requests must satisfy those checks. ASE optimization runs on the host, so
@@ -300,24 +338,3 @@ fastmd/
 ```
 
 To add an MLIP, implement `ModelAdapter` (available through `adapters/protocol.py`) and expose an `EnergyTap`, `SystemEnergyTap`, or `ModelOwnedDerivative` interface. Pass the adapter as `model=` to reuse the simulation runtime. Declare fixed-shape capture, padding, and cutoff-continuity capabilities accurately so the runtime can select a supported execution path.
-
-Historical MatRIS-specific `MATRIS_*` operator settings are retained. The common configuration entry point is `InferenceConfig`. MatRIS weights use `~/.cache/matris`, and its restart format remains compatible with the source implementation.
-
-### ORB direct/v2 models and neighbor limits
-
-Load local weights using the upstream `ORB_PRETRAINED_MODELS`, wrap the model with `fastmd.adapters.orb_graph.ORBGraphAdapter(module)`, and pass the adapter as `model=` to the calculator or GPU MD interface. The adapter targets the validated `orb-models==0.5.4` architecture with a 6 Å cutoff and sigmoid message gating, for a single nonsingular periodic cell.
-
-Every evaluation retains the nearest K neighbors per atom by distance, with K taken from `system_config.max_num_neighbors`. Padding edges and edges beyond K contribute zero. Direct/v2 models retain their direct force and stress heads; conservative models use the engine's energy derivatives. Both paths support backbone compilation and whole-step CUDA Graphs without changing weights, neighbor limits, or the default FP32 precision.
-
-ORB and legacy eSEN also provide explicitly enabled candidate operator rewrites, including compact Top-K selection, message aggregation, and equivariant rotation fusion. These are experimental opt-in paths whose numerical and performance validation depends on the model and structure.
-
-## Validation
-
-```bash
-PYTHONPATH=.:tests PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 \
-  python -B -m unittest discover -s tests
-```
-
-The suite covers migration boundaries, CPU model/ASE regressions without weight downloads, third-party adapters, and GPU graph/trajectory behavior. Tests skip when GPUs, optional dependencies, or external assets are unavailable; a skip is not a passing GPU validation. Full benchmark runners and detailed development records are maintained locally.
-
-Pre-publication checks on October 21, 2026: `pytest tests -q --disable-warnings` completed with **153 passed and 187 skipped** in the CPU environment. Wheel construction and source/license-content checks passed. The separate H100 S03 long-trajectory campaign is ongoing. In that system, [orb-v3-conservative-20-mpa](https://orbitalmaterials-public-models.s3.us-west-1.amazonaws.com/forcefields/orb-v3/orb-v3-conservative-20-mpa-20250404.ckpt) and [orb-v3-conservative-20-omat](https://orbitalmaterials-public-models.s3.us-west-1.amazonaws.com/forcefields/orb-v3/orb-v3-conservative-20-omat-20250404.ckpt) exceeded the initial force-parity tolerance of 0.001 eV/Å; those results are excluded from speedup statistics.

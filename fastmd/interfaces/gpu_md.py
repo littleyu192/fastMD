@@ -261,11 +261,12 @@ class GPUResidentMolecularDynamics:
             param.requires_grad_(False)
         # None: the model differentiates itself (adapter.evaluate); else the engine-owned derivative.
         self._derivative = engine_derivative(self._adapter)
-        # A float64 model that the engine differentiates runs on float64 positions, cell, forces and
-        # energy (the Nose-Hoover chain's float64 state); MatRIS runs float32.
-        self._float64 = self._derivative is not None and self._adapter.topology_spec().model_dtype == "float64"
+        # Geometry may be float64 even when the saved neural weights are float32 (NequIP).
+        # Keep positions, cell, derivatives and logged values in that declared precision.
+        from fastmd.engine.energy_derivative import geometry_dtype
+        self._float64 = self._derivative is not None and geometry_dtype(self._adapter) == torch.float64
         if self._float64 and ensemble.lower() != "nvt_nhc":
-            raise ValueError("GPUResidentMolecularDynamics: a float64 model needs ensemble='nvt_nhc' (the "
+            raise ValueError("GPUResidentMolecularDynamics: float64 geometry needs ensemble='nvt_nhc' (the "
                              "integrator with a float64 state); nve and nvt keep a float32 state")
 
         self.atomic_numbers = torch.as_tensor(

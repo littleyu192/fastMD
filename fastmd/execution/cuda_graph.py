@@ -398,7 +398,9 @@ class _LoopPaddedLineGraphWorkspace:
 def _demand(g) -> tuple[int, int, int]:
     """(atoms, undirected pairs, triplets) of a ragged build: MatRIS's graph, or an edges-only batch."""
     if isinstance(g, GraphBatch):
-        return g.n_real, g.edge_index.shape[0] // 2, 0
+        # KNN graphs can have an odd number of directed edges: reserve both
+        # slots of the last capacity pair rather than dropping one real edge.
+        return g.n_real, (g.edge_index.shape[0] + 1) // 2, 0
     return g.atomic_number.shape[0], g.undirected2directed.shape[0], g.line_graph.shape[0]
 
 

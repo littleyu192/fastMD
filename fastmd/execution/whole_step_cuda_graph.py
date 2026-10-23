@@ -15,6 +15,7 @@ from fastmd.graph.validation import raise_if_isolated_atoms
 from fastmd.engine.policy import fusion_scope
 from fastmd.adapters import as_adapter
 from fastmd.engine.energy_derivative import engine_derivative
+from fastmd.engine.energy_derivative import geometry_dtype
 from fastmd.execution.gpu_integrator import GPUIntegrator
 from fastmd.execution.gpu_integrator import StatefulIntegrator
 from fastmd.engine.entry_config import scoped_call
@@ -161,12 +162,12 @@ class WholeStepGraphRunner:
         self.n_real = builder.n_real
         self.device = builder.device
 
-        # Forces, energy and stress: float64 for a float64 model the engine differentiates on a
+        # Forces, energy and stress: float64 for float64 geometry the engine differentiates on a
         # stateful (float64) integrator, which then also evaluates its own float64 positions; else
         # float32. Positions and momenta are float32 either way (a stateful integrator's mirrors).
         value_dtype = torch.float32
         if self._derivative is not None and self.stateful_integrator is not None:
-            value_dtype = getattr(torch, self.adapter.topology_spec().model_dtype)
+            value_dtype = geometry_dtype(self.adapter)
         positions = positions.to(device=self.device, dtype=torch.float32)
         momenta = momenta.to(device=self.device, dtype=torch.float32)
         self.positions = positions.clone()

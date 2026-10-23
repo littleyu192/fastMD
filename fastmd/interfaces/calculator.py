@@ -1,5 +1,7 @@
 from __future__ import annotations
 import pickle
+from contextlib import nullcontext
+from copy import deepcopy
 
 from dataclasses import replace
 import warnings
@@ -68,17 +70,28 @@ class MLIPCalculator(Calculator):
         device: str = "cpu",
         enable_compile: bool = False,
         config: InferenceConfig | None = None,
+        auto_policy: str = "throughput",
         **kwargs,
     ) -> None:
         """
         Args:
             model (MatRIS): Instance of a MatRIS model. If set to None, the default MatRIS is loaded.
                 A model adapter (``fastmd.adapters``) is used as it is; one whose model reads
-                edges only (no triplets) needs a CUDA device and cells periodic in all three
-                directions.
+                edges only (no triplets) uses an ASE neighbor list on CPU, or the GPU graph
+                builder on CUDA (which requires cells periodic in all three directions).
             task (str): The prediction task. Can be 'e', 'em', 'ef', 'efs', 'efsm'.
             device (str): The device to be used for predictions,
             enable_compile (bool): Whether to compile interaction blocks.
+            auto_policy: ``"throughput"`` (default) permits online memory calibration
+                for automatic graph execution. ``"latency"`` suits short ASE tasks:
+                it reuses a compatible measured bound when available and otherwise
+                stays eager instead of running multi-point CUDA memory probes.
+                MatRIS's existing calibrated admission remains available. Explicit
+                ``config.execution="eager"`` or ``"model_graph"`` is unchanged.
+                Opt-in ``"latency_trial"`` also skips uncalibrated probes, but may
+                try one normal bucket capture after a conservative current-memory
+                check. Every new bucket is checked and measured; failed captures
+                fall back to eager. This policy keeps automatic topology reuse off.
             config: Unified execution, optimization, checkpoint, isolated-atom,
                 and capacity settings. Defaults to eager execution, reference
                 isolated-atom handling, and checkpointing off. These settings
@@ -89,6 +102,14 @@ class MLIPCalculator(Calculator):
             stress_unit (float): the conversion factor to convert GPa(MatRIS default) to eV/A^3.
             **kwargs: Passed to the Calculator parent class.
         """
+        if auto_policy not in ("throughput", "latency", "latency_trial"):
+            raise ValueError("auto_policy must be 'throughput', 'latency' or 'latency_trial'")
+        self.auto_policy = auto_policy
+        from fastmd.execution._capture_trial import new_trial_stats
+        self._capture_trial_stats = new_trial_stats()
+        self._trial_capture_enabled = False
+        self._memory_probe_stats = {"cache_hits": 0, "measurements": 0, "skipped": 0,
+                                    "last": "not_requested"}
         super().__init__(**kwargs)
         self.task=task
         self.device = device
@@ -124,17 +145,21 @@ class MLIPCalculator(Calculator):
         self.model.eval()
         for _p in self.model.parameters():
             _p.requires_grad_(False)
-        # A model without triplets reads edges only: its graphs are the GPU
-        # graph builder's graph batches (edges-only mode), not MatRIS's converter's.
+        # A model without triplets reads edges-only graph batches built directly
+        # from ASE atoms, rather than MatRIS's converter's graphs.
         self._edges_only = self.adapter.topology_spec().triplet_cutoff is None
         # None: the model differentiates itself (adapter.evaluate); else the engine-owned derivative
         # (stress in eV/A^3; a float64 model reads float64 graph batches).
         self._derivative = engine_derivative(self._adapter)
-        self._float64 = self._derivative is not None and self.adapter.topology_spec().model_dtype == "float64"
+        from fastmd.engine.energy_derivative import geometry_dtype
+        self._float64 = self._derivative is not None and geometry_dtype(self.adapter) == torch.float64
         # A model with a line graph that the engine differentiates reads the GPU graph builder's graphs
         # as graph batches with positions (line_graph_batch), not MatRIS's converter's.
         self._line_graph_batches = self._derivative is not None and not self._edges_only
-        if self._edges_only or self._line_graph_batches:
+        self._cpu_graph = self._edges_only and torch.device(self.device).type == "cpu"
+        if self._cpu_graph:
+            self._gpu_graph = False
+        elif self._edges_only or self._line_graph_batches:
             from fastmd.graph.gpu_graph_builder import op_available
             if not (op_available and torch.cuda.is_available() and torch.device(self.device).type == "cuda"):
                 from fastmd.graph.neighbor_list_backend import UNAVAILABLE_REASON
@@ -145,11 +170,6 @@ class MLIPCalculator(Calculator):
                     + ("" if op_available else f" ({UNAVAILABLE_REASON})")
                 )
             self._gpu_graph = True
-            if self._edges_only and self.adapter.topology_spec().max_neighbors is not None:
-                # A model built for at most max_neighbors neighbours per atom: every build (rebuilt or the skin
-                # path's) folds its largest per-atom edge count into this device maximum, which each call
-                # checks (neighbor_cap_summary).
-                self._neighbor_count_max = torch.zeros(1, dtype=torch.int64, device=self.device)
         else:
             # GPU graphs retain isolated nodes and mask their learned readouts on
             # device, avoiding the legacy per-step pymatgen neighbor-list scan.
@@ -157,6 +177,9 @@ class MLIPCalculator(Calculator):
                 getattr(self.model.graph_converter, "algorithm", "legacy") == "gpu"
                 and torch.cuda.is_available()
             )
+        if self._edges_only and self.adapter.topology_spec().max_neighbors is not None:
+            # Both ragged builders report every neighbor; preserve the cap warning on CPU too.
+            self._neighbor_count_max = torch.zeros(1, dtype=torch.int64, device=self.device)
 
         # execution="auto" (the default): model_graph where the replay applies
         # (GPU graph converter, not compiled; CUDA and no checkpoint were
@@ -257,7 +280,19 @@ class MLIPCalculator(Calculator):
 
     def config_summary(self) -> dict:
         """Requested/resolved configuration and observed execution state."""
-        return config_summary(self)
+        summary = config_summary(self)
+        summary["effective"]["auto_policy"] = self.auto_policy
+        summary["effective"]["memory_probes"] = dict(self._memory_probe_stats)
+        summary["effective"]["capture_trials"] = self.capture_trial_summary()
+        return summary
+
+    def capture_trial_summary(self) -> dict:
+        """Actual bucket-capture trials, separate from fitted-memory probes."""
+        return {"auto_policy": self.auto_policy, **deepcopy(self._capture_trial_stats)}
+
+    def memory_probe_summary(self) -> dict:
+        """Observed memory calibration/cache use (no profiling or device reads)."""
+        return {"auto_policy": self.auto_policy, **self._memory_probe_stats}
 
     def plan_record(self, op_plan=None):
         """The engine plan record (``fastmd.adapters.EnginePlanRecord``; ``as_dict()``/``to_json()``):
@@ -266,13 +301,32 @@ class MLIPCalculator(Calculator):
         class. For MatRIS it records the decisions made here; it changes none. ``op_plan``: an
         ``OpPlanRecorder`` (or its snapshot) of runs to link."""
         from fastmd.adapters import entry_plan_record
-        return entry_plan_record(self, op_plan=op_plan)
+        record = entry_plan_record(self, op_plan=op_plan)
+        if self._cpu_graph:
+            pbc = [bool(axis) for axis in self.atoms.pbc] if self.atoms is not None else None
+            record = replace(record, decisions=[
+                replace(decision, reason="ASE CPU radius graph, rebuilt every evaluation",
+                        evidence={**decision.evidence, "builder": "ase.neighbor_list", "pbc": pbc,
+                                  "geometry_dtype": str(self._cpu_geometry_dtype())})
+                if decision.id == "neighbor_list" else decision for decision in record.decisions])
+        return record
+
+    def _cpu_geometry_dtype(self):
+        """Geometry precision may exceed neural-weight precision (for example NequIP)."""
+        from fastmd.engine.energy_derivative import geometry_dtype
+        return geometry_dtype(self.adapter)
 
     def _skin_static_reason(self, enable_compile) -> str | None:
         """Why topology reuse never applies to this calculator (None: it may)."""
         mode = self._inference_config.topology_reuse
         if mode == "off":
             return "topology_reuse='off'"
+        if self.adapter.name in {"orb_v3", "orb_graph"}:
+            return "ORB requires upstream capped KNN and minimal-supercell selection on every geometry; model_graph remains available"
+        if self._execution_auto and self.auto_policy == "latency_trial" and negotiated(self.adapter):
+            return "latency_trial guards bucket captures only; topology reuse disabled"
+        if self._cpu_graph:
+            return "CPU ASE neighbor lists rebuild every call"
         contract = self._engine_plan[1].contract if self._engine_plan is not None else None
         if contract is not None and not (contract.exact_cutoff or contract.exact_at_cutoff):
             return "no exact cutoff declared (a stale or kNN list is never reused)"
@@ -336,11 +390,11 @@ class MLIPCalculator(Calculator):
         so a cell relaxation or a loop over cells of one atom count stays on
         the rebuild path instead of recapturing every few calls).
         """
-        from fastmd.execution.skin_topology import (SkinTopologyRunner, STABLE_CELL_CALLS, STABLE_CELL_CALLS_EAGER,
-                                               STABLE_CELL_CALLS_MAX)
         if self._skin_static is not None:
             self._skin_off_reason = self._skin_static
             return None
+        from fastmd.execution.skin_topology import (SkinTopologyRunner, STABLE_CELL_CALLS, STABLE_CELL_CALLS_EAGER,
+                                               STABLE_CELL_CALLS_MAX)
         if self._inference_config.topology_reuse == "auto" and self._graph_runner is None:
             # Eager gains 1-2% at a fixed demand and re-keys its padded bucket
             # as the demand drifts (heating); "skin" selects it explicitly.
@@ -471,14 +525,25 @@ class MLIPCalculator(Calculator):
 
     def _per_call_graph(self, structure, atoms):
         """This call's ragged graph (the rebuild path): MatRIS's graph converter's, or for a model
-        that reads edges only the GPU graph builder's ``GraphBatch`` of ``atoms`` (such a model
-        always takes the GPU path, which passes ``atoms``)."""
+        that reads edges only a CPU or GPU ``GraphBatch`` built directly from ``atoms``."""
         check_isolated_atoms = not self.handle_isolated_atoms or self.adapter.isolated_atom_policy() == "error"
         if self._edges_only:
-            from fastmd.graph.gpu_graph_builder import atoms_to_edges_gpu
-            batch = atoms_to_edges_gpu(atoms, self.adapter.topology_spec().cutoff, self.device,
-                                       check_isolated_atoms=check_isolated_atoms,
-                                       **({"positions_dtype": torch.float64} if self._float64 else {}))
+            if self.adapter.name in {"orb_v3", "orb_graph"} and atoms.pbc.all():
+                from fastmd.graph.orb_graph import atoms_to_orb_graph
+                base = getattr(self.adapter, "_base", self.adapter)
+                batch = atoms_to_orb_graph(atoms, base._cutoff, base._max_neighbors, self.device,
+                                           positions_dtype=self._cpu_geometry_dtype(),
+                                           check_isolated_atoms=check_isolated_atoms)
+            elif self._cpu_graph:
+                from fastmd.graph.cpu_graph_builder import atoms_to_edges_cpu
+                batch = atoms_to_edges_cpu(atoms, self.adapter.topology_spec().cutoff,
+                                           check_isolated_atoms=check_isolated_atoms,
+                                           positions_dtype=self._cpu_geometry_dtype())
+            else:
+                from fastmd.graph.gpu_graph_builder import atoms_to_edges_gpu
+                batch = atoms_to_edges_gpu(atoms, self.adapter.topology_spec().cutoff, self.device,
+                                           check_isolated_atoms=check_isolated_atoms,
+                                           **({"positions_dtype": torch.float64} if self._float64 else {}))
             if self._neighbor_count_max is not None:
                 centres = batch.edge_index[:, 0].long()
                 counts = torch.zeros(batch.n_real, dtype=torch.int64, device=centres.device)
@@ -563,8 +628,10 @@ class MLIPCalculator(Calculator):
         reason = None
         if (self._auto is not None and (self._edges_only or self._line_graph_batches) and _fixed_builder_available
                 and can_capture(self.adapter)):
-            reason = ("auto: a system's first call runs eager; its first repeat call decides, with a memory model "
-                      "measured on the system")
+            reason = ("auto: a system's first call runs eager; its first repeat call decides, with "
+                      + ("a cached bound or guarded single capture (latency_trial policy)" if self.auto_policy == "latency_trial"
+                         else "a cached memory bound only (latency policy)" if self.auto_policy == "latency"
+                         else "a cached or measured memory bound on the system"))
         elif self._execution_auto and self._auto is None:
             reason = f"auto: {self._auto_static}: eager"
         elif not self._execution_auto and execution.chosen != config.execution:
@@ -577,6 +644,30 @@ class MLIPCalculator(Calculator):
         self._inference_config = replace(config, matmul_precision=plan.matmul_precision,
                                          **({} if self._execution_auto else {"execution": execution.chosen}))
 
+    def _system_memory(self, atoms, config, capacity, runs_factory):
+        """Reuse a bounded fit; short tasks do not pay for a new calibration."""
+        from fastmd.adapters.memory import MeasuredMemoryModel
+        from fastmd.execution._memory_probe import measured_memory
+        from fastmd.execution._memory_probe_cache import cached_memory, probe_cache_key
+        device = self._model_device()
+        key = probe_cache_key(self.adapter, atoms, config, task=self.task, device=device)
+        edges, triplets = capacity["edges"], capacity.get("triplets")
+        memory = cached_memory(self.model, key, edges, triplets)
+        if memory is not None:
+            self._memory_probe_stats["cache_hits"] += 1
+            self._memory_probe_stats["last"] = "cache_hit"
+            return memory
+        if self.auto_policy in ("latency", "latency_trial"):
+            self._memory_probe_stats["skipped"] += 1
+            self._memory_probe_stats["last"] = "latency_cache_miss"
+            return MeasuredMemoryModel.failed(
+                f"{self.auto_policy} policy: no compatible cached memory bound; online probes skipped",
+                triplets=triplets is not None)
+        self._memory_probe_stats["measurements"] += 1
+        self._memory_probe_stats["last"] = "measured"
+        return measured_memory(MeasuredMemoryModel, runs_factory(), edges, device, triplets,
+                               cache_owner=self.model, cache_key=key)
+
     def _negotiated_decide(self, atoms) -> tuple[str, str]:
         """execution auto for another model at a system's first repeat call: the plan's execution decided
         again (``renegotiate_execution``) at the capacity its model graph would capture (the skin path's
@@ -584,14 +675,12 @@ class MLIPCalculator(Calculator):
         the model's own evaluation of this system (edges only, or with the line graph of a model the engine
         differentiates: also at the bucket's triplet capacity; K6 has no calibration for it); the plan is
         kept for ``plan_record()``."""
-        from fastmd.adapters.memory import MeasuredMemoryModel
         from fastmd.adapters.negotiate import can_capture
         from fastmd.adapters.negotiate import negotiate
         from fastmd.adapters.negotiate import renegotiate_execution
         from fastmd.graph.fixed_capacity_builder import _fixed_builder_available
         from fastmd.execution._memory_probe import edges_only_memory_runs
         from fastmd.execution._memory_probe import line_graph_memory_runs
-        from fastmd.execution._memory_probe import measured_memory
         from fastmd.engine.capacity_policy import CapturePolicy
         config = replace(self._inference_config, execution="auto")
         device = self._model_device()
@@ -602,17 +691,18 @@ class MLIPCalculator(Calculator):
         if self._edges_only and _fixed_builder_available and can_capture(self.adapter):
             with self._inference_config.scope():
                 batch = self._per_call_graph(None, atoms)
-                u = int(batch.edge_index.shape[0]) // 2
+                # Directed capped kNN graphs need not contain reverse pairs.
+                # Match cuda_graph._demand: an odd edge must fit in the bucket.
+                u = (int(batch.edge_index.shape[0]) + 1) // 2
                 capacity = {"edges": 2 * CapturePolicy.from_config(config.capacity).bucket_key(
                     u + config.capacity.min_pad_u, 0)[0]}
                 n = batch.n_real
-                runs = edges_only_memory_runs(
+                memory = self._system_memory(atoms, config, capacity, lambda: edges_only_memory_runs(
                     self.adapter, cell=batch.cell, atomic_numbers=batch.species[:n],
                     pbc=torch.tensor(pbc, device=device), positions=batch.positions[:n], n_real=n,
                     device=device, task=self.task, n_dummy=config.capacity.n_dummy,
-                    candidate_skin=config.capacity.candidate_skin if self._skin_static is None else 0.0)
+                    candidate_skin=config.capacity.candidate_skin if self._skin_static is None else 0.0))
                 del batch
-                memory = measured_memory(MeasuredMemoryModel, runs, capacity["edges"], device)
         elif self._line_graph_batches and _fixed_builder_available and can_capture(self.adapter):
             with self._inference_config.scope():
                 batch = line_graph_batch(self._per_call_graph(None, atoms))
@@ -620,17 +710,29 @@ class MLIPCalculator(Calculator):
                 key = CapturePolicy.from_config(config.capacity).bucket_key(u + config.capacity.min_pad_u,
                                                                              t + config.capacity.min_pad_t)
                 capacity = {"edges": 2 * key[0], "triplets": key[1]}
-                runs = line_graph_memory_runs(
+                memory = self._system_memory(atoms, config, capacity, lambda: line_graph_memory_runs(
                     self.adapter, cell=batch.cell, atomic_numbers=batch.species, pbc=torch.tensor(pbc, device=device),
                     positions=batch.positions, n_real=batch.n_real, device=device, task=self.task,
                     n_dummy=config.capacity.n_dummy,
-                    candidate_skin=config.capacity.candidate_skin if self._skin_static is None else 0.0)
+                    candidate_skin=config.capacity.candidate_skin if self._skin_static is None else 0.0))
                 del batch
-                memory = measured_memory(MeasuredMemoryModel, runs, capacity["edges"], device, capacity["triplets"])
         plan = renegotiate_execution(plan, self.adapter, config, entry="calculator", device=device, pbc=pbc,
                                      capacity=capacity, memory=memory)
+        if (self.auto_policy == "latency_trial" and capacity is not None and memory is not None
+                and not memory.valid and self._memory_probe_stats["last"] == "latency_cache_miss"):
+            # Explicit-mode negotiation retains capability/padding/precision checks.
+            # A heuristic is never passed off as a fitted bound: actual captures
+            # are guarded at BucketedGraphRunner._capture, including later growth.
+            plan = renegotiate_execution(plan, self.adapter, replace(config, execution="model_graph"),
+                                         entry="calculator", device=device, pbc=pbc, capacity=capacity, memory=memory)
+            if plan.decision("execution").chosen == "model_graph":
+                self._trial_capture_enabled = True
+                plan.decisions = [replace(item, reason="latency_trial: guarded normal bucket capture pending",
+                                         evidence={**item.evidence, "requested": "auto", "auto_policy": "latency_trial"})
+                                  if item.id == "execution" else item for item in plan.decisions]
         self._engine_plan = (self.adapter, plan)
         execution = plan.decision("execution")
+        self._trial_capture_enabled = self.auto_policy == "latency_trial" and execution.chosen == "model_graph"
         return execution.chosen, execution.reason
 
     def _auto_before_call(self, atoms) -> None:
@@ -640,6 +742,7 @@ class MLIPCalculator(Calculator):
         auto = self._auto
         n = len(atoms)
         if n != auto["n"]:
+            self._trial_capture_enabled = False
             auto.update(n=n, rows=None, eager_peak=None)
             if self._initial_plan is not None:
                 self._engine_plan = self._initial_plan  # this system's first call: eager until it repeats
@@ -671,7 +774,25 @@ class MLIPCalculator(Calculator):
             return run(), True
         message = None
         try:
-            return run(), True
+            guard = nullcontext()
+            trials_before = None
+            if getattr(self, "_trial_capture_enabled", False) and self._graph_runner is not None:
+                from fastmd.execution._capture_trial import guarded_bucket_captures
+                trials_before = self._capture_trial_stats["attempts"]
+                guard = guarded_bucket_captures(self._graph_runner, device=self._model_device(),
+                                               eager_peak=self._auto.get("eager_peak"),
+                                               stats=self._capture_trial_stats)
+            with guard:
+                result = run()
+            if trials_before is not None and self._capture_trial_stats["attempts"] > trials_before:
+                record = self._capture_trial_stats["records"][-1]
+                reason = f"latency_trial: captured in {record['seconds']:.6f}s within the measured budget"
+                self._auto["reason"] = reason
+                if getattr(self, "_engine_plan", None) is not None:
+                    plan = self._engine_plan[1]
+                    plan.decisions = [replace(item, reason=reason) if item.id == "execution" else item
+                                      for item in plan.decisions]
+            return result, True
         except torch.OutOfMemoryError as error:
             message = str(error)
         except RuntimeError as error:
@@ -698,8 +819,8 @@ class MLIPCalculator(Calculator):
 
     @scoped_call
     def _predict_structure_scoped(self, structure, atoms=None):
-        # atoms!=None takes the GPU fast path (build graph straight from ASE atoms,
-        # skipping the ASE<->pymatgen round trip).
+        # atoms!=None builds the graph directly from ASE atoms,
+        # skipping the ASE<->pymatgen round trip.
         skin = self._skin_runner(atoms) if atoms is not None else None
         result = self._skin_predict(skin, atoms) if skin is not None else None
         self._skin_last = "skin" if result is not None else "off"
@@ -812,9 +933,11 @@ class MLIPCalculator(Calculator):
             system_changes=system_changes,
         )
         require_finite_geometry(atoms.positions, atoms.cell.array, "MLIPCalculator")
+        if self._cpu_graph and "s" in self.task and abs(np.linalg.det(atoms.cell.array)) <= 0:
+            raise ValueError("MLIPCalculator: stress requires a nonzero cell volume; use task='ef' for a cell-free molecule")
 
         pbc = atoms.get_pbc()
-        if (not pbc[0]) or (not pbc[1]) or (not pbc[2]):
+        if not self._cpu_graph and ((not pbc[0]) or (not pbc[1]) or (not pbc[2])):
             if self._edges_only or self._line_graph_batches:
                 # The extended cell below wraps the coordinates of a non-periodic
                 # direction, whose edges have no image across the cell face.
@@ -850,13 +973,11 @@ class MLIPCalculator(Calculator):
         isolated_indices = np.array([], dtype=int)
         isolated_ref_energy = 0.0
 
-        use_gpu_fast_path = self._gpu_graph
-        if use_gpu_fast_path:
-            # Fast path: build the graph straight from ASE atoms (no ASE->pymatgen
-            # ->ASE round trip). Isolated nodes stay in place; the model masks
-            # learned readouts on device and retains their reference energies.
-            # Without a reference table the converter rejects isolated atoms
-            # strictly; connected systems still use the requested CUDA replay.
+        use_direct_graph = self._gpu_graph or self._cpu_graph
+        if use_direct_graph:
+            # Build the graph straight from ASE atoms (no ASE->pymatgen
+            # ->ASE round trip). Isolated nodes stay in place for the adapter's
+            # declared handling; strict isolated-atom policy is checked by the builder.
             structure = None
             pred_structure = None
             pred_atoms = atoms

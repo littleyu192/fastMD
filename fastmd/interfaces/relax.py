@@ -32,6 +32,8 @@ class StructOptimizer:
         device: str = "cpu",
         enable_compile: bool = True,
         config: InferenceConfig | None = None,
+        *,
+        auto_policy: str = "latency",
     ) -> None:
         """
         Args:
@@ -43,6 +45,8 @@ class StructOptimizer:
             enable_compile (bool): Whether to compile interaction blocks.
             config: Unified inference settings forwarded to MLIPCalculator.
                 Defaults to eager execution and checkpointing off.
+            auto_policy: Defaults to "latency" to skip uncached online memory probes.
+                Use "throughput" to permit calibration for longer tasks.
         """
         
         if optimizer in OPTIMIZERS:
@@ -61,6 +65,7 @@ class StructOptimizer:
             device=device,
             enable_compile=enable_compile,
             config=config,
+            auto_policy=auto_policy,
         )
 
     def config_summary(self) -> dict:

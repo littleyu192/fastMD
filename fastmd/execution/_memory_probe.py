@@ -123,16 +123,25 @@ def _memory_runs(adapter, capacities, options: dict, *, cell, atomic_numbers, pb
     return {"eager": eager, "capture": capture}
 
 
-def measured_memory(model_class, runs, target_edges: int, device, target_triplets: int | None = None):
+def measured_memory(model_class, runs, target_edges: int, device, target_triplets: int | None = None,
+                    *, cache_owner=None, cache_key=None):
     """``model_class.measure`` (``MeasuredMemoryModel``) of ``runs`` at ``probe_capacities(target_edges)``
     (with ``target_triplets``: at ``probe_capacity_pairs``, fitting a per-triplet cost), or
     ``model_class.failed`` with the reason where the measurement ran out of CUDA memory or a capture
     failed (execution auto then stays eager, with that reason); other errors propagate."""
+    from fastmd.execution._memory_probe_cache import cached_memory, remember_memory
+    if cache_owner is not None:
+        existing = cached_memory(cache_owner, cache_key, target_edges, target_triplets)
+        if existing is not None:
+            return existing
     triplets = target_triplets is not None
     capacities = (probe_capacity_pairs(target_edges, target_triplets) if triplets
                   else probe_capacities(target_edges))
     try:
-        return model_class.measure(runs, capacities, device, triplets=triplets)
+        memory = model_class.measure(runs, capacities, device, triplets=triplets)
+        if cache_owner is not None:
+            remember_memory(cache_owner, cache_key, memory, target_edges, target_triplets)
+        return memory
     except torch.OutOfMemoryError as error:
         why = f"ran out of CUDA memory ({str(error).splitlines()[0][:160]})"
     except RuntimeError as error:
