@@ -85,7 +85,26 @@ class _UnionMolecularDynamics:
     ``steps_per_launch``, ``loginterval``, ``_log`` and ``_plan``, and provides ``_capture`` and ``_write_log``."""
 
     _adapter_finalizer = None
+    _pool_keeper = None
     _members = "replicas"  # what the batch holds, in messages
+
+    def _keep_graph_pool_alive(self) -> None:
+        """Keep the shared pool registered while growth replaces its last runner.
+
+        The integrator can retain tensors from a discarded graph. PyTorch 2.8 cannot
+        capture into that pool again with no live graphs, even while those tensors
+        survive. This small graph is never replayed; it keeps the pool registered
+        until close or a startup/OOM partition replaces the pool.
+        """
+        if self._pool_keeper is not None and self._pool_keeper[0] == self._graph_pool:
+            return
+        # Drop the previous pool before allocating the replacement keeper.
+        self._pool_keeper = None
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.device(self.device), torch.cuda.graph(graph, pool=self._graph_pool):
+            held = torch.empty(1, device=self.device)
+            held.zero_()
+        self._pool_keeper = (self._graph_pool, graph, held)
 
     def run(self, steps: int) -> None:
         """Advance every member of the batch by ``steps`` MD steps (whole windows), logging every
@@ -250,6 +269,7 @@ class _UnionMolecularDynamics:
                 self._log.close()
         finally:
             self._log = None
+            self._pool_keeper = None
             release_adapter(self)
 
     def __enter__(self):
@@ -400,6 +420,7 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
                 self._log.write(f"{'Time[ps]':>12} {'Replica':>8} {'Etot[eV]':>16} {'Epot[eV]':>16} "
                                 f"{'Ekin[eV]':>14} {'T[K]':>10}\n")
         except BaseException:
+            self._pool_keeper = None
             release_adapter(self)  # a failed constructor gives its adapter back now, not at its collection
             raise
         self.nsteps = 0
@@ -543,6 +564,7 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
         given)."""
         torch.cuda.synchronize(self.device)
         started = time.perf_counter()
+        self._keep_graph_pool_alive()
         builder = union_builder(self._adapter, replicas=union.replicas, cell=self.cell, atomic_numbers=self.numbers,
                                 pbc=self.pbc, u_capacity=union.u_capacity, t_capacity=union.t_capacity,
                                 candidate_skin=self.candidate_skin, device=self.device)

@@ -131,7 +131,7 @@ ENTRY_INTERFACE = frozenset({"load_adapter", "entry_plan_record"})
 NEGOTIATION_INTERFACE = {"fastmd.adapters.negotiate": frozenset({"negotiated", "negotiate", "renegotiate_execution",
                                                                  "can_capture", "check_system_batching",
                                                                  "check_system_cells", "batch_systems",
-                                                                 "size_unions", "contract_of"}),
+                                                                 "size_unions", "contract_of", "dry_run"}),
                          "fastmd.adapters.memory": frozenset({"MeasuredMemoryModel"})}
 RECORDS = frozenset({"EnginePlanRecord"})
 RUNTIME_WORDS = ("Runner", "Integrator", "Builder", "Engine", "Thermostat", "Logger", "Calculator",

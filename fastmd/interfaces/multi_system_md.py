@@ -265,6 +265,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                 self._log.write(f"{'Time[ps]':>12} {'System':>8} {'Etot[eV]':>16} {'Epot[eV]':>16} "
                                 f"{'Ekin[eV]':>14} {'T[K]':>10}\n")
         except BaseException:
+            self._pool_keeper = None
             release_adapter(self)  # a failed constructor gives its adapter back now, not at its collection
             raise
         self.nsteps = 0
@@ -366,7 +367,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                 # failed union's buffers), and start them again with at most half the largest union's rows (less
                 # where the partition would not change).
                 count, failed = len(self._unions), max(union.layout.rows for union in self._unions)
-                self._unions, self._graph_pool = [], None
+                self._unions, self._graph_pool, self._pool_keeper = [], None, None
                 gc.collect()
                 torch.cuda.empty_cache()
                 if count == self.systems:
@@ -777,6 +778,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         given)."""
         torch.cuda.synchronize(self.device)
         started = time.perf_counter()
+        self._keep_graph_pool_alive()
         builder = slot_union_builder(self._adapter, layout=union.layout, cells=union.cells,
                                      atomic_numbers=union.numbers, atoms=union.atoms, u_capacity=union.u_capacity,
                                      t_capacity=union.t_capacity, candidate_skin=self.candidate_skin,

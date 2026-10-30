@@ -7,7 +7,7 @@ from dataclasses import replace
 import warnings
 
 from ase import Atoms, units
-from ase.calculators.calculator import Calculator, all_changes, all_properties
+from ase.calculators.calculator import Calculator, PropertyNotImplementedError, all_changes, all_properties
 import numpy as np
 import torch
 
@@ -1061,8 +1061,8 @@ class TrajectoryObserver:
         self.atoms = atoms
         self.energies: list[float] = []
         self.forces: list[np.ndarray] = []
-        self.stresses: list[np.ndarray] = []
-        self.magmoms: list[np.ndarray] = []
+        self.stresses: list[np.ndarray | None] = []
+        self.magmoms: list[np.ndarray | None] = []
         self.atom_positions: list[np.ndarray] = []
         self.cells: list[np.ndarray] = []
 
@@ -1070,10 +1070,32 @@ class TrajectoryObserver:
         """The logic for saving the properties of an Atoms during the relaxation."""
         self.energies.append(self.compute_energy())
         self.forces.append(self.atoms.get_forces())
-        self.stresses.append(self.atoms.get_stress())
-        self.magmoms.append(self.atoms.get_magnetic_moments())
+        self.stresses.append(self.optional_property("stress"))
+        self.magmoms.append(self.optional_property("magmoms"))
         self.atom_positions.append(self.atoms.get_positions())
         self.cells.append(self.atoms.get_cell()[:])
+
+    def optional_property(self, name: str) -> np.ndarray | None:
+        """Read an optional result without requiring stress or magnetic predictions.
+
+        ``MLIPCalculator`` advertises both properties, but an ``ef`` task omits
+        them and some adapters do not predict magnetic moments at all. ASE's
+        ``Atoms.get_stress`` cannot consume the ``None`` result in that case.
+        Missing optional values retain one ``None`` entry per trajectory frame.
+        """
+        calculator = self.atoms.calc
+        if name not in calculator.implemented_properties:
+            return None
+        task = getattr(calculator, "task", None)
+        if isinstance(task, str) and {"stress": "s", "magmoms": "m"}[name] not in task:
+            return None
+        if name in calculator.results and calculator.results[name] is None:
+            return None
+        getter = self.atoms.get_stress if name == "stress" else self.atoms.get_magnetic_moments
+        try:
+            return getter()
+        except PropertyNotImplementedError:
+            return None
 
     def __len__(self) -> int:
         """The number of steps in the trajectory."""

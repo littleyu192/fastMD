@@ -31,11 +31,11 @@ import math
 import torch
 from torch import Tensor
 
-from fastmd.engine.entry_config import scoped_call
-from fastmd.graph.geometry import small_matmul
-from fastmd.execution.gpu_integrator import StatefulIntegrator
-from fastmd.execution.gpu_nhc import _HAS_TRITON
-from fastmd.execution.system_batch import (
+from ..engine.entry_config import scoped_call
+from ..graph.geometry import small_matmul
+from .gpu_integrator import StatefulIntegrator
+from .gpu_nhc import _HAS_TRITON
+from .system_batch import (
     SlotLayout,
     SlotUnionGraphBuilder,
     SlotWholeStepRunner,
@@ -43,10 +43,10 @@ from fastmd.execution.system_batch import (
     system_energy_derivative,
     system_volumes,
 )
-from fastmd.execution.whole_step_cuda_graph import WholeStepGraphRunner
+from .whole_step_cuda_graph import WholeStepGraphRunner
 
 if _HAS_TRITON:
-    from fastmd.graph.fixed_capacity_builder import allocate_cell_list, estimate_batch_cell_list_sizes
+    from ..graph.fixed_capacity_builder import allocate_cell_list, estimate_batch_cell_list_sizes
 
 # The phase of each slot's system: one float64 per system on the device, in the window record.
 IDLE, PENDING, ACTIVE, CONVERGED, STEP_LIMIT, FAILED = 0, 1, 2, 3, 4, 5
@@ -137,6 +137,80 @@ class FIREParameters:
             raise ValueError("FIREParameters: Nmin must be a nonnegative integer")
 
 
+class SystemRecords:
+    """Each system's states at the steps an ASE observer attached with ``interval`` sees (``Dynamics.call_observers``:
+    every step that is a multiple of ``interval``, the start included; ``interval <= 0``: only step ``-interval``),
+    up to the step limit, on the device: per record and row the positions and the model's forces, per record and
+    system the step, the energy, the stress (eV/Å³, with ``stress``; else zero) and the cell (with a cell filter; else
+    zero), float64. A system's ``k``-th record sits at index ``k`` (its step divided by ``interval``), written by the
+    step that evaluates it (capture-safe: the index is the state's; a window replayed after a rollback writes the same
+    records again); the systems that record nothing in a step write into a last, unread record. 48 bytes per row and
+    160 per system per record. With ``stress``, also each system's stress at its last evaluation (``final_stress``:
+    the state it stops in, recorded or not)."""
+
+    def __init__(self, layout: SlotLayout, *, interval: int, max_steps: int, stress: bool, cell_filter: bool,
+                 device) -> None:
+        self.interval = int(interval)
+        self.stress = bool(stress)
+        self.cell_filter = bool(cell_filter)
+        self.count = max_steps // self.interval + 1 if self.interval > 0 else 1
+        self.rows = torch.zeros((self.count + 1, layout.rows, 6), dtype=torch.float64, device=device)
+        self.systems = torch.zeros((self.count + 1, layout.count, 20), dtype=torch.float64, device=device)
+        self.final_stress = torch.zeros((layout.count, 3, 3), dtype=torch.float64, device=device)
+        self._row_index = torch.arange(layout.rows, device=device)
+        self._system_index = torch.arange(layout.count, device=device)
+
+    def recorded_steps(self, steps: int) -> list[int]:
+        """The steps recorded of a system that took ``steps`` steps."""
+        if self.interval > 0:
+            return list(range(0, steps + 1, self.interval))
+        return [-self.interval] if steps >= -self.interval else []
+
+    def record(self, fire: "SystemFIRE", evaluated: Tensor, stress: Tensor | None) -> None:
+        """The evaluated systems' current states whose step the observer sees (device ops only)."""
+        st = fire.state
+        if self.interval > 0:
+            seen = evaluated & (torch.remainder(st.steps, self.interval) == 0)
+            index = torch.div(st.steps, self.interval, rounding_mode="floor").long().clamp(0, self.count - 1)
+        else:
+            seen = evaluated & (st.steps == -self.interval)
+            index = torch.zeros_like(st.steps, dtype=torch.int64)
+        index = torch.where(seen, index, torch.full_like(index, self.count))
+        self.rows.index_put_((index.index_select(0, fire.system_of_row), self._row_index),
+                             torch.cat((fire.positions, st.f), dim=1))
+        systems = st.steps.shape[0]
+        zeros = st.f.new_zeros((systems, 9))
+        stresses = stress.reshape(systems, 9).to(torch.float64) if self.stress and stress is not None else zeros
+        cells = fire.cells.reshape(systems, 9) if self.cell_filter else zeros
+        self.systems.index_put_((index, self._system_index),
+                                torch.cat((st.steps[:, None], st.energy[:, None], stresses, cells), dim=1))
+        if self.stress and stress is not None:
+            self.final_stress.copy_(torch.where(evaluated[:, None, None], stress.to(torch.float64), self.final_stress))
+
+    def read(self, slot: int, start: int, atoms: int, steps: int) -> dict:
+        """The records of the system in ``slot`` (rows ``start``, ``atoms`` of them) that took ``steps`` steps: the
+        recorded ``steps``, ``energies`` ``(k,)``, ``positions`` and ``forces`` ``(k, atoms, 3)``, ``stresses`` and
+        ``cells`` ``(k, 3, 3)`` (None where not recorded), and ``final_stress`` ``(3, 3)`` (None without stress),
+        float64 on the host."""
+        recorded = self.recorded_steps(steps)
+        k = len(recorded)
+        rows = self.rows[:k, start:start + atoms].cpu().numpy()
+        systems = self.systems[:k, slot].cpu().numpy()
+        if not (systems[:, 0] == recorded).all():
+            raise RuntimeError(f"slot {slot}: records of steps {systems[:, 0].tolist()}, expected {recorded}")
+        return {"steps": recorded, "energies": systems[:, 1].copy(), "positions": rows[:, :, :3].copy(),
+                "forces": rows[:, :, 3:].copy(),
+                "stresses": systems[:, 2:11].reshape(k, 3, 3).copy() if self.stress else None,
+                "cells": systems[:, 11:20].reshape(k, 3, 3).copy() if self.cell_filter else None,
+                "final_stress": self.final_stress[slot].cpu().numpy().copy() if self.stress else None}
+
+    def take(self, source: "SystemRecords", destination_rows: Tensor, source_rows: Tensor, systems: Tensor) -> None:
+        """The records of ``source``'s rows and systems into these (in their order): systems that move on."""
+        self.rows.zero_().index_copy_(1, destination_rows, source.rows.index_select(1, source_rows))
+        self.systems.copy_(source.systems.index_select(1, systems))
+        self.final_stress.copy_(source.final_stress.index_select(0, systems))
+
+
 class SystemFIREState:
     """Views into one flat float64 buffer: per row ``x`` (the optimizer's positions: Cartesian, or with a cell
     filter in the system's original cell), ``v`` (velocity), ``g`` (the optimizer's forces: ASE's negative
@@ -180,7 +254,8 @@ class SystemFIRE(StatefulIntegrator):
     comm = None
 
     def __init__(self, layout: SlotLayout, *, fmax: float, max_steps: int, parameters: FIREParameters | None = None,
-                 cell_filter: bool = False, device="cuda") -> None:
+                 cell_filter: bool = False, device="cuda", record_interval: int | None = None,
+                 record_stress: bool = False) -> None:
         if not math.isfinite(fmax) or fmax <= 0:
             raise ValueError("fmax must be finite and positive")
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 0:
@@ -208,6 +283,12 @@ class SystemFIRE(StatefulIntegrator):
             self._deformation = eye.clone()
             self._inverse_deformation = eye.clone()
             self._cells = eye.clone()
+        # ``record_interval``: each system's states as an ASE observer of that interval sees them (SystemRecords;
+        # ``record_stress``: with their stress, which a fixed cell then evaluates every step).
+        self.records = (None if record_interval is None else
+                        SystemRecords(layout, interval=record_interval, max_steps=self.max_steps,
+                                      stress=record_stress or self.cell_filter, cell_filter=self.cell_filter,
+                                      device=self.device))
 
     # ------------------------------------------------------------------ systems
     @torch.no_grad()
@@ -268,6 +349,8 @@ class SystemFIRE(StatefulIntegrator):
             getattr(self.state, name).zero_().index_copy_(0, destination, rows_of_source)
         for name in SystemFIREState.SYSTEMS + (SystemFIREState.CELLS if self.cell_filter else ()):
             getattr(self.state, name).copy_(getattr(source.state, name).index_select(0, systems))
+        if self.records is not None:
+            self.records.take(source.records, destination, rows, systems)
 
     @torch.no_grad()
     def sync(self, state: SystemFIREState | None = None) -> None:
@@ -434,6 +517,8 @@ class SystemFIRE(StatefulIntegrator):
                                                          torch.where(st.steps >= self.max_steps, STEP_LIMIT, ACTIVE)))
         st.fmax.copy_(torch.where(evaluated, largest, st.fmax))
         st.phase.copy_(torch.where(evaluated, phase.to(torch.float64), st.phase))
+        if self.records is not None:
+            self.records.record(self, evaluated, stress)
 
     # ------------------------------------------------------------ transactions
     def backup(self, state: SystemFIREState | None = None) -> None:
@@ -495,7 +580,11 @@ class CellRelaxationBuilder(SlotUnionGraphBuilder):
         (``systems.cells``) and the batch's cell (the first system's)."""
         self.current_cells.copy_(cells)
         self.cell.copy_(cells)
-        self.inv_cells.copy_(inverse33(cells))
+        # Match a single-system builder's inverse of each rounded float32 cell.
+        # Inverting cells in float64 first changes the model's fractional coordinates.
+        # inv_ex avoids the host error check in inv, so this remains capture-safe.
+        for slot in range(self.layout.count):
+            self.inv_cells[slot].copy_(torch.linalg.inv_ex(self.cell[slot], check_errors=False).inverse)
         self.systems.cells.copy_(cells)
         rows = self.systems.system_of_row
         self.row_cells.copy_(self.cell.index_select(0, rows))
@@ -532,6 +621,9 @@ class CellRelaxationBuilder(SlotUnionGraphBuilder):
             longest, axis = lengths.max(dim=1)
             multiple = torch.ceil(max(self.padding.min_length, 2.0 * self.atom_graph_cutoff) / longest).clamp(min=1)
             self._loop_images.zero_().scatter_(1, axis[:, None], multiple[:, None].to(torch.int32))
+            if self._loop_lengths is not None:  # a line graph's padded pairs: the loops' length, its overflow loops
+                self._loop_lengths.copy_(multiple * longest)
+                self._set_overflow_images()
         self.reference_cells.copy_(self.current_cells)
         self.reference_inverse.copy_(inverse33(self.current_cells))
         self.row_reference_cells.copy_(self.row_cells)
@@ -580,7 +672,8 @@ class SlotRelaxationRunner(SlotWholeStepRunner):
         if stress:
             raise ValueError("SlotRelaxationRunner records no stress window")
         graph, status = self.builder.build(positions, rebuild_candidates=rebuild_candidates)
-        if not self.integrator.cell_filter:
+        records = self.integrator.records
+        if not self.integrator.cell_filter and not (records is not None and records.stress):
             energies, forces = system_energy_derivative(self.adapter, self.builder.batch, graph)
             return forces, energies, status
         energies, forces, stresses = system_energy_derivative(self.adapter, self.builder.batch, graph, stress=True)
@@ -644,15 +737,16 @@ class SlotRelaxationRunner(SlotWholeStepRunner):
 
 
 def relaxation_builder(adapter, *, cell_filter: bool, layout: SlotLayout, cells, atomic_numbers: Tensor, atoms,
-                       u_capacity: int, candidate_skin: float, device, admit_cells=None) -> SlotUnionGraphBuilder:
+                       u_capacity: int, candidate_skin: float, device, admit_cells=None,
+                       t_capacity: int = 0) -> SlotUnionGraphBuilder:
     """The slot union builder of ``adapter`` (:func:`~fastmd.execution.system_batch.slot_union_builder`'s
-    options), a :class:`CellRelaxationBuilder` for a cell filter; ``admit_cells``: the cells of the systems
-    written later (the sort keys hold them)."""
-    from fastmd.execution.replica_batch import graph_builder_options
+    options, ``t_capacity`` triplets for a model with a line graph), a :class:`CellRelaxationBuilder` for a cell
+    filter; ``admit_cells``: the cells of the systems written later (the sort keys hold them)."""
+    from .replica_batch import graph_builder_options
 
     cutoff = float(adapter.topology_spec().cutoff)
     kind = CellRelaxationBuilder if cell_filter else SlotUnionGraphBuilder
     return kind(layout=layout, cells=cells, atomic_numbers=atomic_numbers, atoms=atoms, u_capacity=int(u_capacity),
                 atom_graph_cutoff=cutoff, candidate_cutoff=cutoff + candidate_skin, device=device,
                 padding=adapter.padding_rule(), prepare=adapter.prepare, admit_cells=admit_cells,
-                **graph_builder_options(adapter))
+                **graph_builder_options(adapter, t_capacity))

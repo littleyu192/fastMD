@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 import dataclasses
+import functools
 import os
 import tempfile
 import unittest
@@ -1498,14 +1499,21 @@ class MultiSystemMolecularDynamicsCudaTest(unittest.TestCase):
         ReplicaMolecularDynamicsCudaTest.assert_same_state(self, actual, expected, what)
 
     def test_systems_match_single_system_md(self):
-        """nvt_nhc (with the self-check: the two smallest systems as a union and alone), Berendsen nvt and nve:
-        after 40 steps each system's positions, momenta, forces and potential energy equal single-system
-        GPU-resident MD of it (whole_step); the plan batches the four systems in one union of the slots' 242 rows;
-        the vacant rows never move."""
+        """nvt_nhc (with the self-check: the two smallest systems as a union, four vacant rows after each, and
+        alone), Berendsen nvt and nve, and nvt_nhc for the potential with a three-body term over a line graph
+        (each system's triplets in its own cell) and behind a whole-system tap that declares "segments" with a
+        pooled term (the mean of each system's atom energies, over its own atoms): after 40 steps each system's
+        positions, momenta, forces and potential energy equal single-system GPU-resident MD of it (whole_step);
+        the plan batches the four systems in one union of the slots' 242 rows; the vacant rows never move."""
         systems, adapter = self.systems(), ReplicaMolecularDynamicsCudaTest.adapter()
+        cases = [(adapter, ensemble) for ensemble in ("nvt_nhc", "nvt", "nve")]
+        cases += [(UnionPairAdapter(adapter.module, triplet_cutoff=3.3, angle=0.5), "nvt_nhc"),
+                  (SystemTapPairAdapter(adapter.module, declare="segments", edge_shifts=True, mean_energy=10.0),
+                   "nvt_nhc")]
         with deterministic_algorithms():
-            for ensemble in ("nvt_nhc", "nvt", "nve"):
-                with self.subTest(ensemble=ensemble):
+            for adapter, ensemble in cases:
+                line_graph = adapter.topology_spec().triplet_cutoff is not None
+                with self.subTest(batching=adapter.system_batching(), ensemble=ensemble, line_graph=line_graph):
                     with self.multi_md(adapter, systems, ensemble, self_check=ensemble == "nvt_nhc") as md:
                         md.run(self.STEPS)
                         ours = [self.state(md, index) for index in range(len(systems))]
@@ -1514,10 +1522,12 @@ class MultiSystemMolecularDynamicsCudaTest(unittest.TestCase):
                         vacant = ~union.runner.builder.occupied
                         self.assertTrue(bool((union.runner.positions[vacant] == 0).all()), "a vacant row moved")
                     self.assertGreater(stats["launches"], 0)
+                    if line_graph:
+                        self.assertGreater(stats["max_triplet_count"][0], 0)  # the three-body term had triplets
                     self.assertEqual(stats["slot_atoms"], [list(self.SLOTS)])
                     self.assertEqual(plan.decision("union_size").evidence["unions"], [sum(self.SLOTS)])
                     batching = plan.decision("system_batching")
-                    self.assertEqual(batching.chosen, "union")
+                    self.assertEqual(batching.chosen, adapter.system_batching())
                     if ensemble == "nvt_nhc":
                         self.assertTrue(batching.evidence["self_check"]["passed"])
                         self.assertEqual(batching.evidence["self_check"]["atoms"], [24, 36])
@@ -1648,22 +1658,34 @@ class MultiSystemMolecularDynamicsCudaTest(unittest.TestCase):
 
     def test_rejects_models_systems_and_swaps(self):
         """NegotiationError for a model that does not take the engine's per-edge shifts (a whole-system tap among
-        them), one that declares "segments", one with a line graph, one that differentiates its own energy, and
-        one that declares the shifts but reads the cell (the self-check: two systems in one cell, the union with
-        twice the cell as the model's argument). ValueError for a system that is not periodic in all three
+        them), one that declares them but whose energy tap has no edge_shifts keyword, one that differentiates its
+        own energy, one that declares the shifts but reads the cell (the self-check: two systems in one cell, the
+        union with twice the cell as the model's argument) and a whole-system tap that declares "segments" but
+        pools a slot's vacant rows with its system (the self-check's slots have vacant rows: its pooled term
+        differs from the systems alone; a set of one system too, checked on two copies of it). ValueError for a
+        system that is not periodic in all three
         directions, has a singular cell or non-finite coordinates, or more atoms than its slot's ceiling;
         write_system rejects the same, an index out of range and a cell thinner than the union's sort keys allow
         (a union whose keys are narrow), before changing anything: the union then runs as before. restore
         refuses a snapshot from before a write and momenta of another shape."""
         module = SmoothPairPotential(strength=0.5).cuda()
         systems = self.systems()
+        no_keyword = UnionPairAdapter(module)
+        no_keyword.node_energy = functools.partial(
+            lambda adapter, inputs, positions, cell: UnionPairAdapter.node_energy(adapter, inputs, positions, cell),
+            no_keyword)
         for adapter, reason in ((UnionPairAdapter(module, edge_shifts=False), "per-edge shifts"),
-                                (UnionPairAdapter(module, declare="segments"), "'segments'"),
                                 (SystemTapPairAdapter(module, declare="segments"), "per-edge shifts"),
-                                (UnionPairAdapter(module, triplet_cutoff=3.3, angle=0.5), "line graph"),
+                                (no_keyword, "no edge_shifts keyword"),
                                 (PairPotentialAdapter(module), "differentiates its own energy")):
             with self.subTest(reason=reason), self.assertRaisesRegex(NegotiationError, reason):
                 self.multi_md(adapter, systems)
+        pools_vacant_rows = SystemTapPairAdapter(module, declare="segments", edge_shifts=True, mean_energy=10.0,
+                                                 vacant_rows=True)
+        for members, options in ((systems, {}), (systems[:1], {"slot_atoms": None})):  # a set of one: two copies
+            with self.subTest(reason="pools vacant rows", systems=len(members)), self.assertRaisesRegex(
+                    NegotiationError, "pools a slot's vacant rows"):
+                self.multi_md(pools_vacant_rows, members, self_check=True, **options)
         one_cell = [systems[0], systems[0].copy()]
         one_cell[1].positions += np.random.default_rng(5).uniform(-0.05, 0.05, one_cell[1].positions.shape)
         with self.subTest(reason="reads the cell"), self.assertRaisesRegex(NegotiationError, "reads the batch's cell"):
@@ -1761,9 +1783,9 @@ class MultiSystemRelaxationCudaTest(unittest.TestCase):
     def test_structures_relax_as_ase_fire_alone(self):
         """A fixed cell and FrechetCellFilter, the six structures in six slots, in two (four structures written
         into freed slots, no recapture), drained in six or in two (a union captured again with only its relaxing
-        systems once they hold half its rows; in two, after the queue empties), with a capture again that fails (the
-        union runs on as it was), or in three unions of at most 40 rows: each structure's FIRE steps equal ASE's (13
-        to 96), its positions and cell
+        systems once they hold at most half its rows, with the drain payback set to zero), with a capture again
+        that fails once (the union runs on as it was), or in three unions of at most 40 rows: each structure's FIRE
+        steps equal ASE's (13 to 96), its positions and cell
         within 1e-5 A, its energy and stress (cell filter) within 1e-5 of their largest value and its forces within
         1e-5 eV/A, its status converged; the results come back in input order with a SinglePointCalculator of the
         relaxed structure."""
@@ -1775,19 +1797,29 @@ class MultiSystemRelaxationCudaTest(unittest.TestCase):
                                                  (2, True, None), (None, "fails", None), (6, False, 40)):
                     with self.subTest(cell_filter=cell_filter, slots=slots, drain=drain, union_rows=union_rows):
                         structures = self.structures()
-                        draining = (mock.patch.multiple(multi_system_relax, DRAIN_FRACTION=0.5, DRAIN_MIN_ROWS=0,
-                                                        DRAIN_PAYBACK=0.0) if drain else nullcontext())
+                        # Exercise compaction independently of measured payback, while
+                        # retaining the current row-fraction and live-system checks.
+                        draining = (mock.patch.object(multi_system_relax, "DRAIN_PAYBACK", 0.0)
+                                    if drain else nullcontext())
                         failing = (mock.patch.object(multi_system_relax._SlotRelaxationEngine, "compact",
                                                      side_effect=torch.OutOfMemoryError("simulated"))
                                    if drain == "fails" else nullcontext())
-                        with draining, failing, self.relax(adapter, structures, slots=slots, union_rows=union_rows,
-                                                           cell_filter="frechet" if cell_filter else None) as relax:
+                        with draining, failing as compact_attempt, self.relax(
+                                adapter, structures, slots=slots, union_rows=union_rows,
+                                cell_filter="frechet" if cell_filter else None) as relax:
                             results = relax.run()
                             stats = relax.stats()
                         self.assertEqual(stats["structure_writes"], 0 if slots in (None, 6) else len(structures) - 2)
                         self.assertEqual(stats["recaptures"], stats["compactions"])
                         self.assertEqual(stats["compactions"] > 0, drain is True)
                         self.assertEqual(len(stats["drain_failures"]), 1 if drain == "fails" else 0)
+                        self.assertEqual(len(stats["drains"]), stats["compactions"])
+                        for event in stats["drains"]:
+                            self.assertGreater(event["kept"], 0)
+                            self.assertLessEqual(event["kept"], multi_system_relax.DRAIN_FRACTION * event["rows"])
+                        if drain == "fails":
+                            compact_attempt.assert_called_once()
+                            self.assertIn("simulated", stats["drain_failures"][0])
                         self.assertEqual(len(stats["unions"]), 1 if union_rows is None else 3)
                         self.assertEqual(stats["finished"], {"converged": 6, "max_steps": 0, "failed": 0})
                         for index, (result, (steps, positions, cell, energy, forces, stress)) in enumerate(

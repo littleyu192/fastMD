@@ -13,7 +13,12 @@ run without a foreign package. It declares its capture contract (sync-free,
 exact cutoff), so the capability negotiation plans it like another model.
 ``SystemTapPairAdapter`` is the same potential behind a whole-system energy
 tap (:class:`~fastmd.adapters.protocol.SystemEnergyTap`): the engine
-differentiates its energy.
+differentiates its energy (with ``declare="segments"``, one energy per system
+of a union of replicas). ``UnionPairAdapter`` puts it behind a per-atom
+energy tap (:class:`~fastmd.adapters.protocol.EnergyTap`) that declares its
+systems' union (:class:`~fastmd.adapters.protocol.SystemBatching`), so
+replicas of a system run as one disjoint union; with a triplet cutoff it reads a
+line graph too (a three-body term over its triplets).
 """
 from __future__ import annotations
 
@@ -21,10 +26,7 @@ import torch
 from ase import units
 from torch import Tensor, nn
 
-from fastmd.adapters.protocol import CaptureContract
-from fastmd.adapters.protocol import GraphBatch
-from fastmd.adapters.protocol import PaddingRule
-from fastmd.adapters.protocol import TopologySpec
+from fastmd.adapters.protocol import CaptureContract, GraphBatch, PaddingRule, TopologySpec
 
 # Fixed shapes and no host reads (capturable), exactly 0 at and beyond the cutoff, FP32 arithmetic.
 CONTRACT = CaptureContract(sync_free=True, exact_cutoff=True, accuracy_class="fp32_noise",
@@ -135,13 +137,26 @@ class PairPotentialAdapter:
 class SystemTapPairAdapter:
     """``SmoothPairPotential`` behind a whole-system energy tap: ``system_energy`` returns the potential's
     energy as one FP64 number and the engine-owned derivative computes forces and stress (eV/Å³). The
-    per-edge arithmetic and sums are those of :class:`PairPotentialAdapter`'s call."""
+    per-edge arithmetic and sums are those of :class:`PairPotentialAdapter`'s call. ``system_batching``
+    returns ``declare`` ("segments": a batch of several systems, ``GraphBatch.systems``, gets one energy per
+    system, its atoms' sum, unless ``segments`` is False: then one energy for the whole batch). ``mean_energy``
+    adds that factor times the mean of a system's atom energies (a pooled term, as a model's mean readout: per
+    system over its own atoms, ``SystemSegments.atoms`` in slots, or over a slot's vacant rows too with
+    ``vacant_rows``, a model that ignores the atom counts); ``edge_shifts`` declares that ``system_energy`` takes
+    the engine's per-edge shifts (``EdgeShiftInput``)."""
 
     name = "pair_potential_system_tap"
     compiled = False
 
-    def __init__(self, module: SmoothPairPotential | None = None) -> None:
+    def __init__(self, module: SmoothPairPotential | None = None, *, declare: str | None = None,
+                 segments: bool = True, mean_energy: float = 0.0, edge_shifts: bool = False,
+                 vacant_rows: bool = False) -> None:
         self.module = SmoothPairPotential() if module is None else module
+        self.declare = declare
+        self.segments = bool(segments)
+        self.mean_energy = float(mean_energy)
+        self.edge_shifts = bool(edge_shifts)
+        self.vacant_rows = bool(vacant_rows)
 
     def topology_spec(self) -> TopologySpec:
         return TopologySpec(cutoff=self.module.cutoff, num_interactions=1, triplet_cutoff=None)
@@ -162,17 +177,37 @@ class SystemTapPairAdapter:
     def reference_energies(self):
         return None
 
-    def system_energy(self, inputs: GraphBatch, positions: Tensor, cell: Tensor) -> Tensor:
+    def system_batching(self) -> str | None:
+        return self.declare
+
+    def edge_shift_input(self) -> bool:
+        return self.edge_shifts
+
+    def system_energy(self, inputs: GraphBatch, positions: Tensor, cell: Tensor,
+                      edge_shifts: Tensor | None = None) -> Tensor:
         batch = inputs
         center = batch.edge_index[:, 0].long()
         neighbor = batch.edge_index[:, 1].long()
         image = batch.edge_image
-        shift = image[:, 0:1] * cell[0] + image[:, 1:2] * cell[1] + image[:, 2:3] * cell[2]
+        shift = (image[:, 0:1] * cell[0] + image[:, 1:2] * cell[1] + image[:, 2:3] * cell[2] if edge_shifts is None
+                 else edge_shifts)
         vectors = positions.index_select(0, neighbor) + shift - positions.index_select(0, center)
         energies = self.module.edge_energies(vectors, center, neighbor, batch.species)
         atom_energy = torch.zeros(positions.shape[0], dtype=torch.float64, device=energies.device)
-        atom_energy = atom_energy.index_add(0, center, energies.double())
-        return atom_energy[:batch.n_real].sum().reshape(1)
+        atom_energy = atom_energy.index_add(0, center, energies.double())[:batch.n_real]
+        systems = batch.systems
+        if systems is not None and self.segments:
+            rows = systems.system_of_row.long()
+            counts = (systems.row_ptr[1:] - systems.row_ptr[:-1]).double()
+            if systems.atoms is not None and not self.vacant_rows:  # slots: each system's own atoms only
+                local = torch.arange(rows.shape[0], device=rows.device) - systems.row_ptr.index_select(0, rows)
+                atom_energy = torch.where(local < systems.atoms.index_select(0, rows), atom_energy, 0.0)
+                counts = systems.atoms.double()
+            per_system = torch.zeros(systems.count, dtype=torch.float64, device=energies.device)
+            per_system = per_system.index_add(0, systems.system_of_row, atom_energy)
+            return per_system + self.mean_energy * per_system / counts if self.mean_energy else per_system
+        energy = atom_energy.sum().reshape(1)
+        return energy + self.mean_energy * energy / batch.n_real if self.mean_energy else energy
 
 
 class UnionPairAdapter:
