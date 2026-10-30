@@ -38,7 +38,9 @@ and license. What the adapter declares and does:
   per graph, so each system becomes its own ORB graph: each call reads the
   atoms per system from ``row_ptr`` and the edge rows per system (contiguous
   blocks, the padding with the last system), on the device, and the tap
-  returns one energy per system.
+  returns one energy per system. For relaxation slots with independent cells,
+  the tap accepts per-edge Cartesian shifts and excludes vacant rows from
+  pooled features, reference energies and atom counts.
 * **Kernels**: the backbone under upstream's own ``torch.compile`` switch
   (``model.compile(mode="default", dynamic=True)``, as ORB's loader does) by
   default, eager (the reference) for ``optimization_profile="generic"``. The
@@ -55,7 +57,9 @@ and license. What the adapter declares and does:
 * **Precision**: IEEE FP32 (the loader asks upstream for "float32-highest" and
   restores the process's FP32 GEMM flags and default dtype afterwards); TF32
   only on request (``InferenceConfig(matmul_precision="high")``, accuracy
-  class "reduced").
+  class "reduced"). For multi-system relaxation use ``matmul_precision="highest"``
+  (the default): TF32 rounding can depend on the union's shape and exceed the
+  union-versus-single self-check tolerance. Keep that self-check enabled.
 * **Isolated atoms**: ``"model"``: an atom without neighbours enters ORB's mean
   pooling and ZBL mean like any other.
 
@@ -464,19 +468,24 @@ class ORBAdapter:
 
     # --- SystemEnergyTap ------------------------------------------------------
 
-    def system_energy(self, inputs: ORBInput, positions: Tensor, cell: Tensor) -> Tensor:
+    def system_energy(self, inputs: ORBInput, positions: Tensor, cell: Tensor,
+                      edge_shifts: Tensor | None = None) -> Tensor:
         """ORB's raw energy (``[1]``: backbone, energy head, ``denormalize``, + ZBL; ``[count]`` for a batch of
-        several systems, one ORB graph each) at ``positions`` and ``cell``, with ORB's own derivatives and
-        featurisation off; its tail in FP64 (:meth:`_head_energy`)."""
-        graph = self._atom_graphs(inputs, positions, cell)
+        several systems, one ORB graph each) at ``positions`` and ``cell`` (or each edge's shift ``edge_shifts``
+        in its own system's cell), with ORB's own derivatives and featurisation off; its tail in FP64
+        (:meth:`_head_energy`). Systems in slots (``SystemSegments.atoms``) pool their own atoms only."""
+        graph = self._atom_graphs(inputs, positions, cell, edge_shifts)
+        systems = inputs.batch.systems
         with _sync_free_aggregation():
             nodes = self.module.model(graph)["node_features"]
-            sums, reference = self._readout_sums(graph, nodes, systems=inputs.batch.systems)
-            return self._head_energy(sums, graph.n_node.to(torch.float64)) + reference
+            sums, reference = self._readout_sums(graph, nodes, systems=systems)
+            atoms = graph.n_node if systems is None or systems.atoms is None else systems.atoms
+            return self._head_energy(sums, atoms.to(torch.float64)) + reference
 
-    def _atom_graphs(self, inputs: ORBInput, positions: Tensor, cell: Tensor):
-        """ORB's ``AtomGraphs`` of the engine's edges at ``positions`` and ``cell``: the graph of every call (one
-        GPU, one ORB graph per system of a batch of several, and a rank's rows at P>1)."""
+    def _atom_graphs(self, inputs: ORBInput, positions: Tensor, cell: Tensor, edge_shifts: Tensor | None = None):
+        """ORB's ``AtomGraphs`` of the engine's edges at ``positions`` and ``cell`` (or the per-edge shifts
+        ``edge_shifts``): the graph of every call (one GPU, one ORB graph per system of a batch of several, and a
+        rank's rows at P>1)."""
         from orb_models.forcefield.base import AtomGraphs
 
         batch = inputs.batch
@@ -502,9 +511,11 @@ class ORBAdapter:
         # Derived from orb-models 0.5.4, orb_models/forcefield/base.py:164 (the edge vectors). Copyright 2024 Orbital
         # Materials, Inc. Licensed under the Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0).
         # Changed: the graph is built from the engine's edges and differentiable positions and cell (no
-        # featurisation, stress displacement or rotation generator of ORB's own), the shifts row by row.
+        # featurisation, stress displacement or rotation generator of ORB's own), the shifts row by row (or the
+        # engine's per-edge shifts, each in its own system's cell: the same arithmetic per edge).
         # row by row: no TF32 GEMM for FP32
-        shifts = image[:, 0:1] * cell[0] + image[:, 1:2] * cell[1] + image[:, 2:3] * cell[2]
+        shifts = (image[:, 0:1] * cell[0] + image[:, 1:2] * cell[1] + image[:, 2:3] * cell[2] if edge_shifts is None
+                  else edge_shifts)
         # ORB's own order of operations (x[receiver] - x[sender] + shift), not the engine's: the two round
         # differently on edges that cross the cell
         vectors = positions.index_select(0, receivers) - positions.index_select(0, senders) + shifts
@@ -529,15 +540,22 @@ class ORBAdapter:
 
     def _readout_sums(self, graph, nodes: Tensor, rows: Tensor | None = None, systems=None) -> tuple[Tensor, Tensor]:
         """The FP64 sums ORB's readout pools per graph, over every row of ``graph`` or the ``rows`` (``[rows]`` bool,
-        a select), or per system of ``systems`` (``GraphBatch.systems``, one ORB graph each): ``[graphs, latent +
-        1]``, the node features ``nodes`` and the ZBL pair terms of the edges whose sender (centre) is such a row
-        (0 without ZBL); and the linear reference of those rows (``[graphs]``)."""
+        a select), or per system of ``systems`` (``GraphBatch.systems``, one ORB graph each; systems in slots over
+        their own atoms only, the first ``systems.atoms[s]`` rows of each slot): ``[graphs, latent + 1]``, the node
+        features ``nodes`` and the ZBL pair terms of the edges whose sender (centre) is such a row (0 without ZBL);
+        and the linear reference of those rows (``[graphs]``)."""
         module = self.module
         features = nodes.to(torch.float64)
         weights = module.heads[module.energy_name].reference.linear.weight.reshape(-1).to(torch.float64)
         reference = weights.index_select(0, graph.node_features["atomic_numbers"])
         pairs = (_zbl_pair_terms(module.pair_repulsion_fn, graph).to(torch.float64) if module.pair_repulsion
                  else features.new_zeros(graph.senders.shape[0]))
+        if rows is None and systems is not None and systems.atoms is not None:
+            # Systems in slots: a slot's vacant rows (past its system's atoms) belong to no system's sums.
+            row_system = systems.system_of_row.long()
+            local = torch.arange(row_system.shape[0], device=row_system.device) - systems.row_ptr.index_select(
+                0, row_system)
+            rows = local < systems.atoms.index_select(0, row_system)
         if rows is not None:
             # Selects, not products: a ghost row or an unused slot is never part of a sum.
             features = torch.where(rows[:, None], features, 0.0)
@@ -621,8 +639,9 @@ class ORBAdapter:
         """"segments" for upstream's ``ConservativeForcefieldRegressor`` as loaded (its backbone, energy head and
         pair repulsion upstream's own classes): it pools over each graph (the energy head's mean over the atoms,
         the linear reference, the ZBL mean), and :meth:`system_energy` makes each system of a batch its own ORB
-        graph and returns one energy per system. None for any other module (a subclass, another head): how it
-        pools is not known."""
+        graph and returns one energy per system (systems in slots: each over its own atoms,
+        ``SystemSegments.atoms``, not its slot's vacant rows). None for any other module (a subclass, another
+        head): how it pools is not known."""
         module = self.module
         parts = [(module, "ConservativeForcefieldRegressor", "conservative_regressor"),
                  (module.model, "MoleculeGNS", "gns"),
@@ -633,6 +652,12 @@ class ORBAdapter:
                for part, name, where in parts):
             return None
         return "segments"
+
+    def edge_shift_input(self) -> bool:
+        """True: :meth:`system_energy` takes the engine's per-edge shifts (its edge vectors read ``positions`` and the
+        shifts only; the cell it hands ORB's graph is not part of the energy), so different systems with cells of
+        their own run in the slots of one union."""
+        return True
 
     def upstream_patches(self) -> list:
         """The patch outcomes (applied and declined)."""

@@ -31,6 +31,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+from triton.runtime.errors import OutOfResources
 from torch.autograd import Function
 from torch.utils.weak import WeakIdKeyDictionary
 
@@ -263,9 +264,24 @@ def _run(fn, grid0, args, consts, num_warps, num_stages):
     key = (fn, consts, num_warps, num_stages, args[0].base.device.index)
     kernel = _COMPILED.get(key)
     hooks = triton.knobs.runtime
-    if kernel is None or hooks.launch_enter_hook.calls or hooks.launch_exit_hook.calls:
-        # First launch (compiles), or launch hooks installed (e.g. a profiler): Triton's own path.
-        kernel = fn[(grid0,)](*args, **dict(consts), num_warps=num_warps, num_stages=num_stages)
+    # Triton 3.4 uses None or a callable; newer versions use a hook collection.
+    # A real callback must still go through Triton's normal launch machinery.
+    active_hooks = any(bool(getattr(hook, "calls", hook is not None))
+                       for hook in (hooks.launch_enter_hook, hooks.launch_exit_hook))
+    if kernel is None or active_hooks:
+        # Compilation or profiler hooks: Triton's own launch path.
+        stages = getattr(getattr(kernel, "metadata", None), "num_stages", num_stages)
+        while True:
+            try:
+                kernel = fn[(grid0,)](*args, **dict(consts), num_warps=num_warps, num_stages=stages)
+                break
+            except OutOfResources as error:
+                # Shared-memory capacity differs across GPU generations. In particular,
+                # the accumulating backward projection can exceed H100's limit even
+                # when the forward tile fits. Keep the tile/arithmetic, reduce buffering.
+                if error.name != "shared memory" or stages <= 1:
+                    raise
+                stages -= 1
         _COMPILED[key] = kernel
         return
     kernel.run(grid0, 1, 1, torch._C._cuda_getCurrentRawStream(key[-1]), kernel.function,
@@ -292,7 +308,10 @@ def _launch(a, split, prec, bias=None, c=None, out=None):
               ("HAS_BIAS", bias is not None), ("HAS_C", c is not None))
     args = (a_d, bh_d, bl_d, c if c is not None else y, y_d, bias_arg, m)
     if k >= 384:
-        _run(_wide_gemm_tiles, tiles, args, consts, 8, 3)
+        # The single-dot TF32 loop has nondeterministic results with three stages
+        # on H100/Triton 3.4, including normal JIT launches and graph replay.
+        # One stage preserves its arithmetic and avoids that pipeline issue.
+        _run(_wide_gemm_tiles, tiles, args, consts, 8, 1 if prec == "tf32" else 3)
     else:
         _run(_wide_gemm_persistent, _programs(a.device, tiles), args, consts, 8, 2)
     return y

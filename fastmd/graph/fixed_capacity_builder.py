@@ -428,6 +428,41 @@ if _fixed_builder_available:
 
 
     @triton.jit
+    def _pad_system_loop_pairs_kernel(
+        total_edges,
+        center,
+        neighbor,
+        images,
+        distances,
+        short_flags,
+        system_of_row,
+        loop_images,
+        loop_lengths,
+        N: tl.constexpr,
+        E_CAP: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        """``_pad_loop_pairs_kernel`` for systems with cells of their own: padded pair p is the two opposite
+        self-loops of row p mod N (round robin) with the far image and length of that row's system
+        (``loop_images`` ``[systems, 3]`` int32, ``loop_lengths`` ``[systems]`` float32), never a short edge."""
+        rows = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
+        total_clamped = tl.minimum(tl.load(total_edges), E_CAP)
+        mask = (rows < E_CAP) & (rows >= total_clamped)
+        pad = rows - total_clamped
+        atom = (pad // 2) % N
+        sign = 1 - 2 * (pad % 2).to(tl.int32)
+        system = tl.load(system_of_row + atom, mask=mask, other=0).to(tl.int64)
+        tl.store(center + rows, atom, mask=mask)
+        tl.store(neighbor + rows, atom, mask=mask)
+        tl.store(images + rows * 3, sign * tl.load(loop_images + system * 3, mask=mask, other=0), mask=mask)
+        tl.store(images + rows * 3 + 1, sign * tl.load(loop_images + system * 3 + 1, mask=mask, other=0), mask=mask)
+        tl.store(images + rows * 3 + 2, sign * tl.load(loop_images + system * 3 + 2, mask=mask, other=0), mask=mask)
+        tl.store(distances + rows, tl.load(loop_lengths + system, mask=mask, other=0.0), mask=mask)
+        tl.store(short_flags + rows, 0, mask=mask)
+
+
+
+    @triton.jit
     def _window_flags_kernel(
         edge_count,
         invalid_pairs,
@@ -1425,7 +1460,7 @@ class FixedCapacityGraphBuilder:
         # system table and SYSTEM_CELLS, and each system's far self-loop image ([systems, 3] int32); unused here.
         self._row_systems = self.num_neighbors
         self._system_cells = {}
-        self._loop_images = None
+        self._loop_images = self._loop_lengths = None
         if not self.edges_only:
             self._allocate_overflow_topology()
         # The count and the device flags (views of the persistent buffers):
@@ -1748,6 +1783,23 @@ class FixedCapacityGraphBuilder:
             **self._system_cells,
             num_warps=8,
         )
+        if self._loop_images is not None:
+            _pad_system_loop_pairs_kernel[(triton.cdiv(self.e_capacity, 256),)](
+                self.edge_offsets[-1:],
+                self.center,
+                self.neighbor,
+                self.images,
+                self.distances,
+                self.short_flags,
+                self._row_systems,
+                self._loop_images,
+                self._loop_lengths,
+                N=self.n_real,
+                E_CAP=self.e_capacity,
+                BLOCK=256,
+                num_warps=4,
+            )
+            return
         if self._pad_loop is not None:
             image, length, _ = self._pad_loop
             _pad_loop_pairs_kernel[(triton.cdiv(self.e_capacity, 256),)](

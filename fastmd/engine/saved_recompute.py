@@ -770,6 +770,19 @@ def _single_auto(model, config) -> AutoRecompute:
     return state
 
 
+@contextmanager
+def detached_auto(model, config):
+    """Give throughput probes their own recompute state, restoring the entry point's state afterwards."""
+    key = (id(model), config.fingerprint)
+    saved = _SINGLE.pop(key, None)
+    try:
+        yield lambda: _SINGLE.pop(key, None)
+    finally:
+        _SINGLE.pop(key, None)
+        if saved is not None:
+            _SINGLE[key] = saved
+
+
 def current_mode(model, config) -> str:
     """The recompute level the forwards of ``config``'s P=1 entry point use now, without deciding:
     a bound evaluator's, an explicit level, else the entry point's ``AutoRecompute`` state ("off"

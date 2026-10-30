@@ -26,8 +26,7 @@ for a model that declares a :class:`ShardSpec` (:class:`ShardSpecDeclaration`;
 with :class:`ShardedTap` where the adapter runs its own layer loop and pooled
 readout); replicas of a system run as one batch for a model that declares
 :class:`SystemBatching`, different systems for one that also takes the engine's
-per-edge shifts (:class:`EdgeShiftInput`), declares ``"union"`` and has no line
-graph. A
+per-edge shifts (:class:`EdgeShiftInput`). A
 model the runtime plans by rules of its own (:class:`RuntimePlanned`: MatRIS)
 is not negotiated; its decisions are recorded. A request a model cannot serve
 raises :class:`NegotiationError`.
@@ -129,7 +128,8 @@ class SystemSegments:
     Systems with cells of their own (``fastmd.execution.system_batch``) also give ``cells``, and their rows
     may be slots: system ``s`` is then the first ``atoms[s]`` rows of its slot ``[row_ptr[s], row_ptr[s + 1])``,
     whose other rows are vacant (no candidate and no real edge: only padding self-loops, which add nothing; their
-    energies belong to no system). Both are persistent device buffers as well."""
+    energies belong to no system, and a model that pools per system leaves them out). Both are persistent device
+    buffers as well."""
 
     count: int  # systems
     row_ptr: Tensor  # [count + 1] int64 on the device: the first row of each system, then the row count
@@ -315,7 +315,8 @@ class SystemEnergyTap(Protocol):
         """The energy of the system (one element, ``[1]`` or a scalar, any float dtype) of the model's
         input ``inputs`` (``prepare(batch)``) at ``positions`` (``[rows, 3]``) and ``cell`` (``[3, 3]``),
         as for :meth:`EnergyTap.node_energy`; for a batch of several systems (``GraphBatch.systems``) of a
-        model that declares ``"segments"`` (:class:`SystemBatching`), one energy per system (``[count]``)."""
+        model that declares ``"segments"`` (:class:`SystemBatching`), one energy per system (``[count]``), and
+        with the keyword ``edge_shifts`` for a model that takes them (:class:`EdgeShiftInput`)."""
         ...
 
 
@@ -827,11 +828,12 @@ class SystemBatching(Protocol):
     ``systems`` for its energies and forces (a per-atom energy tap). ``"segments"``: the model reads
     ``systems`` and keeps the systems apart itself where it pools over a system (a mean over its atoms
     before an energy head): its input maps the segments to the model's own batch in each call, without a
-    host synchronization (e.g. the atoms per system as ``row_ptr[1:] - row_ptr[:-1]``), and a whole-system
-    tap returns one energy per system. The declaration comes from the loaded module (a model family may hold
-    variants that are not local, or that pool otherwise); None: not declared, and the runtime does not batch
-    the model (``fastmd.interfaces.replica_md`` rejects it). The negotiation also checks the declaration on
-    two copies of the system."""
+    host synchronization (e.g. the atoms per system as ``row_ptr[1:] - row_ptr[:-1]``, or ``atoms`` for systems
+    in slots, whose vacant rows it leaves out), and a whole-system tap returns one energy per system. The
+    declaration comes from the loaded module (a model family may hold variants that are not local, or that pool
+    otherwise); None: not declared, and the runtime does not batch the model (``fastmd.interfaces.replica_md``
+    rejects it). The negotiation also checks the declaration on two copies of the system (on two of the systems,
+    in slots with vacant rows, for systems with cells of their own)."""
 
     def system_batching(self) -> Literal["union", "segments"] | None:
         ...
@@ -846,14 +848,19 @@ class EdgeShiftInput(Protocol):
     """Capability: the model's energy tap takes the engine's per-edge shifts, so the systems of one graph batch
     may have cells of their own (``SystemSegments.cells``).
 
-    True: :meth:`EnergyTap.node_energy` accepts the keyword ``edge_shifts``, ``[edge rows, 3]`` in the dtype of
+    True: the energy tap (:meth:`EnergyTap.node_energy`, or a whole-system tap's
+    :meth:`SystemEnergyTap.system_energy`) accepts the keyword ``edge_shifts``, ``[edge rows, 3]`` in the dtype of
     ``positions``: the Cartesian shift ``edge_image @ cell`` of each edge in its own system's cell, row by row
-    (``image[:, 0:1] * cell[0] + image[:, 1:2] * cell[1] + image[:, 2:3] * cell[2]``, the arithmetic of the
-    adapters' own float32 shifts), and takes an edge's vector from it in place of its own ``edge_image @ cell``;
-    ``cell`` is then the first system's and the model reads nothing else from it. The engine passes the shifts
-    only for systems with cells of their own (a model that declares ``"union"``: a whole-system tap is not
-    admitted for them yet); a call without them is the single-system call. The declaration comes from the loaded
-    module; False or None: one cell per batch."""
+    (``image[:, 0:1] * cell[0] + image[:, 1:2] * cell[1] + image[:, 2:3] * cell[2]``, the arithmetic of an
+    adapter that computes its float32 shifts row by row), and takes an edge's vector from it in place of its own
+    ``edge_image @ cell`` (with a line graph, its triplets' bonds too); ``cell`` is then the first system's and the
+    model reads nothing else from it. The engine passes the shifts only for systems with cells of their own, in
+    slots: a model that declares ``"segments"`` then pools each system over its own atoms
+    (``SystemSegments.atoms``), not a slot's vacant rows. A call without them is the single-system call. The
+    declaration comes from the loaded module; False or None: one cell per batch.
+
+    For a model-owned derivative, ``evaluate`` instead reads each system's cell
+    from ``GraphBatch.systems`` and returns its separate energy and stress."""
 
     def edge_shift_input(self) -> bool:
         ...

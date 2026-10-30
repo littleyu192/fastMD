@@ -59,10 +59,9 @@ class MatRISAdapter:
 
     For the capability negotiation MatRIS declares its contract (bitwise
     against the previous revision, a model-owned derivative with the stress in
-    GPa), its saved-tensor recompute levels, its multi-GPU exchange and that
-    the runtime plans it by its own rules (``runtime_rules``); the negotiation
-    records the decisions the runtime makes for MatRIS and does not make them
-    anew.
+    GPa), its saved-tensor recompute levels, its independent systems in one
+    graph and that the runtime plans it by its own rules (``runtime_rules``).
+    The negotiation records the decisions the runtime makes for MatRIS.
     """
 
     name = "matris"
@@ -96,10 +95,14 @@ class MatRISAdapter:
 
     def prepare(self, batch: GraphBatch):
         """MatRIS's ``RadiusGraph`` over the batch's tensors (the same objects, no copy): what the
-        fixed-capacity builder returns from ``build`` for MatRIS's topology."""
+        fixed-capacity builder returns from ``build`` for MatRIS's topology; with the batch's systems where
+        it holds several (a union of replicas)."""
         from fastmd.graph.fixed_capacity_builder import radius_graph_view
 
-        return radius_graph_view(batch)
+        graph = radius_graph_view(batch)
+        if batch.systems is not None:
+            graph.systems = batch.systems
+        return graph
 
     @property
     def upstream(self) -> str:
@@ -115,7 +118,23 @@ class MatRISAdapter:
                                force_mode="model_owned", stress_unit="GPa",
                                compiled="dynamic" if self.compiled else "none")
 
+    def edge_shift_input(self) -> bool:
+        """True: MatRIS's ``evaluate`` of a graph of systems with cells of their own (``SystemSegments.cells``)
+        takes each row's coordinates and each edge's shift in its own system's cell (and each system's strain for
+        its stress), so such systems may share one graph (slots)."""
+        return True
 
+    def system_batching(self) -> str | None:
+        """``"union"``: each atom's energy depends on its own system only (message passing over edges and lines,
+        a per-atom readout), so systems may share one graph. MatRIS's ``evaluate`` of a graph of several systems
+        (``GraphBatch.systems``) returns one energy per system, skips the line-graph layers per system as it does
+        per graph, and its forces are those of the systems alone; the sink rows past the systems are left out
+        by ``n_real``. None for a model whose reference-energy table is not per atom (its intensive flag differs
+        from the model's: a composition readout per graph), as at P>1."""
+        module = self.module
+        if module.reference_energy is not None and not module._per_atom_reference():
+            return None
+        return "union"
 
     def isolated_atom_policy(self) -> str:
         """``"reference"`` with an ``AtomRef`` reference-energy table, else ``"error"``."""

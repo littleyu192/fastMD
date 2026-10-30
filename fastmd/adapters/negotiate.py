@@ -58,6 +58,7 @@ from contextlib import contextmanager
 import copy
 from dataclasses import asdict, dataclass, field, replace
 import hashlib
+import inspect
 import json
 import math
 from typing import Any, Callable, Iterator, Mapping, Sequence
@@ -869,17 +870,20 @@ def check_system_batching(adapter) -> str:
     (:class:`~fastmd.adapters.protocol.SystemBatching`), if the runtime may evaluate several of its systems as
     one disjoint union: "union" with a per-atom energy tap, or "segments" with an energy tap of either kind
     (the model keeps the systems apart itself); the graph padded with self-loops (the union builder's: a line
-    graph, whose triplets the union builder lists per system as well, with far self-loops). Raises
-    :class:`NegotiationError` otherwise. Host-only (no model call)."""
+    graph, whose triplets the union builder lists per system as well, with far self-loops). A model that
+    differentiates its own energy (MatRIS) declares "union" for its ``evaluate``, which returns one energy per
+    system of a batch with systems; its graph may pad with sink atoms (rows past the last system, which it
+    leaves out by ``n_real``). Raises :class:`NegotiationError` otherwise. Host-only (no model call)."""
     name = getattr(adapter, "name", type(adapter).__name__)
-    if runtime_planned(adapter) or isinstance(adapter, ModelOwnedDerivative):
-        raise NegotiationError(f"model {name!r} differentiates its own energy: replicas of it run in one whole-step "
-                               "graph through fastmd.execution.whole_step_cuda_graph.BatchedWholeStepGraphRunner, not "
-                               "as a union")
-    if not isinstance(adapter, (EnergyTap, SystemEnergyTap)):
+    owned = runtime_planned(adapter) or isinstance(adapter, ModelOwnedDerivative)
+    declared = adapter.system_batching() if isinstance(adapter, SystemBatching) else None
+    if owned and declared != "union":
+        raise NegotiationError(f"model {name!r} differentiates its own energy and does not declare 'union' "
+                               "(SystemBatching) for its evaluate of several systems in one graph: its systems cannot "
+                               "be evaluated as one union; run them one by one (GPUResidentMolecularDynamics)")
+    if not owned and not isinstance(adapter, (EnergyTap, SystemEnergyTap)):
         raise NegotiationError(f"model {name!r} has no energy tap: a union of systems is differentiated by the "
                                "engine")
-    declared = adapter.system_batching() if isinstance(adapter, SystemBatching) else None
     if declared is None:
         raise NegotiationError(f"model {name!r} does not declare how its systems may share one graph (SystemBatching "
                                "'union' or 'segments' for the loaded module): its systems cannot be evaluated as one "
@@ -887,16 +891,17 @@ def check_system_batching(adapter) -> str:
     if declared not in SYSTEM_BATCHING_KINDS:
         raise NegotiationError(f"model {name!r} declares system batching {declared!r}; the runtime batches "
                                f"{' and '.join(map(repr, SYSTEM_BATCHING_KINDS))} only")
-    if declared == "union" and not isinstance(adapter, EnergyTap):
+    if declared == "union" and not owned and not isinstance(adapter, EnergyTap):
         raise NegotiationError(f"model {name!r} declares 'union' with a whole-system energy tap, which gives one energy "
                                "for the whole union: a model that pools over its system declares 'segments' and "
                                "returns one energy per system")
     padding = adapter.padding_rule().kind
-    if padding == "sink_atoms":
+    if padding == "sink_atoms" and not owned:
         raise NegotiationError(f"model {name!r} pads with sink atoms: a union pads with self-loops (sink rows would "
                                "sit after the last system's rows)")
     triplet_cutoff = adapter.topology_spec().triplet_cutoff
-    if triplet_cutoff is not None and padding != "far_self_loops":
+    line_padding = ("far_self_loops", "sink_atoms") if owned else ("far_self_loops",)
+    if triplet_cutoff is not None and padding not in line_padding:
         raise NegotiationError(f"model {name!r} has a line graph (triplets within {triplet_cutoff} Å) padded with "
                                f"{padding}: a union's line graph pads with far self-loops (padded triplets on padded "
                                "pairs)")
@@ -906,21 +911,35 @@ def check_system_batching(adapter) -> str:
 def check_system_cells(adapter) -> str:
     """:func:`check_system_batching` for different systems in one union, each with its own atoms and cell
     (``SystemSegments.cells``, ``fastmd.interfaces.multi_system_md``): the model must also take the engine's
-    per-edge shifts (:class:`~fastmd.adapters.protocol.EdgeShiftInput`) and declare "union" (a model that pools
-    per system reads the batch's segments, which a slot's vacant rows would join), without a line graph (the
-    union builder's line graph has one cell). Raises :class:`NegotiationError` otherwise. Host-only."""
+    per-edge shifts (:class:`~fastmd.adapters.protocol.EdgeShiftInput`) in its energy tap's call (the keyword
+    ``edge_shifts``). A "segments" model then pools each system over its own atoms, the first
+    ``SystemSegments.atoms[s]`` rows of its slot (the union's self-check, whose slots have vacant rows, holds it to
+    that); a line graph lists each system's triplets in its own cell (the slot builder's). Raises
+    :class:`NegotiationError` otherwise. Host-only."""
     name = getattr(adapter, "name", type(adapter).__name__)
     declared = check_system_batching(adapter)
     if not (isinstance(adapter, EdgeShiftInput) and adapter.edge_shift_input()):
         raise NegotiationError(f"model {name!r} computes its edge vectors from one cell per graph batch (it does not "
                                "take the engine's per-edge shifts, EdgeShiftInput): its replicas share a union, "
                                "systems with cells of their own do not")
-    if declared != "union":
-        raise NegotiationError(f"model {name!r} declares {declared!r}: systems with cells of their own run in slots "
-                               "for a model that declares 'union' (a model that pools per system would pool a slot's "
-                               "vacant rows too)")
-    if adapter.topology_spec().triplet_cutoff is not None:
-        raise NegotiationError(f"model {name!r} has a line graph: systems with cells of their own run edges only")
+    if runtime_planned(adapter) or isinstance(adapter, ModelOwnedDerivative):
+        return declared  # its evaluate takes each system's cell from the batch's systems (MatRIS)
+    tap = adapter.node_energy if isinstance(adapter, EnergyTap) else adapter.system_energy
+    try:
+        parameters = inspect.signature(tap).parameters
+    except (TypeError, ValueError):  # no signature to read (e.g. a builtin): the call itself is the check
+        parameters = None
+    if parameters is not None:
+        shifts = parameters.get("edge_shifts")
+        if shifts is not None and shifts.kind is not inspect.Parameter.VAR_KEYWORD:
+            accepts_shifts = shifts.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                            inspect.Parameter.KEYWORD_ONLY)
+        else:
+            accepts_shifts = any(parameter.kind is inspect.Parameter.VAR_KEYWORD
+                                 for parameter in parameters.values())
+        if not accepts_shifts:
+            raise NegotiationError(f"model {name!r} declares the engine's per-edge shifts (EdgeShiftInput), but its "
+                                   f"{getattr(tap, '__name__', 'energy tap')} takes no edge_shifts keyword")
     return declared
 
 
@@ -960,9 +979,15 @@ def batch_systems(record: EnginePlanRecord, adapter, *, systems: int,
                          f"{check.get('tolerance')} eV/Å")
             evaluated = check.get("evaluated", "two copies of the system")
             alone = "the same systems" if evaluated == "two of its systems" else "the same copies"
+            cause = ("its atoms see the other system, or it pools a slot's vacant rows" if check.get("vacant_rows")
+                     else "its atoms see the other system")
+            cause = "possible causes include " + cause
+            if record.precision.get("chosen") == "tf32":
+                cause += (" or batch-shape-dependent TF32 rounding; retry with "
+                          "InferenceConfig(matmul_precision='highest') and keep self_check=True")
             raise NegotiationError(
                 f"model {name!r} declares {declared!r}, but {evaluated} evaluated as one union differ "
-                f"from {alone} alone {found} (the noise floor of both paths): its atoms see the other system")
+                f"from {alone} alone {found} (the noise floor of both paths): {cause}")
         reason += (f"; self-check: union vs alone max |dF| {check['max_force_difference']:.3g} eV/Å <= "
                    f"{check['tolerance']:.3g} eV/Å")
     plan = copy.deepcopy(record)

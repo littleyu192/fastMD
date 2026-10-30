@@ -59,7 +59,9 @@ and does:
   itself (its energy is not the AtomRef weight).
 * **Several systems** (``system_batching``): ``"union"`` for upstream's
   ``CHGNet`` itself: replicas of a system run as one disjoint graph with its
-  line graph (``fastmd.interfaces.replica_md``).
+  line graph (``fastmd.interfaces.replica_md``). Its energy tap also accepts
+  per-edge Cartesian shifts so systems with independent cells can share a
+  relaxation union without changing single-system evaluation.
 
 Loading unpickles upstream's bundled checkpoint after checking its sha256.
 """
@@ -177,6 +179,23 @@ def _fourier_forward(self, x: Tensor) -> Tensor:
     result[:, 1 : self.order + 1] = torch.sin(tmp)
     result[:, self.order + 1 :] = torch.cos(tmp)
     return result / np.sqrt(np.pi)
+
+
+# Derived from chgnet 0.4.2, chgnet/model/encoders.py (BondEncoder.forward). Copyright (c) 2023, The Regents of the
+# University of California, through Lawrence Berkeley National Laboratory, and the University of California, Berkeley.
+# Licensed under the Modified BSD License. Changed: the neighbours come shifted by the caller (the engine's per-edge
+# shifts, each in its own system's cell) instead of by ``image @ lattice``; the source is pinned (chgnet.bond_encoder).
+def _bond_bases(encoder, center: Tensor, neighbor: Tensor,
+                undirected2directed: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    """Upstream ``BondEncoder.forward`` of ``encoder`` with each neighbour already at its shifted position: the bond
+    bases of the atom graph and the bond graph (from each undirected pair's length) and the normalized bond
+    vectors."""
+    bond_vectors = center - neighbor
+    bond_lengths = torch.norm(bond_vectors, dim=1)
+    bond_vectors = bond_vectors / bond_lengths[:, None]
+    undirected_bond_lengths = torch.index_select(bond_lengths, 0, undirected2directed)
+    return (encoder.rbf_expansion_ag(undirected_bond_lengths), encoder.rbf_expansion_bg(undirected_bond_lengths),
+            bond_vectors)
 
 
 def _record(name: str, target: str, sha256: str, reason: str, **fields) -> PatchRecord:
@@ -401,20 +420,26 @@ class CHGNetAdapter:
 
     # --- EnergyTap ----------------------------------------------------------
 
-    def node_energy(self, inputs: CHGNetInput, positions: Tensor, cell: Tensor) -> Tensor:
+    def node_energy(self, inputs: CHGNetInput, positions: Tensor, cell: Tensor,
+                    edge_shifts: Tensor | None = None) -> Tensor:
         """The energy of each row ([rows] float32): CHGNet's per-atom readout at ``positions`` and
-        ``cell`` plus the atom's AtomRef weight, with CHGNet's own derivatives off."""
+        ``cell`` (or each edge's shift ``edge_shifts`` in its own system's cell) plus the atom's AtomRef weight,
+        with CHGNet's own derivatives off."""
         from chgnet.model.model import BatchedGraph
 
         module, batch = self.module, inputs.batch
         edges, triplets = batch.edge_index, batch.triplets
+        center, neighbor = positions.index_select(0, edges[:, 0]), positions.index_select(0, edges[:, 1])
         # BatchedGraph.from_graphs for one graph: bonds from the centre and neighbour positions and the
         # neighbour's image; angles from the two directed bond vectors of each triplet row.
-        # The integer images in the cell's dtype (a float64 module's float64 cell; float32: the batch's own).
-        image = batch.edge_image if batch.edge_image.dtype == cell.dtype else batch.edge_image.to(cell.dtype)
-        bond_bases_ag, bond_bases_bg, bond_vectors = module.bond_basis_expansion(
-            center=positions.index_select(0, edges[:, 0]), neighbor=positions.index_select(0, edges[:, 1]),
-            undirected2directed=batch.pair_u2d, image=image, lattice=cell)
+        if edge_shifts is None:
+            # The integer images in the cell's dtype (a float64 module's float64 cell; float32: the batch's own).
+            image = batch.edge_image if batch.edge_image.dtype == cell.dtype else batch.edge_image.to(cell.dtype)
+            bond_bases_ag, bond_bases_bg, bond_vectors = module.bond_basis_expansion(
+                center=center, neighbor=neighbor, undirected2directed=batch.pair_u2d, image=image, lattice=cell)
+        else:
+            bond_bases_ag, bond_bases_bg, bond_vectors = _bond_bases(module.bond_basis_expansion, center,
+                                                                     neighbor + edge_shifts, batch.pair_u2d)
         angle_bases = module.angle_basis_expansion(bond_vectors.index_select(0, triplets[:, 2]),
                                                    bond_vectors.index_select(0, triplets[:, 4]))
         graph = BatchedGraph(
@@ -496,6 +521,12 @@ class CHGNetAdapter:
         if (type(self.module).__name__, type(self.module).__module__) != ("CHGNet", "chgnet.model.model"):
             return None
         return "union"
+
+    def edge_shift_input(self) -> bool:
+        """True: :meth:`node_energy` takes the engine's per-edge shifts (the bond vectors, and the angles from them,
+        read ``positions`` and the shifts only; its ``cell`` is then not read), so different systems with cells of
+        their own run in the slots of one union with their line graph."""
+        return True
 
     def capacity_step(self) -> CapacityStep:
         """CHGNet's capacity tiers (``_CAPACITY_STEP``): every padded edge runs the atom convolution's gated

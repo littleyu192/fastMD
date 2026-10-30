@@ -96,6 +96,37 @@ def plain_torch_scope():
             _interaction_block.checkpoint = checkpoint
 
 
+def _system_segment(batch_graph) -> tuple[Tensor, int]:
+    """The system of each atom row of a graph of several systems (``batch_graph['systems']``) and the segment
+    count: a system's rows, then one more segment for the rows past them (sink rows). Computed once per graph."""
+    segment = batch_graph.get('_system_segment')
+    if segment is None:
+        systems = batch_graph['systems']
+        atomic_numbers = batch_graph['atomic_numbers']
+        index = torch.full((atomic_numbers.shape[0],), systems.count, dtype=torch.int64,
+                           device=atomic_numbers.device)
+        index[:systems.system_of_row.shape[0]] = systems.system_of_row
+        if systems.atoms is not None:  # systems in slots: a slot's rows past its system's atoms are vacant
+            rows = systems.system_of_row.long()
+            offset = torch.arange(rows.shape[0], device=rows.device) - systems.row_ptr.index_select(0, rows)
+            index[:rows.shape[0]] = torch.where(offset < systems.atoms.index_select(0, rows), rows, systems.count)
+        segment = batch_graph['_system_segment'] = (index, systems.count + 1)
+    return segment
+
+
+def _system_line_graph_mask(batch_graph, line_atoms: Tensor) -> Tensor:
+    """``[undirected edges, 1]`` bool: whether the system of each bond's atom has a real triplet, in a graph of
+    several systems whose triplets are sorted by centre atom and whose systems' rows are contiguous: a system's
+    real triplets are those centred on its rows, found by a binary search per system (no pass of atomics over the
+    triplets); a bond on the sink rows past the systems has none."""
+    systems = batch_graph['systems']
+    segment, _ = _system_segment(batch_graph)
+    bounds = torch.searchsorted(line_atoms.contiguous(), systems.row_ptr)
+    has_triplets = torch.cat([bounds[1:].gt(bounds[:-1]), bounds.new_zeros(1, dtype=torch.bool)])
+    undirected_atom = batch_graph['atom_graph_dict']['target_index'][batch_graph['undirected2directed']]
+    return has_triplets[segment[undirected_atom]].unsqueeze(1)
+
+
 class MatRIS(nn.Module):
     """ Init MatRIS Potential """
     
@@ -315,6 +346,20 @@ class MatRIS(nn.Module):
             )
             readout_atom_mask = readout_atom_mask & real_atom_mask
         batch_graph['readout_atom_mask'] = readout_atom_mask
+        # A graph of several systems (a union of replicas): each system is a graph of its own here.
+        systems = batch_graph.get('systems')
+        if systems is not None and self.reference_energy is not None and not self._per_atom_reference():
+            raise ValueError("a graph of several systems needs reference-energy and model intensive flags that "
+                             "agree (per-atom reference energies)")
+        if systems is not None and "s" in task and not self.force_stress_head.is_conservation:
+            raise ValueError("a MatRIS with direct forces and stress (is_conservation=False) gives one stress per "
+                             "graph: a graph of several systems needs the conservative head for its stresses")
+        if systems is not None and systems.atoms is not None:
+            # Systems in slots: a vacant row is nobody's (no energy, no force).
+            occupied = _system_segment(batch_graph)[0] < systems.count
+            readout_atom_mask = readout_atom_mask & occupied
+            real_atom_mask = occupied if real_atom_mask is None else real_atom_mask & occupied
+            batch_graph['readout_atom_mask'] = readout_atom_mask
 
         # Ragged single-system inference skips line-graph layers altogether
         # when no real triplets exist. Dummy triplets in padded graphs must not
@@ -323,7 +368,9 @@ class MatRIS(nn.Module):
         # each graph in a batch, using only device-side predicates so the same
         # captured graph can disconnect and reconnect atoms during replay.
         line_graph = batch_graph['line_graph_dict']
-        if len(line_graph['line_graph']) and (
+        if len(line_graph['line_graph']) and systems is not None:
+            batch_graph['_has_real_line_graph'] = _system_line_graph_mask(batch_graph, line_graph['atom_list'])
+        elif len(line_graph['line_graph']) and (
             real_counts is not None or batch_graph['num_graphs'] > 1
         ):
             line_atoms = line_graph['atom_list']
@@ -411,6 +458,10 @@ class MatRIS(nn.Module):
             if real_counts is not None:
                 # padded path: normalize by the real atom count, not N+dummy
                 denom = real_counts
+            if systems is not None:
+                # one energy per system, per its own atoms
+                denom = (systems.row_ptr[1:] - systems.row_ptr[:-1] if systems.atoms is None
+                         else systems.atoms)
             prediction["e"] = (total_energy / denom).to(energies.dtype)
         else:
             prediction["e"] = total_energy.to(energies.dtype)
@@ -530,6 +581,12 @@ class MatRIS(nn.Module):
         unaffected.
         """
         rows64 = rows.double()
+        systems = batch_graph.get('systems')
+        if systems is not None:
+            # A graph of several systems: one sum per system (the rows past them add nothing).
+            segment, segments = _system_segment(batch_graph)
+            return self.energy_head.pooling(rows64.unsqueeze(1), segment, num_segment=segments).view(-1)[
+                :systems.count]
         if batch_graph['num_graphs'] == 1:
             return rows64.sum().reshape(1)
         return self.energy_head.pooling(

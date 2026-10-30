@@ -48,6 +48,12 @@ def process_graphs(graphs: Sequence[RadiusGraph],
     
     batched_graph = {}
     num_graphs = len(graphs)
+    # One graph holding several systems (GraphBatch.systems: replicas in a union, or systems with cells of their own
+    # in slots): its geometry per system (_system_geometry), its readout per system (MatRIS._forward).
+    systems = getattr(graphs[0], "systems", None)
+    if systems is not None and num_graphs > 1:
+        raise ValueError("a graph of several systems is evaluated alone, not in a list of graphs")
+    per_system = systems is not None and (systems.cells is not None or compute_stress)
     device = graphs[0].lattice.device
     dtype = graphs[0].lattice.dtype
     
@@ -173,8 +179,9 @@ def process_graphs(graphs: Sequence[RadiusGraph],
 
     #========================================
     strains = None
-    batch_cart_coords.requires_grad_(True) 
-    if compute_stress:
+    if not per_system:
+        batch_cart_coords.requires_grad_(True)
+    if compute_stress and not per_system:
         strains = torch.zeros(
             (num_graphs, 3, 3),
             dtype=dtype,
@@ -211,10 +218,15 @@ def process_graphs(graphs: Sequence[RadiusGraph],
     
     # node index
     target_index, source_index  = batched_atom_graph[:, 0], batched_atom_graph[:, 1]
+    if per_system:
+        batch_cart_coords, strains, batch_lattice, volumes, system_image_cart = _system_geometry(
+            graphs[0], systems, target_index, compute_stress)
     # ===== compute pairwise distance and edge vectors =====
     center_pos = batch_cart_coords[target_index] 
     neighbor_pos = batch_cart_coords[source_index]
-    if num_graphs == 1:
+    if per_system:
+        image_cart = system_image_cart
+    elif num_graphs == 1:
         image_cart = small_matmul(batch_image, batch_lattice)
     elif len({graph.atom_graph.shape[0] for graph in graphs}) == 1:
         edges_per_system = graphs[0].atom_graph.shape[0]
@@ -296,6 +308,11 @@ def process_graphs(graphs: Sequence[RadiusGraph],
     
     batched_graph['atom_graph_dict'] = atom_graph_dict
     batched_graph['line_graph_dict'] = line_graph_dict
+    if systems is not None:
+        if not graphs[0].line_atom_sorted:
+            raise ValueError("a graph of several systems needs its triplets sorted by centre atom (a fixed-capacity "
+                             "builder's)")
+        batched_graph['systems'] = systems
 
     # Contract verification and lowering selection happen while the graph is
     # prepared/captured. CUDA Graph replay consumes the already compiled plan.
@@ -321,3 +338,30 @@ def process_graphs(graphs: Sequence[RadiusGraph],
     attach_dispatcher(batched_graph, topology_plan)
     
     return batched_graph
+
+
+def _system_geometry(graph: RadiusGraph, systems, target_index: torch.Tensor, compute_stress: bool):
+    """The geometry of one graph of several systems, each row and edge in its own system's cell
+    (``systems.cells``; without them every system has the graph's lattice): the Cartesian coordinates
+    (``frac @ cell`` row by row, the single-system arithmetic of each row; strained by its system's strain), the
+    strains (``[count, 3, 3]`` leaf, or None), each system's cell (strained) as ``[count * 3, 3]``, its volume
+    ``[count, 1, 1]`` and each edge's image shift in the cell of its centre atom's system. Sink rows past the
+    systems take the first system's cell (they sit at the origin)."""
+    count = systems.count
+    lattice = graph.lattice
+    cells = (lattice.expand(count, 3, 3) if systems.cells is None else systems.cells.to(lattice.dtype))
+    rows = graph.atomic_number.shape[0]
+    row_system = torch.zeros(rows, dtype=torch.int64, device=lattice.device)
+    row_system[: systems.system_of_row.shape[0]] = systems.system_of_row
+    coords = small_matmul(graph.atom_frac_coord.unsqueeze(1), cells.index_select(0, row_system)).squeeze(1)
+    coords.requires_grad_(True)
+    volumes = (cells[:, 0] * torch.linalg.cross(cells[:, 1], cells[:, 2])).sum(dim=-1).unsqueeze(1).unsqueeze(2)
+    strains = None
+    if compute_stress:
+        strains = torch.zeros((count, 3, 3), dtype=lattice.dtype, device=lattice.device, requires_grad=True)
+        symmetric = 0.5 * (strains + strains.transpose(-1, -2))
+        coords = coords + small_matmul(coords.unsqueeze(1), symmetric.index_select(0, row_system)).squeeze(1)
+        cells = cells + small_matmul(cells, symmetric)
+    edge_cells = cells.index_select(0, row_system.index_select(0, target_index))
+    image_cart = small_matmul(graph.neighbor_image.to(lattice.dtype).unsqueeze(1), edge_cells).squeeze(1)
+    return coords, strains, cells.reshape(-1, 3), volumes, image_cart
