@@ -1,11 +1,13 @@
-"""Different systems of a model the engine differentiates, in slots of one whole-step CUDA graph.
+"""Different systems of a model the engine differentiates (or of MatRIS, its own derivative), in slots of one
+whole-step CUDA graph.
 
 The heterogeneous counterpart of :mod:`fastmd.execution.replica_batch`: S
 systems, each with its own atoms, cell, positions, momenta and thermostat, run
 as one disjoint union in **slots**. Slot ``s`` owns the fixed rows
 ``[start_s, start_s + ceiling_s)`` of the union (:class:`SlotLayout`); its
 system is the first ``n_s <= ceiling_s`` of them and the slot's other rows are
-vacant (no candidate, no real edge: only padding self-loops, which add nothing;
+vacant (no candidate, no real edge: only padding self-loops, which add nothing,
+or none for MatRIS, which pads with sink rows after the last slot;
 no energy counted, never moved). A system of at most the
 slot's ceiling can be written into a slot in place (positions, species, cell
 and the ``systems`` buffers; the union's candidates refreshed), so a captured
@@ -13,18 +15,21 @@ graph serves another system without a recapture. Batch-aware parts let the
 single-system :class:`~fastmd.execution.whole_step_cuda_graph.WholeStepGraphRunner`
 run the union unchanged, as for replicas:
 
-* :class:`SlotUnionGraphBuilder`: the edges-only fixed-capacity builder over
-  the slots. One batched cell list with one batch index per system (vacant
-  rows left out) gives the candidates, so no edge joins two systems; each
-  build wraps every row with its own system's inverse cell, the single-system
-  re-filter kernels read the cell of each atom's system (their
-  ``SYSTEM_CELLS`` path), and far self-loop padding takes the far image of its
-  row's system. It publishes the systems with their cells and atom counts
+* :class:`SlotUnionGraphBuilder`: the fixed-capacity builder over the slots,
+  edges only or with the line graph of a model with triplets. One batched cell
+  list with one batch index per system (vacant rows left out) gives the
+  candidates, so no edge (and no triplet) joins two systems; each build wraps
+  every row with its own system's inverse cell, the single-system re-filter
+  kernels read the cell of each atom's system (their ``SYSTEM_CELLS`` path),
+  so each system's bonds and triplets are those of its own cell, and far
+  self-loop padding (a line graph's padded pairs too) takes the far image of
+  its row's system. It publishes the systems with their cells and atom counts
   (:class:`~fastmd.adapters.protocol.SystemSegments`).
 * :func:`system_energy_derivative`: one FP64 energy per system (its occupied
-  rows' sum) and one backward pass for every system's forces, the model's
-  edge vectors from the engine's per-edge shifts (``image @ cells[system]``,
-  row by row: the adapters' own arithmetic,
+  rows' sum, or the system's entry of a whole-system tap that pools each
+  system over its occupied rows) and one backward pass for every system's
+  forces, the model's edge vectors from the engine's per-edge shifts
+  (``image @ cells[system]``, row by row: the adapters' own arithmetic,
   :class:`~fastmd.adapters.protocol.EdgeShiftInput`).
 * the integrators, one thermostat per system: :class:`SystemNoseHooverChainNVT`
   (ASE's Nose-Hoover chain per system: the single-system Triton kernels, one
@@ -40,6 +45,7 @@ run the union unchanged, as for replicas:
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from functools import cached_property
 import math
@@ -48,23 +54,24 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from fastmd.adapters.protocol import SystemSegments
-from fastmd.engine.energy_derivative import engine_derivative
-from fastmd.engine.entry_config import scoped_call
-from fastmd.graph.fixed_capacity_builder import FixedCapacityGraphBuilder, self_loop_padding
-from fastmd.graph.geometry import small_matmul
-from fastmd.graph.gpu_graph_builder import MAX_IMAGE
-from fastmd.execution.gpu_integrator import GPUIntegrator, StatefulIntegrator
-from fastmd.execution.gpu_nhc import _C_Q, _HAS_TRITON, _TRITON_MAX_ELEMS, nhc_constants
-from fastmd.execution.replica_batch import UNION_GROWTH_HEADROOM, ReplicaWholeStepRunner, graph_builder_options
+from ..adapters.protocol import EnergyTap, ModelOwnedDerivative, NegotiationError, SystemSegments
+from ..engine.energy_derivative import engine_derivative, stress_unit_scale
+from ..engine.entry_config import scoped_call
+from ..graph.fixed_capacity_builder import FixedCapacityGraphBuilder, FixedCapacityGraphStatus, self_loop_padding
+from ..graph.geometry import small_matmul
+from ..graph.gpu_graph_builder import MAX_IMAGE
+from .gpu_integrator import GPUIntegrator, StatefulIntegrator
+from .gpu_nhc import _C_Q, _HAS_TRITON, _TRITON_MAX_ELEMS, nhc_constants
+from .replica_batch import (UNION_GROWTH_HEADROOM, UNION_TRIPLET_GROWTH_HEADROOM, ReplicaWholeStepRunner,
+                            graph_builder_options)
 
 if _HAS_TRITON:
     import triton
     import triton.language as tl
 
-    from fastmd.graph.fixed_capacity_builder import allocate_cell_list, estimate_batch_cell_list_sizes
-    from fastmd.graph.neighbor_list_backend import batch_build_cell_list, batch_query_cell_list
-    from fastmd.execution.gpu_nhc import _nhc_post_force_kernel, _nhc_pre_force_kernel
+    from ..graph.fixed_capacity_builder import allocate_cell_list, estimate_batch_cell_list_sizes
+    from ..graph.neighbor_list_backend import batch_build_cell_list, batch_query_cell_list
+    from .gpu_nhc import _nhc_post_force_kernel, _nhc_pre_force_kernel
 
     @triton.jit
     def _nhc_pre_force_systems_kernel(q_ptr, p_ptr, f_ptr, m_ptr, eta_ptr, pe_ptr, c_ptr, offsets, mass_offsets,
@@ -175,14 +182,17 @@ def validate_cell(cell, name: str = "cell") -> np.ndarray:
 
 
 class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
-    """The edges-only fixed-capacity builder over the slots of :class:`SlotLayout` (see the module docstring).
+    """The fixed-capacity builder over the slots of :class:`SlotLayout` (see the module docstring): edges only,
+    or with the line graph of a model with triplets (``line_graph_cutoff`` and ``t_capacity``, padded with far
+    self-loops: a padded pair is the two opposite loops of a row with its system's far image; or, for a model that
+    leaves them out itself (MatRIS), with sink rows after the last slot).
 
     ``cells``: ``[count, 3, 3]`` (float64 for exactness: the builder takes its float32 search cells from them
     and gives a float64 model its exact cells); ``atomic_numbers``: ``[rows]`` (a vacant row: any element of
     the model, e.g. its slot's first); ``atoms``: the atoms of each slot's system. The candidate list is a
-    batched cell list over the occupied rows with one batch index per system; the edge capacity, the overflow,
-    the skin test and the candidate refresh are the union's. :meth:`write_system` puts another system into a
-    slot in place. The batch's ``systems`` is set before the adapter's ``prepare`` sees the batch.
+    batched cell list over the occupied rows with one batch index per system; the edge (and triplet) capacity,
+    the overflow, the skin test and the candidate refresh are the union's. :meth:`write_system` puts another
+    system into a slot in place. The batch's ``systems`` is set before the adapter's ``prepare`` sees the batch.
     ``admit_cells``: ``[k, 3, 3]`` cells of systems written later; the sort keys are sized for them too.
     """
 
@@ -193,11 +203,9 @@ class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
                 raise ValueError(f"a slot union builder has no {name}")
         if kwargs.get("minimum_image"):
             raise ValueError("a slot union builder has no minimum_image")
-        if kwargs.get("line_graph_cutoff") is not None:
-            raise ValueError("a slot union builder builds the edges only")
-        padding = kwargs.get("padding")
-        if padding is None or padding.kind == "sink_atoms":
-            raise ValueError("a slot union builder pads with self-loops (far_self_loops or exact_rc_loops)")
+        if kwargs.get("padding") is None:
+            raise ValueError("a slot union builder pads by the model's rule (self-loops, or sink rows after the last "
+                             "slot for a model that leaves them out itself)")
         device = torch.device(kwargs.get("device", "cuda"))
         self.layout = layout
         count, rows = layout.count, layout.rows
@@ -247,6 +255,10 @@ class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
                                 torch.empty((rows, 3, 3), dtype=positions_dtype, device=device))
         self._loop_images = (torch.zeros((count, 3), dtype=torch.int32, device=device)
                              if self._pad_loop is not None and self.padding.kind == "far_self_loops" else None)
+        # A line graph's padded pairs also carry their loops' length (the builder's distances, which nothing here
+        # reads; a relaxation's changing cells take it, with the image, at each candidate refresh).
+        self._loop_lengths = (None if self.edges_only or self._loop_images is None
+                              else torch.zeros(count, dtype=torch.float32, device=device))
         # The occupied rows: the cell list's rows and batch indices, and the isolated-atom count.
         self.occupied = torch.zeros(rows, dtype=torch.bool, device=device)
         # No float64 single-kernel prologue (one cell): every build wraps row by row.
@@ -255,6 +267,7 @@ class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
         self._cell_list_cells = 0
         for slot in range(count):
             self._set_cell(slot, cells64[slot])
+        self._set_overflow_images()
         self._set_occupancy()
         # The pair sort's keys (``sorted`` edge order), from the thinnest cell (the base chose them by the first
         # system's): fixed from here on, since a captured graph keeps them (:meth:`check_cell`).
@@ -278,10 +291,21 @@ class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
         if self.row_model_cells is not None:
             self.row_model_cells[start:stop].copy_(self.systems.cells[slot].expand(stop - start, 3, 3))
         if self._loop_images is not None:
-            image, _, _ = self_loop_padding(self.padding, cell32, self.atom_graph_cutoff)
+            image, length, _ = self_loop_padding(self.padding, cell32, self.atom_graph_cutoff)
             self._loop_images[slot].copy_(torch.tensor(image, dtype=torch.int32))
+            if self._loop_lengths is not None:
+                self._loop_lengths[slot] = length
         if slot == 0:
             self.batch.cell.copy_(self.systems.cells[0])
+
+    def _set_overflow_images(self) -> None:
+        """A line graph's all-loop overflow substitute (the base's: pair p on row p mod rows) with the far image of
+        each loop's row's system, in place (eager, after the loop images change); nothing for edges only."""
+        if self.edges_only or self._loop_images is None:
+            return
+        system = self._row_systems.index_select(0, self._overflow_center.long()).long()
+        sign = torch.where(self.edge_ids.remainder(2) == 0, 1, -1).to(torch.int32)
+        self._overflow_images.copy_(sign[:, None] * self._loop_images.index_select(0, system))
 
     def _set_occupancy(self) -> None:
         """The occupied rows, the per-system row table and the cell list (reallocated where the cells need more
@@ -339,6 +363,7 @@ class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
         self.batch.species[start:start + ceiling].copy_(species)
         self.atoms[slot] = int(numbers.shape[0])
         self._set_cell(slot, cell64)
+        self._set_overflow_images()
         self._set_occupancy()
 
     # ------------------------------------------------------------------ candidates and builds
@@ -403,8 +428,9 @@ class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
 
     @torch.no_grad()
     def build(self, positions: Tensor, *, rebuild_candidates: bool = True, predicate=None):
-        """:meth:`FixedCapacityGraphBuilder.build` (edges only) with each row wrapped in its own system's cell,
-        the re-filter in each atom's system's cell and the isolated atoms counted over the occupied rows."""
+        """:meth:`FixedCapacityGraphBuilder.build` (edges only, or with the line graph) with each row wrapped in its
+        own system's cell, the re-filter in each atom's system's cell and the isolated atoms counted over the
+        occupied rows."""
         given = positions
         positions = positions.to(device=self.device, dtype=torch.float32)
         if positions.shape != (self.n_real, 3):
@@ -429,8 +455,15 @@ class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
         # A vacant row has no edge and is not an isolated atom (in every build: a captured graph serves the systems
         # written into its slots later).
         self._isolated_atom_count.copy_(((self.edge_counts == 0) & self.occupied).sum().to(torch.int32).reshape(1))
-        self._sort_edges()  # also sets the overflow flag
-        if self.positions.dtype == torch.float32:
+        if self.edges_only:
+            self._sort_edges()  # also sets the overflow flag
+        else:
+            self._materialize_pairs()
+            self._materialize_line_graph()  # also sets the overflow flag
+            self._substitute_overflow_topology()
+        if self.positions is None:  # a model that reads the fractional coordinates only (MatRIS)
+            pass
+        elif self.positions.dtype == torch.float32:
             self.positions[: self.n_real].copy_(wrapped)
         else:
             # The caller's positions minus the same whole lattice vectors of each row's system (no GEMM).
@@ -440,38 +473,52 @@ class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
         self.batch.edge_index[:, 0].copy_(self.center)
         self.batch.edge_index[:, 1].copy_(self.neighbor)
         self.batch.edge_image.copy_(self.images)
-        return self.graph, self.batch.status
+        if self.edges_only:
+            return self.graph, self.batch.status
+        # A line graph's status: this build's views, as the single-system builder's.
+        status = FixedCapacityGraphStatus(
+            edge_count=self.edge_offsets[-1:], undirected_count=self.edge_offsets[-1:] // 2,
+            triplet_count=self.pair_offsets[-1:], overflow=self._overflow, invalid_pairs=self._invalid_pairs,
+            candidate_valid=self._candidate_valid, max_displacement=self._max_displacement,
+            isolated_atom_count=self._isolated_atom_count, candidate_capacity_valid=self._candidate_capacity_valid)
+        self.batch.n_edges = status.edge_count
+        self.batch.status = dataclasses.replace(status, undirected_count=None)
+        return self.graph, status
 
 
 def slot_union_builder(adapter, *, layout: SlotLayout, cells, atomic_numbers: Tensor, atoms, u_capacity: int,
-                       candidate_skin: float, device) -> SlotUnionGraphBuilder:
-    """The slot union builder of ``adapter`` (edges only) at ``u_capacity`` undirected pairs: its padding rule,
-    ``prepare`` and builder options; candidates within cutoff + ``candidate_skin``."""
+                       candidate_skin: float, device, t_capacity: int = 0) -> SlotUnionGraphBuilder:
+    """The slot union builder of ``adapter`` at ``u_capacity`` undirected pairs (and ``t_capacity`` triplets for a
+    model with a line graph): its padding rule, ``prepare`` and builder options; candidates within cutoff +
+    ``candidate_skin``."""
     cutoff = float(adapter.topology_spec().cutoff)
     return SlotUnionGraphBuilder(
         layout=layout, cells=cells, atomic_numbers=atomic_numbers, atoms=atoms, u_capacity=int(u_capacity),
         atom_graph_cutoff=cutoff, candidate_cutoff=cutoff + candidate_skin, device=device,
-        padding=adapter.padding_rule(), prepare=adapter.prepare, **graph_builder_options(adapter))
+        padding=adapter.padding_rule(), prepare=adapter.prepare, **graph_builder_options(adapter, t_capacity))
 
 
 def slot_union_demand(adapter, positions: Tensor, *, layout: SlotLayout, cells, atomic_numbers: Tensor, atoms,
-                      candidate_skin: float, device) -> int:
-    """The union's undirected pair count at ``positions`` (``(rows, 3)``): one eager build with a capacity
-    estimated from the density, again with the count found if that was too small."""
+                      candidate_skin: float, device) -> tuple[int, int]:
+    """The union's undirected pair and triplet counts at ``positions`` (``(rows, 3)``; triplets 0 without a line
+    graph): one eager build with capacities estimated from the density, again with the counts found if those
+    were too small."""
     rows = int(sum(atoms))
     cutoff = float(adapter.topology_spec().cutoff)
     volume = float(np.abs(np.linalg.det(np.asarray(torch.as_tensor(cells, dtype=torch.float64).cpu()))).sum())
     guess = int(4.0 / 3.0 * math.pi * cutoff ** 3 * rows / max(volume, 1e-9) * rows / 2 * 1.5) + 1024
+    t_guess = 0 if adapter.topology_spec().triplet_cutoff is None else guess
     while True:
         builder = slot_union_builder(adapter, layout=layout, cells=cells, atomic_numbers=atomic_numbers, atoms=atoms,
-                                     u_capacity=guess, candidate_skin=candidate_skin, device=device)
+                                     u_capacity=guess, t_capacity=t_guess, candidate_skin=candidate_skin,
+                                     device=device)
         builder.refresh_candidates(positions)
         builder.build(positions, rebuild_candidates=False)
-        edges = int(builder.edge_offsets[-1].item())
+        edges, triplets = int(builder.edge_offsets[-1].item()), int(builder.pair_offsets[-1].item())
         del builder
-        if edges <= 2 * guess:
-            return -(-edges // 2)
-        guess = -(-edges // 2)
+        if edges <= 2 * guess and triplets <= t_guess:
+            return -(-edges // 2), triplets
+        guess, t_guess = max(guess, -(-edges // 2)), max(t_guess, triplets) if t_guess else 0
 
 
 def system_edge_shifts(batch, dtype: torch.dtype, cells: Tensor | None = None) -> Tensor:
@@ -492,12 +539,29 @@ def system_volumes(cells: Tensor) -> Tensor:
     return (cells[:, 0] * torch.linalg.cross(cells[:, 1], cells[:, 2], dim=1)).sum(dim=1).abs()
 
 
+def _system_energies(adapter, inputs, positions: Tensor, cell: Tensor, shifts: Tensor, systems, rows: int) -> Tensor:
+    """``(S,)`` float64: each system's energy at ``positions`` with the per-edge ``shifts``: the FP64 sum of its
+    occupied rows' energies (a per-atom tap), or its entry of a whole-system tap (``"segments"``: the model pools
+    each system over its occupied rows). A whole-system tap that does not return one energy per system raises
+    :class:`~fastmd.adapters.protocol.NegotiationError`."""
+    if isinstance(adapter, EnergyTap):
+        node = adapter.node_energy(inputs, positions, cell, edge_shifts=shifts)
+        return segment_sums(node[:rows], systems.row_ptr[1:] - systems.row_ptr[:-1], systems.atoms)
+    energies = adapter.system_energy(inputs, positions, cell, edge_shifts=shifts).to(torch.float64).reshape(-1)
+    if energies.shape[0] != systems.count:
+        name = getattr(adapter, "name", type(adapter).__name__)
+        raise NegotiationError(f"model {name!r}: its whole-system energy tap returned {energies.shape[0]} value(s) "
+                               f"for a batch of {systems.count} systems ('segments': one energy per system)")
+    return energies
+
+
 def system_energy_derivative(adapter, batch, inputs, *, cell: Tensor | None = None, stress: bool = False):
     """``(energies (S,) float64, forces (rows, 3))`` of the systems of a slot union: each system's energy is the
     FP64 sum of its occupied rows' energies (``adapter.node_energy`` with the engine's per-edge shifts,
-    :func:`system_edge_shifts`; :func:`segment_sums` over ``batch.systems``); one backward pass of their sum
-    gives every system's forces (no term couples two systems; a vacant row's force is 0). ``cell``: the model's
-    ``cell`` argument in place of the batch's (a check that the model reads the shifts, not the cell).
+    :func:`system_edge_shifts`; :func:`segment_sums` over ``batch.systems``), or for a whole-system tap
+    (``"segments"``) its entry of ``adapter.system_energy`` with the same shifts in FP64; one backward pass of
+    their sum gives every system's forces (no term couples two systems; a vacant row's force is 0). ``cell``: the
+    model's ``cell`` argument in place of the batch's (a check that the model reads the shifts, not the cell).
 
     ``stress``: also each system's stress, ``(energies, forces, stresses (S, 3, 3))`` in eV/Å³ in the dtype of
     the positions: a zero strain leaf per system deforms the rows of its system by its symmetric part,
@@ -509,12 +573,30 @@ def system_energy_derivative(adapter, batch, inputs, *, cell: Tensor | None = No
     (in the model's dtype the scattered sums of one system's many cancelling terms would round by more than the
     single-system path's reduction)."""
     rows, systems = batch.species.shape[0], batch.systems
+    if isinstance(adapter, ModelOwnedDerivative):
+        # A model that differentiates its own energy (MatRIS) evaluates the union itself, each system in its own
+        # cell (``systems.cells``; the ``cell`` argument is not its input): one energy per system, the forces and,
+        # with ``stress``, each system's stress (the model's unit, converted to eV/Å³).
+        rows = systems.system_of_row.shape[0]
+        with torch.enable_grad():  # its forces are autograd's (callers may run under no_grad, e.g. a drain's capture)
+            out = adapter.evaluate([inputs], task="efs" if stress else "ef", is_training=False, n_real=rows)
+        energies = out["e"].reshape(-1)
+        if energies.shape[0] != systems.count:
+            raise NegotiationError(f"model {adapter.name!r}: its evaluate returned {energies.shape[0]} energies for a "
+                                   f"batch of {systems.count} systems; a batch of several systems takes one energy "
+                                   "per system (GraphBatch.systems, 'union')")
+        energies = adapter.extensive_energy(energies, systems.atoms).to(torch.float64).detach()
+        forces = (out["f"][0] if isinstance(out["f"], (list, tuple)) else out["f"])[:rows].detach()
+        if not stress:
+            return energies, forces
+        stresses = torch.stack(list(out["s"])).detach()
+        stresses = stresses * stress_unit_scale(adapter)
+        return energies, forces, stresses.to(forces.dtype)
     with torch.enable_grad():
         leaf = batch.positions.detach().requires_grad_(True)
         if not stress:
-            node = adapter.node_energy(inputs, leaf, batch.cell if cell is None else cell,
-                                       edge_shifts=system_edge_shifts(batch, leaf.dtype))
-            energies = segment_sums(node[:rows], systems.row_ptr[1:] - systems.row_ptr[:-1], systems.atoms)
+            energies = _system_energies(adapter, inputs, leaf, batch.cell if cell is None else cell,
+                                        system_edge_shifts(batch, leaf.dtype), systems, rows)
             (grad,) = torch.autograd.grad(energies.sum(), (leaf,))
             return energies.detach(), -grad[:rows]
         strain = torch.zeros((systems.count, 3, 3), dtype=torch.float64, device=leaf.device, requires_grad=True)
@@ -526,9 +608,8 @@ def system_energy_derivative(adapter, batch, inputs, *, cell: Tensor | None = No
         cells = systems.cells.to(torch.float64)
         strained = cells + (cells[:, :, 0:1] * symmetric[:, 0:1] + cells[:, :, 1:2] * symmetric[:, 1:2]
                             + cells[:, :, 2:3] * symmetric[:, 2:3])
-        node = adapter.node_energy(inputs, positions, batch.cell if cell is None else cell,
-                                   edge_shifts=system_edge_shifts(batch, leaf.dtype, cells=strained))
-        energies = segment_sums(node[:rows], systems.row_ptr[1:] - systems.row_ptr[:-1], systems.atoms)
+        energies = _system_energies(adapter, inputs, positions, batch.cell if cell is None else cell,
+                                    system_edge_shifts(batch, leaf.dtype, cells=strained), systems, rows)
         grad, strain_grad = torch.autograd.grad(energies.sum(), (leaf, strain))
     volumes = system_volumes(systems.cells.detach()).to(torch.float64)
     return energies.detach(), -grad[:rows], (strain_grad / volumes[:, None, None]).to(leaf.dtype)
@@ -875,15 +956,17 @@ class SlotWholeStepRunner(ReplicaWholeStepRunner):
 
 
 def systems_self_check(adapter, systems, *, candidate_skin: float, device, repeats: int = 3, rattle: float = 0.1,
-                       tol_multiplier: float = 3.0, absolute_floor: float = 1e-5, energy_floor: float = 1e-6) -> dict:
+                       tol_multiplier: float = 3.0, absolute_floor: float = 1e-5, energy_floor: float = 1e-6,
+                       vacant: int = 4) -> dict:
     """:func:`~fastmd.execution.replica_batch.union_self_check` for two different systems with cells of their
     own (``systems``: two ``(positions (n, 3), cell (3, 3), atomic_numbers (n,))``): both rattled by up to
-    ``rattle`` Å, evaluated ``repeats`` times as one slot union (per-edge shifts) and ``repeats`` times each alone
-    (the single-system path: a fixed-capacity build without systems and the engine-owned derivative). The same
-    statistics and tolerances; and once more as the union with twice the cell as the model's ``cell`` argument,
-    which a model that takes its edge vectors from the shifts does not read (``failed`` "cell" otherwise, within
-    the same force tolerance)."""
-    from fastmd.execution.replica_batch import _rattled, union_capacity, union_demand
+    ``rattle`` Å, evaluated ``repeats`` times as one slot union (per-edge shifts; each slot with ``vacant`` vacant
+    rows after its system, which a model that pools per system must leave out) and ``repeats`` times each alone
+    (the single-system path: a fixed-capacity build without systems and the engine-owned derivative; with the line
+    graph of a model with triplets). The same statistics and tolerances; and once more as the union with twice the
+    cell as the model's ``cell`` argument, which a model that takes its edge vectors from the shifts does not read
+    (``failed`` "cell" otherwise, within the same force tolerance)."""
+    from .replica_batch import _rattled, union_capacity, union_demand, union_triplet_capacity
 
     prepared = []
     for seed, (positions, cell, numbers) in enumerate(systems, start=1):
@@ -892,18 +975,22 @@ def systems_self_check(adapter, systems, *, candidate_skin: float, device, repea
         prepared.append((_rattled(base, rattle, seed), cell, torch.as_tensor(numbers, dtype=torch.int32,
                                                                              device=device).reshape(-1)))
     atoms = [int(p.shape[0]) for p, _, _ in prepared]
-    layout = SlotLayout(tuple(atoms))
+    layout = SlotLayout(tuple(n + int(vacant) for n in atoms))
     cutoff = float(adapter.topology_spec().cutoff)
+    line_graph = adapter.topology_spec().triplet_cutoff is not None
     pbc = torch.ones(3, dtype=torch.bool, device=device)
 
     def union(wrong_cell: bool = False) -> tuple[Tensor, list]:
-        positions = torch.cat([p for p, _, _ in prepared])
+        # A vacant row: at the origin, its slot's first element.
+        positions = torch.cat([torch.cat((p, p.new_zeros((int(vacant), 3)))) for p, _, _ in prepared])
         cells = torch.stack([c for _, c, _ in prepared])
-        numbers = torch.cat([z for _, _, z in prepared])
-        pairs = slot_union_demand(adapter, positions, layout=layout, cells=cells, atomic_numbers=numbers, atoms=atoms,
-                                  candidate_skin=candidate_skin, device=device)
+        numbers = torch.cat([torch.cat((z, z[:1].expand(int(vacant)))) for _, _, z in prepared])
+        pairs, triplets = slot_union_demand(adapter, positions, layout=layout, cells=cells, atomic_numbers=numbers,
+                                            atoms=atoms, candidate_skin=candidate_skin, device=device)
         builder = slot_union_builder(adapter, layout=layout, cells=cells, atomic_numbers=numbers, atoms=atoms,
-                                     u_capacity=union_capacity(pairs), candidate_skin=candidate_skin, device=device)
+                                     u_capacity=union_capacity(pairs, line_graph=line_graph),
+                                     t_capacity=union_triplet_capacity(triplets, replicas=2) if line_graph else 0,
+                                     candidate_skin=candidate_skin, device=device)
         builder.refresh_candidates(positions)
         graph, _ = builder.build(positions, rebuild_candidates=False)
         energies, forces = system_energy_derivative(adapter, builder.batch, graph,
@@ -913,15 +1000,21 @@ def systems_self_check(adapter, systems, *, candidate_skin: float, device, repea
 
     def alone(index: int) -> tuple[Tensor, Tensor]:
         positions, cell, numbers = prepared[index]
-        pairs, _ = union_demand(adapter, positions, replicas=1, cell=cell, atomic_numbers=numbers, pbc=pbc,
-                                candidate_skin=candidate_skin, device=device)
+        pairs, triplets = union_demand(adapter, positions, replicas=1, cell=cell, atomic_numbers=numbers, pbc=pbc,
+                                       candidate_skin=candidate_skin, device=device)
         builder = FixedCapacityGraphBuilder(
-            cell=cell, atomic_numbers=numbers, pbc=pbc, u_capacity=union_capacity(pairs), atom_graph_cutoff=cutoff,
-            candidate_cutoff=cutoff + candidate_skin, device=device, padding=adapter.padding_rule(),
-            prepare=adapter.prepare, **graph_builder_options(adapter))
+            cell=cell, atomic_numbers=numbers, pbc=pbc, u_capacity=union_capacity(pairs, line_graph=line_graph),
+            atom_graph_cutoff=cutoff, candidate_cutoff=cutoff + candidate_skin, device=device,
+            padding=adapter.padding_rule(), prepare=adapter.prepare,
+            **graph_builder_options(adapter, union_triplet_capacity(triplets) if line_graph else 0))
         builder.refresh_candidates(positions)
         graph, _ = builder.build(positions, rebuild_candidates=False)
         n = int(positions.shape[0])
+        if isinstance(adapter, ModelOwnedDerivative):  # the model's own single-system call
+            with torch.enable_grad():
+                out = adapter.evaluate([graph], task="ef", is_training=False, n_real=n)
+            return (adapter.extensive_energy(out["e"].reshape(1), n).to(torch.float64).detach().cpu(),
+                    out["f"][0][:n].detach().to(torch.float64).cpu())
         out = engine_derivative(adapter)(builder.batch, graph, task="ef", n_real=n)
         return out["e"].cpu(), out["f"][0][:n].detach().to(torch.float64).cpu()
 
@@ -958,26 +1051,30 @@ def systems_self_check(adapter, systems, *, candidate_skin: float, device, repea
             "energy_tolerance_per_atom": energy_tolerance, "energy_single_floor": energy_single,
             "energy_union_floor": energy_union, "energy_resolution_per_atom": resolution,
             "cell_argument_force_difference": cell_forces, "cell_argument_energy_difference_per_atom": cell_energies,
-            "systems": 2, "atoms": atoms, "repeats": int(repeats),
+            "systems": 2, "atoms": atoms, "vacant_rows": int(vacant), "repeats": int(repeats),
             "rattle": float(rattle), "evaluated": "two of its systems"}
 
 
 def slot_union_memory_runs(adapter, systems, *, candidate_skin: float, device, step=None,
-                           headroom: float = UNION_GROWTH_HEADROOM, ceilings=None):
-    """``({kind: run(k)}, pairs)`` for ``MeasuredMemoryModel.measure`` on sub-unions of ``systems`` (one
+                           headroom: float = UNION_GROWTH_HEADROOM, ceilings=None,
+                           triplet_headroom: float = UNION_TRIPLET_GROWTH_HEADROOM):
+    """``({kind: run(capacity)}, demand)`` for ``MeasuredMemoryModel.measure`` on sub-unions of ``systems`` (one
     ``(positions (n, 3), cell (3, 3), atomic_numbers (n,))`` each, in slot order): ``run(k)`` evaluates the slot
     union of the first ``k`` systems (each slot at its ceiling of ``ceilings``, default its atom count, vacant rows
     included) at the capacity one growth would give it
-    (:func:`~fastmd.execution.replica_batch.union_capacity` with ``headroom``), eager ("eager") or captured in a
-    CUDA graph after a warmup on the capture stream ("capture"), and returns the (edges, 0) capacity it held;
-    ``pairs(k)`` is that union's pair demand. Atoms and edges grow together over the sub-unions, so a fit over
-    edges holds the per-atom costs too. Each run makes its own builder; a captured graph is released before
-    the run returns."""
-    from fastmd.engine._graph_capture import capture_graph
-    from fastmd.execution.replica_batch import union_capacity
+    (:func:`~fastmd.execution.replica_batch.union_capacity` with ``headroom``; for a line graph also
+    :func:`~fastmd.execution.replica_batch.union_triplet_capacity` with ``triplet_headroom``, or the triplet
+    capacity of a ``(k, triplets)`` run), eager ("eager") or captured in a CUDA graph after a warmup on the
+    capture stream ("capture"), and returns the (edges, triplets) capacity it held (triplets 0 without a line
+    graph); ``demand(k)`` is that union's (pair, triplet) demand. Atoms and edges grow together over the
+    sub-unions, so a fit over edges holds the per-atom costs too. Each run makes its own builder; a captured graph
+    is released before the run returns."""
+    from ..engine._graph_capture import capture_graph
+    from .replica_batch import union_capacity, union_triplet_capacity
 
     stream = torch.cuda.Stream(device)
-    demands: dict[int, int] = {}
+    demands: dict[int, tuple[int, int]] = {}
+    line_graph = adapter.topology_spec().triplet_cutoff is not None
 
     sizes = [int(np.asarray(numbers).shape[0]) for _, _, numbers in systems]
     ceilings = sizes if ceilings is None else [int(c) for c in ceilings]
@@ -996,18 +1093,23 @@ def slot_union_memory_runs(adapter, systems, *, candidate_skin: float, device, s
         return (layout, atoms, torch.as_tensor(positions, dtype=torch.float32, device=device), cells,
                 torch.as_tensor(numbers, device=device))
 
-    def pairs(k: int) -> int:
+    def demand(k: int) -> tuple[int, int]:
         if k not in demands:
             layout, atoms, positions, cells, numbers = tables(k)
             demands[k] = slot_union_demand(adapter, positions, layout=layout, cells=cells, atomic_numbers=numbers,
                                            atoms=atoms, candidate_skin=candidate_skin, device=device)
         return demands[k]
 
-    def evaluator(k: int):
+    def evaluator(capacity):
+        k, t_capacity = capacity if isinstance(capacity, tuple) else (capacity, None)
         layout, atoms, positions, cells, numbers = tables(k)
+        pairs, triplets = demand(k)
+        if line_graph and t_capacity is None:
+            t_capacity = union_triplet_capacity(triplets, step, headroom=triplet_headroom, replicas=k)
         builder = slot_union_builder(adapter, layout=layout, cells=cells, atomic_numbers=numbers, atoms=atoms,
-                                     u_capacity=union_capacity(pairs(k), step, headroom=headroom),
-                                     candidate_skin=candidate_skin, device=device)
+                                     u_capacity=union_capacity(pairs, step, headroom=headroom, line_graph=line_graph),
+                                     t_capacity=t_capacity if line_graph else 0, candidate_skin=candidate_skin,
+                                     device=device)
         builder.refresh_candidates(positions)
 
         def evaluate() -> None:
@@ -1016,13 +1118,13 @@ def slot_union_memory_runs(adapter, systems, *, candidate_skin: float, device, s
 
         return builder, evaluate
 
-    def eager(k: int) -> tuple[int, int]:
-        builder, evaluate = evaluator(k)
+    def eager(capacity) -> tuple[int, int]:
+        builder, evaluate = evaluator(capacity)
         evaluate()
-        return builder.e_capacity, 0
+        return builder.e_capacity, builder.t_capacity
 
-    def capture(k: int) -> tuple[int, int]:
-        builder, evaluate = evaluator(k)
+    def capture(capacity) -> tuple[int, int]:
+        builder, evaluate = evaluator(capacity)
         stream.wait_stream(torch.cuda.current_stream(device))
         with torch.cuda.stream(stream):
             evaluate()
@@ -1034,9 +1136,38 @@ def slot_union_memory_runs(adapter, systems, *, candidate_skin: float, device, s
         with capture_graph(graph, stream=stream):
             evaluate()
         del graph  # every point starts from the same state
-        return builder.e_capacity, 0
+        return builder.e_capacity, builder.t_capacity
 
-    return {"eager": eager, "capture": capture}, pairs
+    return {"eager": eager, "capture": capture}, demand
+
+
+def slot_union_probe_capacities(systems: int, rows: int, probe_edges, probe_triplets, union_edges,
+                                union_triplets, slots=(1,)) -> list:
+    """The (systems, triplet capacity) points the memory of a line-graph slot union of ``systems`` systems and
+    ``rows`` rows is measured at (the runs of :func:`slot_union_memory_runs`, on sub-unions of its first systems:
+    ``probe_edges(k)`` and ``probe_triplets(k)`` are those of the first ``k``): the replicas' four probes
+    (:func:`~fastmd.execution.replica_batch.union_probe_capacities`), with the middle one's two triplet
+    capacities bracketing the triplet/edge ratios of every union the sizing may choose (``union_edges(r)`` and
+    ``union_triplets(r)`` at ``rows`` halved down to the smallest of the ``slots``' rows, and at the largest slot,
+    which runs alone in a smaller union's partition: its first systems can mix otherwise than the whole union) and
+    the largest one holding at least half the triplets of the whole union (the fit predicts up to twice the
+    measured triplets)."""
+    from .replica_batch import union_probe_sizes
+
+    sizes = union_probe_sizes(systems)
+    small, middle, large = sizes[0], sizes[len(sizes) // 2], sizes[-1]
+    smallest = max(1, min(int(rows), min(int(c) for c in slots)))
+    chosen, size = {int(rows), max(int(c) for c in slots)}, int(rows)
+    while size // 2 >= smallest:
+        size //= 2
+        chosen.add(size)
+    ratios = ([union_triplets(size) / union_edges(size) for size in sorted(chosen)]
+              + [probe_triplets(k) / probe_edges(k) for k in sizes])
+    edges, triplets = probe_edges(middle), probe_triplets(middle)
+    low = min(triplets, int(min(ratios) * edges))
+    high = max(triplets + max(triplets, edges // 8), math.ceil(max(ratios) * edges))
+    top = max(probe_triplets(large), math.ceil(union_triplets(int(rows)) / 2))
+    return [(small, probe_triplets(small)), (middle, max(1, low)), (middle, high), (large, top)]
 
 
 def slot_union_persistent_bytes(builder: SlotUnionGraphBuilder) -> int:

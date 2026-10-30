@@ -98,7 +98,7 @@ class _UnionMolecularDynamics:
         with self._config.scope():
             for _ in range(steps // self.steps_per_launch):
                 unhealthy = []
-                for union in self._unions:  # every union runs the window, so that they stay at one step
+                for union in list(self._unions):  # every union runs the window, so that they stay at one step
                     try:
                         self._window(union)
                     except ReplicaHealthError as error:
@@ -114,7 +114,7 @@ class _UnionMolecularDynamics:
 
     def _window(self, union: _Union) -> None:
         """One window of ``union``: an overflow rolls it back, grows the capacity, captures the union again and
-        runs the window again."""
+        runs the window again (a union split by a growth out of memory: its parts run it)."""
         while True:
             counts = None
             try:
@@ -127,13 +127,33 @@ class _UnionMolecularDynamics:
                 return
             # The window was rolled back to its start: grow and capture again, outside the except block (its
             # traceback would keep the old runner's graph alive).
-            self._grow(union, *counts)
+            parts = self._grow(union, *counts)
+            if parts is not None:  # every part runs the window; a health error names the members in union's order
+                unhealthy, window = [], 0
+                for part in parts:
+                    try:
+                        self._window(part)
+                    except ReplicaHealthError as error:
+                        unhealthy += [part.start - union.start + member for member in error.replicas]
+                        window = error.window
+                if unhealthy:
+                    raise ReplicaHealthError(unhealthy, window, member=self._members[:-1])
+                return
 
-    def _grow(self, union: _Union, edges: int, triplets: int = 0) -> None:
+    def _split(self, union: _Union, positions, momenta, forces, why: str):
+        """The unions that take ``union``'s members after its growth ran out of CUDA memory (``why``; the state of
+        its window's start: the runner's ``positions``, ``momenta`` and ``forces`` and its integrator's), captured
+        and in its place in ``_unions``; None: not split (replicas; the entry points of different systems split)."""
+        return None
+
+
+    def _grow(self, union: _Union, edges: int, triplets: int = 0):
         """Capture ``union`` again with the capacity that overflowed grown over ``edges`` or ``triplets`` (its
-        window rolled back): the triplets' where they outgrew theirs (a line graph), else the pairs'. A failed
-        capture (e.g. out of memory) leaves the union captured at its previous capacities, its state kept, and
-        raises."""
+        window rolled back): the triplets' where they outgrew theirs (a line graph), else the pairs'. A capture
+        that runs out of CUDA memory splits the union where the entry point can (``_split``: its parts, which
+        are returned, else None). Otherwise (another failure, a union the entry point cannot split, or a split
+        that failed: its ``NegotiationError`` is raised) the union is captured again at its previous capacities,
+        its state kept, and raises; where that capture runs out of CUDA memory too: ``NegotiationError``."""
         old = union.runner
         previous = union.u_capacity, union.t_capacity
         triplets_over = self._line_graph and int(triplets) > union.t_capacity
@@ -158,12 +178,31 @@ class _UnionMolecularDynamics:
             failure = error.with_traceback(None)  # no frame of the failed capture stays referenced
         else:
             union.recaptures += 1
-            return
+            return None
         grown = union.u_capacity, union.t_capacity
         union.u_capacity, union.t_capacity = previous
         gc.collect()
         torch.cuda.empty_cache()
-        self._capture(union, positions, momenta, forces=forces)
+        if isinstance(failure, torch.OutOfMemoryError):
+            try:
+                parts = self._split(union, positions, momenta, forces, (
+                    f"growing its capacity ran out of CUDA memory ({str(failure).splitlines()[0][:160]})"))
+            except Exception as error:  # noqa: BLE001 - raised again below, after the previous capacity is back
+                failure = error.with_traceback(None)
+            else:
+                if parts is not None:
+                    return parts
+            gc.collect()
+            torch.cuda.empty_cache()
+        try:
+            self._capture(union, positions, momenta, forces=forces)
+        except torch.OutOfMemoryError as error:
+            raise NegotiationError(f"{self._members} [{union.start}, {union.stop}): a capacity growth ran out of CUDA "
+                                   f"memory, and so did the capture at the previous capacity "
+                                   f"({str(error).splitlines()[0][:160]}): the batch cannot run on "
+                                   f"({type(failure).__name__}: {str(failure)[:400]})") from failure
+        if isinstance(failure, NegotiationError):
+            raise failure
         what, old, new, held = (("(pair, triplet) capacity", previous, grown, previous) if self._line_graph
                                 else ("pair capacity", previous[0], grown[0], f"{previous[0]} pairs"))
         raise RuntimeError(f"{self._members} [{union.start}, {union.stop}): growing the {what} from {old} to {new} "

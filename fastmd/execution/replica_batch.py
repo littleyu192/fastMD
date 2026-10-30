@@ -32,8 +32,10 @@ refresh unchanged:
   model keeps the systems apart itself (``"segments"``: it pools over each
   system of ``GraphBatch.systems``), which a model declares
   (:class:`~fastmd.adapters.protocol.SystemBatching`) and
-  :func:`union_self_check` tests. Each window also leaves a health flag per
-  replica, read with the window's other flags.
+  :func:`union_self_check` tests. A model that differentiates its own energy
+  (MatRIS, ``"union"``) evaluates the union itself: its ``evaluate`` of the
+  union's batch returns one energy per replica, and its forces. Each window
+  also leaves a health flag per replica, read with the window's other flags.
 
 The union's first capture holds the model's own capacity tiers; a growth adds a
 relative headroom over the overflowing demand (:func:`union_capacity`), so a
@@ -54,22 +56,22 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from fastmd.adapters import as_adapter
-from fastmd.adapters.protocol import EnergyTap, NegotiationError, SystemEnergyTap, SystemSegments
-from fastmd.engine.energy_derivative import edges_only_builder_options, engine_derivative
-from fastmd.engine._graph_capture import capture_graph
-from fastmd.graph.fixed_capacity_builder import FixedCapacityGraphBuilder
-from fastmd.execution.gpu_integrator import GPUIntegrator, StatefulIntegrator
-from fastmd.execution.gpu_nhc import _HAS_TRITON, _TRITON_MAX_ELEMS, _TargetTemperature
-from fastmd.execution.whole_step_cuda_graph import WholeStepGraphRunner
-from fastmd.engine.entry_config import scoped_call
+from ..adapters import as_adapter
+from ..adapters.protocol import EnergyTap, ModelOwnedDerivative, NegotiationError, SystemEnergyTap, SystemSegments
+from ..engine.energy_derivative import edges_only_builder_options, engine_derivative, geometry_dtype
+from ..engine._graph_capture import capture_graph
+from ..graph.fixed_capacity_builder import FixedCapacityGraphBuilder
+from .gpu_integrator import GPUIntegrator, StatefulIntegrator
+from .gpu_nhc import _HAS_TRITON, _TRITON_MAX_ELEMS, _TargetTemperature
+from .whole_step_cuda_graph import WholeStepGraphRunner
+from ..engine.entry_config import scoped_call
 
 if _HAS_TRITON:
     import triton
     import triton.language as tl
 
-    from fastmd.graph.fixed_capacity_builder import allocate_cell_list, estimate_batch_cell_list_sizes
-    from fastmd.execution.gpu_nhc import _nhc_post_force_kernel, _nhc_pre_force_kernel
+    from ..graph.fixed_capacity_builder import allocate_cell_list, estimate_batch_cell_list_sizes
+    from .gpu_nhc import _nhc_post_force_kernel, _nhc_pre_force_kernel
 
     @triton.jit
     def _nhc_pre_force_replicas_kernel(q_ptr, p_ptr, f_ptr, m_ptr, eta_ptr, pe_ptr, c_ptr, n_elem, stride,
@@ -125,7 +127,8 @@ UNION_PROBE_FRACTIONS = (0.25, 0.5, 0.75)
 
 class ReplicaUnionGraphBuilder(FixedCapacityGraphBuilder):
     """The fixed-capacity builder over ``replicas`` copies of one system (atoms and cell): edges only, or with
-    the line graph of a model with triplets (padded with far self-loops).
+    the line graph of a model with triplets (padded with far self-loops, or with sink atoms past the last
+    replica's rows for a model that leaves them out itself: MatRIS, by ``n_real``).
 
     Rows ``[s * n, (s + 1) * n)`` are replica ``s``. The candidate list is a
     batched cell list with one batch index per replica, so the exact
@@ -146,10 +149,9 @@ class ReplicaUnionGraphBuilder(FixedCapacityGraphBuilder):
                 raise ValueError(f"a replica union builder has no {name}")
         if kwargs.get("minimum_image"):
             raise ValueError("a replica union builder has no minimum_image")
-        padding = kwargs.get("padding")
-        if padding is None or padding.kind == "sink_atoms":
-            raise ValueError("a replica union builder pads with self-loops (far_self_loops or exact_rc_loops): sink "
-                             "rows would sit after the last replica's rows")
+        if kwargs.get("padding") is None:
+            raise ValueError("a replica union builder pads by the model's rule (self-loops, or sink rows after the "
+                             "last replica's rows for a model that leaves them out itself)")
         self.replicas = int(replicas)
         numbers = atomic_numbers.reshape(-1)
         self.replica_atoms = int(numbers.shape[0])
@@ -182,23 +184,27 @@ class ReplicaUnionGraphBuilder(FixedCapacityGraphBuilder):
 def graph_builder_options(adapter, t_capacity: int = 0) -> dict:
     """The fixed-capacity builder options of ``adapter``'s graph beyond its capacities and cutoffs: edges only
     (its edges-only options), or the line graph of a model with triplets at ``t_capacity`` triplets, with the
-    positions (the engine's leaf) published, in float64 for a float64 model."""
+    positions (the engine's leaf) published, in float64 for a float64 model (none for a model that
+    differentiates its own energy: MatRIS reads the fractional coordinates)."""
     topology = adapter.topology_spec()
     if topology.triplet_cutoff is None:
         return dict(t_capacity=0, line_graph_cutoff=None, **edges_only_builder_options(adapter))
+    if engine_derivative(adapter) is None:
+        return dict(t_capacity=int(t_capacity), line_graph_cutoff=float(topology.triplet_cutoff))
     return dict(t_capacity=int(t_capacity), line_graph_cutoff=float(topology.triplet_cutoff), publish_positions=True,
-                **({"positions_dtype": torch.float64} if topology.model_dtype == "float64" else {}))
+                **({"positions_dtype": torch.float64} if geometry_dtype(adapter) == torch.float64 else {}))
 
 
 def union_builder(adapter, *, replicas: int, cell: Tensor, atomic_numbers: Tensor, pbc: Tensor, u_capacity: int,
-                  candidate_skin: float, device, t_capacity: int = 0) -> ReplicaUnionGraphBuilder:
+                  candidate_skin: float, device, t_capacity: int = 0, n_dummy: int = 64) -> ReplicaUnionGraphBuilder:
     """The union builder of ``replicas`` copies for ``adapter`` at ``u_capacity`` undirected pairs (and
-    ``t_capacity`` triplets for a model with a line graph): its padding rule, ``prepare`` and builder options
-    (:func:`graph_builder_options`); candidates within cutoff + ``candidate_skin``."""
+    ``t_capacity`` triplets for a model with a line graph): its padding rule (``n_dummy`` sink rows where it pads
+    with sink atoms), ``prepare`` and builder options (:func:`graph_builder_options`); candidates within cutoff +
+    ``candidate_skin``."""
     cutoff = float(adapter.topology_spec().cutoff)
     return ReplicaUnionGraphBuilder(
         replicas=replicas, cell=cell, atomic_numbers=atomic_numbers, pbc=pbc, u_capacity=int(u_capacity),
-        atom_graph_cutoff=cutoff, candidate_cutoff=cutoff + candidate_skin, device=device,
+        atom_graph_cutoff=cutoff, candidate_cutoff=cutoff + candidate_skin, device=device, n_dummy=int(n_dummy),
         padding=adapter.padding_rule(), prepare=adapter.prepare, **graph_builder_options(adapter, t_capacity))
 
 
@@ -552,9 +558,23 @@ def replica_energy_derivative(adapter, batch, inputs, *, replicas: int, replica_
     energy is the FP64 sum of its rows' energies (``adapter.node_energy``), or, for a whole-system tap over the
     batch's systems (``"segments"``), its entry of ``adapter.system_energy`` in FP64; one backward pass of their
     sum gives every replica's forces (no term couples two replicas). The engine-owned derivative of
-    :class:`~fastmd.engine.energy_derivative.EnergyDerivative`, one energy per replica. A whole-system tap that
-    does not return one energy per replica raises :class:`~fastmd.adapters.protocol.NegotiationError`."""
+    :class:`~fastmd.engine.energy_derivative.EnergyDerivative`, one energy per replica. A model that
+    differentiates its own energy (MatRIS) evaluates the union's batch itself (``adapter.evaluate``, task "ef",
+    its sink rows left out by ``n_real``): one energy per replica (``extensive_energy`` of what it returns, in
+    FP64) and its forces. A tap or ``evaluate`` that does not return one energy per replica raises
+    :class:`~fastmd.adapters.protocol.NegotiationError`."""
     rows = replicas * replica_atoms
+    if isinstance(adapter, ModelOwnedDerivative):
+        with torch.enable_grad():  # its forces are autograd's (as the engine's derivative, also under no_grad)
+            out = adapter.evaluate([inputs], task="ef", is_training=False, n_real=rows)
+        energies = out["e"].reshape(-1)
+        if energies.shape[0] != replicas:
+            raise NegotiationError(f"model {adapter.name!r}: its evaluate returned {energies.shape[0]} energies for a "
+                                   f"batch of {replicas} systems; a batch of several systems takes one energy per "
+                                   "system (GraphBatch.systems, 'union')")
+        forces = out["f"][0] if isinstance(out["f"], (list, tuple)) else out["f"]
+        return (adapter.extensive_energy(energies, replica_atoms).to(torch.float64).detach(),
+                forces[:rows].detach())
     with torch.enable_grad():
         leaf = batch.positions.detach().requires_grad_(True)
         if isinstance(adapter, EnergyTap):
@@ -588,8 +608,9 @@ class ReplicaWholeStepRunner(WholeStepGraphRunner):
     """:class:`WholeStepGraphRunner` over a :class:`ReplicaUnionGraphBuilder` with a replica integrator
     (:class:`ReplicaNoseHooverChainNVT` or :class:`ReplicaVelocityVerlet`): the same windows, rollback,
     fallback and candidate refresh, with one FP64 potential energy per replica (``potential_energy``,
-    ``(N,)``). Models the engine differentiates only (an energy tap per atom, or of each system over the
-    batch's systems); no stress record.
+    ``(N,)``). Models the engine differentiates (an energy tap per atom, or of each system over the batch's
+    systems), and models that differentiate their own energy and evaluate the union's batch one energy per
+    system (MatRIS: :func:`replica_energy_derivative`); no stress record.
 
     Each window's last step also writes one health flag per replica (1 where its positions, momenta or
     energy are not finite), read with the window's flags in one copy; :meth:`settle` raises
@@ -601,7 +622,8 @@ class ReplicaWholeStepRunner(WholeStepGraphRunner):
         if kwargs.get("record_stress") or kwargs.get("step_targets") is not None:
             raise ValueError("ReplicaWholeStepRunner records no stress and takes no per-step targets")
         adapter = as_adapter(kwargs["model"])
-        if not isinstance(adapter, (EnergyTap, SystemEnergyTap)) or engine_derivative(adapter) is None:
+        owned = isinstance(adapter, ModelOwnedDerivative)  # its evaluate of the union (MatRIS)
+        if not owned and (not isinstance(adapter, (EnergyTap, SystemEnergyTap)) or engine_derivative(adapter) is None):
             raise ValueError(f"ReplicaWholeStepRunner differentiates an energy tap (per atom, or one energy per "
                              f"system); model {adapter.name!r} has none")
         self.replicas = replicas
@@ -634,7 +656,8 @@ class ReplicaWholeStepRunner(WholeStepGraphRunner):
         self._replica_energy = torch.zeros(self.replicas, dtype=torch.float64, device=value.device)
 
     # The window's flags (overflow, edges, triplets, largest displacement) are the first four entries of one
-    # buffer whose other entries are the replicas' health flags: one copy reads both.
+    # buffer whose other entries are the replicas' health flags: one copy reads both. Every replica runner keeps
+    # it, a model-owned derivative's too (whose single-system runner reads its flags one by one).
     @property
     def _window_stats(self) -> Tensor | None:
         return None if self._window_record is None else self._window_record[:4]
@@ -643,8 +666,7 @@ class ReplicaWholeStepRunner(WholeStepGraphRunner):
     def _window_stats(self, value: Tensor | None) -> None:
         if self._window_record is not None:
             raise AttributeError("the window record is a persistent buffer: copy_ into it")
-        if value is not None:
-            self._window_record = torch.zeros(4 + self.replicas, dtype=torch.float64, device=value.device)
+        self._window_record = torch.zeros(4 + self.replicas, dtype=torch.float64, device=self.device)
 
     def _flag_sources(self) -> list[Tensor]:
         return [self._window_record]
@@ -731,7 +753,7 @@ def union_self_check(adapter, *, positions: Tensor, cell: Tensor, atomic_numbers
     of the system (``positions``, ``(n, 3)``) rattled differently by up to ``rattle`` Å, evaluated
     ``repeats`` times as a union of the two and ``repeats`` times each alone (fixed-capacity builds, with the
     line graph of a model with triplets, eager; alone, the single-system path: a batch without systems and the
-    engine-owned derivative).
+    engine-owned derivative, or the model's own call).
     The largest force difference between a union and a single evaluation of the same copy (``cross``) passes
     within ``tol_multiplier`` times the larger of the two paths' own run-to-run differences, and at least
     ``absolute_floor`` eV/Å (a deterministic model has a floor of 0; the caller passes one for its dtype).
@@ -769,6 +791,11 @@ def union_self_check(adapter, *, positions: Tensor, cell: Tensor, atomic_numbers
         if replicas > 1:
             energies, forces = replica_energy_derivative(adapter, builder.batch, graph, replicas=replicas,
                                                          replica_atoms=n)
+        elif isinstance(adapter, ModelOwnedDerivative):  # the model's own single-system call
+            with torch.enable_grad():
+                out = adapter.evaluate([graph], task="ef", is_training=False, n_real=n)
+            energies = adapter.extensive_energy(out["e"].reshape(1), n).to(torch.float64).detach()
+            forces = out["f"][0][:n]
         else:
             out = engine_derivative(adapter)(builder.batch, graph, task="ef", n_real=n)
             energies, forces = out["e"], out["f"][0][:n]

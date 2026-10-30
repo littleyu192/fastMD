@@ -2,11 +2,14 @@
 
 :class:`MultiSystemMolecularDynamics` runs one trajectory for each of S
 systems (each with its own atoms, atom count, cell, positions, momenta and
-thermostat) for a model the engine differentiates that declares its systems
-may be evaluated as one disjoint union (``SystemBatching`` ``"union"``) and
-takes the engine's per-edge shifts (``EdgeShiftInput``: MACE's
-``ScaleShiftMACE`` and SevenNet). The systems sit in the slots of unions
-(:mod:`fastmd.execution.system_batch`): one graph build, one model call and one
+thermostat) for MatRIS (its own derivative, by its own rules) and for a
+model the engine differentiates that declares its systems
+may be evaluated as one disjoint union (``SystemBatching`` ``"union"``, or
+``"segments"`` where the model pools each system over its own atoms) and takes
+the engine's per-edge shifts (``EdgeShiftInput``: MACE's ``ScaleShiftMACE``,
+SevenNet, CHGNet with its line graph, ORB v3). The systems sit in the slots of
+unions (:mod:`fastmd.execution.system_batch`): one graph build (with each
+system's line graph for a model with triplets), one model call and one
 backward pass per step for all systems of a union, ``steps_per_launch`` steps
 of integrator, neighbour list, model and derivative captured as one CUDA graph.
 A slot holds at most its atom ceiling; :meth:`write_system` puts another system
@@ -23,30 +26,34 @@ import gc
 import math
 import numbers
 import time
+import warnings
 
 import numpy as np
 import torch
 from ase import Atoms, units
 
-from fastmd.adapters import load_adapter
-from fastmd.adapters.memory import MeasuredMemoryModel
-from fastmd.adapters.negotiate import batch_systems, check_system_cells, negotiate, negotiated, size_unions
-from fastmd.adapters.protocol import NegotiationError
-from fastmd.config import InferenceConfig, resolve_config
-from fastmd.engine.entry_config import release_adapter, use_adapter
-from fastmd.execution.gpu_integrator import default_fix_com, kinetic_energy_fp64
-from fastmd.execution.gpu_nhc import maxwell_boltzmann_momenta
-from fastmd.engine.energy_derivative import engine_derivative
-from fastmd.execution.replica_batch import (
+from ..adapters import load_adapter
+from ..adapters.memory import MeasuredMemoryModel
+from ..adapters.negotiate import batch_systems, check_system_cells, dry_run, negotiate, negotiated, size_unions
+from ..adapters.protocol import CapacityStep, NegotiationError
+from ..config import ConfigurationWarning, InferenceConfig, resolve_config
+from ..engine import saved_recompute
+from ..engine._graph_capture import capture_graph
+from ..engine.entry_config import apply_checkpoint, release_adapter, use_adapter
+from ..engine.policy import fusion_scope
+from ..execution.gpu_integrator import default_fix_com, kinetic_energy_fp64
+from ..execution.gpu_nhc import maxwell_boltzmann_momenta
+from ..engine.energy_derivative import engine_derivative
+from ..execution.replica_batch import (
     DEFAULT_UNION_ROWS,
     UNION_PROBE_FRACTIONS,
     graph_builder_options,
     union_capacity,
     union_demand,
     union_headrooms,
-    union_self_check,
+    union_triplet_capacity,
 )
-from fastmd.execution.system_batch import (
+from ..execution.system_batch import (
     SlotLayout,
     SlotWholeStepRunner,
     SystemNoseHooverChainNVT,
@@ -55,12 +62,45 @@ from fastmd.execution.system_batch import (
     slot_union_demand,
     slot_union_memory_runs,
     slot_union_persistent_bytes,
+    slot_union_probe_capacities,
+    system_energy_derivative,
     systems_self_check,
     validate_cell,
 )
-from fastmd.graph.fixed_capacity_builder import FixedCapacityGraphBuilder
-from fastmd.interfaces.calculator import require_finite_geometry
-from fastmd.interfaces.replica_md import _COUNTERS, _MEASURED_UNION, ENSEMBLES, _Union, _UnionMolecularDynamics
+from ..graph.fixed_capacity_builder import FixedCapacityGraphBuilder
+from ..precision import warn_implicit_tf32
+from .calculator import require_finite_geometry
+from .replica_md import _COUNTERS, _MEASURED_UNION, ENSEMBLES, _Union, _UnionMolecularDynamics
+
+# Union size by throughput (``union_rows`` None; MatRIS in MD, every model in a relaxation): the step time of unions of
+# the first systems is measured at rows doubling from the largest system (at least UNION_PROBE_MIN_ROWS rows) up to all
+# the systems' rows (at most DEFAULT_UNION_ROWS): one evaluation of the union, eager and then captured and replayed
+# (MatRIS at the recompute level its own rule picks for that union, which may climb with the rows and costs time). A
+# union is as fast as the best one where its rows per second fall short of the best measured ones by at most
+# UNION_THROUGHPUT_SLACK (the probes' timing noise and the mix of their first systems are a few percent). Where the
+# rows per second keep growing with the rows (a model whose small unions wait on their launches: MACE, SevenNet), the
+# largest union is the fastest; where they stay level (a model whose arithmetic grows with its rows: ORB v3 in IEEE
+# FP32, MatRIS 10M), a smaller union does as much in the same time, and a union that needs recompute does less.
+UNION_PROBE_MIN_ROWS = 128
+UNION_THROUGHPUT_SLACK = 0.05
+# Replays timed per probe (their fastest counts).
+_PROBE_REPLAYS = 2
+
+
+def step_seconds_at(points, rows: float, column: int = 1) -> float | None:
+    """The time of a union of ``rows`` rows from measured ``points`` (``(rows, seconds of a step captured, of a step
+    eager, of the capture of a step)`` per probe, ascending; ``column`` 1, 2 or 3): piecewise linear between them, the
+    smallest one's below it (the launches of a small union bound its step from below), and above the largest one at
+    its rows per second (the per-row arithmetic). None without points."""
+    if not points:
+        return None
+    sizes = [point[0] for point in points]
+    values = [point[column] for point in points]
+    if rows <= sizes[0]:
+        return float(values[0])
+    if rows >= sizes[-1]:
+        return float(values[-1]) * rows / sizes[-1]
+    return float(np.interp(rows, sizes, values))
 
 
 class _SlotUnion(_Union):
@@ -82,9 +122,11 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
     ----------
     model:
         An adapter, or a name or checkpoint path that :func:`~fastmd.adapters.load_adapter` loads
-        (``model_path``, ``model_dtype`` as there). A model that does not declare ``"union"``, does not take the
-        engine's per-edge shifts or has a line graph (``check_system_cells``: MatRIS, ORB, CHGNet), or fails its
-        check on two of the systems, raises :class:`~fastmd.adapters.protocol.NegotiationError`.
+        (``model_path``, ``model_dtype`` as there). MatRIS runs by its own rules (as in
+        ``ReplicaMolecularDynamics``; its evaluate takes each system's cell from the batch's systems). A model
+        that does not declare ``"union"`` or ``"segments"`` or does not take the engine's per-edge shifts
+        (``check_system_cells``), or fails its check on two of the systems, raises
+        :class:`~fastmd.adapters.protocol.NegotiationError`.
     systems:
         The systems (ASE atoms, periodic in all three directions, each with its own cell).
     momenta:
@@ -100,15 +142,25 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         slot) or one per system (at least its atom count). A slot's rows past its system are vacant: room for a
         larger system written in later (:meth:`write_system`).
     union_rows:
-        The most rows (slot ceilings) per union; default ``DEFAULT_UNION_ROWS``. More systems run as several
-        unions of consecutive systems with balanced rows, sharing one CUDA graph memory pool.
+        The most rows (slot ceilings) per union; default ``DEFAULT_UNION_ROWS``, and for MatRIS the rows of the
+        union its measured throughput favours (``UNION_THROUGHPUT_SLACK``'s comment: the largest of the measured
+        unions near the best rows per second at the lowest recompute level). More systems run as several unions of
+        consecutive systems with balanced rows, sharing one CUDA graph memory pool. Unions that run out of CUDA
+        memory as they start are released and started again with at most half the largest union's rows (a union
+        of one system that does: :class:`~fastmd.adapters.protocol.NegotiationError`); a union whose capacity
+        growth runs out of CUDA memory during :meth:`run` is split in two (``stats()["splits"]``; a system that
+        does not fit alone: ``NegotiationError``).
     capacity_headroom:
         The relative pair headroom a capacity growth adds over the overflowing demand (default: the model's, else
-        ``UNION_GROWTH_HEADROOM``); a union's first capture holds the model's own capacity tiers.
+        ``UNION_GROWTH_HEADROOM``); a union's first capture holds the model's own capacity tiers (MatRIS's pairs:
+        with the pair headroom too). A line graph's
+        triplets grow by the model's triplet headroom (``CapacityStep.t_union_headroom``, else
+        ``UNION_TRIPLET_GROWTH_HEADROOM``).
     config, model_path, model_dtype, device, self_check:
         As in ``ReplicaMolecularDynamics`` (the self-check evaluates the smallest system and the smallest one in
-        another cell, else the second smallest, as a union and alone, and the union with twice the cell as the
-        model's ``cell`` argument; a set of one system checks two copies of it, without that probe).
+        another cell, else the second smallest, as a union with vacant rows in its slots and alone, and the union
+        with twice the cell as the model's ``cell`` argument; a set of one system checks two differently rattled
+        copies of it the same way).
     trajectory, logfile, loginterval:
         ``trajectory``: a file name with ``{system}`` (e.g. ``"md_{system:04d}.traj"``): one ASE trajectory per
         system, a frame every ``loginterval`` steps and at the start; ``logfile``: one line per system and
@@ -116,6 +168,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
     """
 
     _members = "systems"
+    _entry = "MultiSystemMolecularDynamics"  # the public entry point, in warnings
 
     def __init__(self, model, systems: Sequence[Atoms], *, momenta=None, ensemble: str = "nvt_nhc",
                  temperature: float = 300.0, timestep: float = 1.0, taut: float = 100.0, tdamp: float | None = None,
@@ -188,16 +241,24 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         if resolved.execution not in ("auto", "whole_step"):
             raise ValueError(f"{where} runs whole-step CUDA graphs: execution must be 'auto' or 'whole_step', got "
                              f"{resolved.execution!r}")
+        if resolved.checkpoint_enabled is not False:  # as GPU-resident MD's entry points
+            warnings.warn("Activation checkpointing inside CUDA Graph capture is not validated. Use checkpoint='off' "
+                          "for the validated graph path; 'auto' is a row-count threshold, not a capture-safety policy. "
+                          "The requested setting is unchanged.", ConfigurationWarning, stacklevel=2)
         self._adapter = load_adapter(model, model_path=model_path, device=str(self.device), model_dtype=model_dtype,
+                                     enable_checkpoint=resolved.checkpoint_enabled,
                                      optimization_profile=resolved.optimization_profile)
         use_adapter(self, model)  # an adapter loaded by name is closed with its last user (also on a failure below)
-        if self._adapter is model or self._adapter.module is model:  # supplied, not loaded
-            self._adapter.module.to(self.device)
         self._trajectories = False
         self._log = None
         try:
+            if self._adapter is model or self._adapter.module is model:  # supplied, not loaded
+                self._adapter.module.to(self.device)
+                apply_checkpoint(self._adapter.module, resolved.checkpoint_enabled)
             self._setup(systems, momenta, resolved, taut=taut, tdamp=tdamp, tchain=tchain, tloop=tloop,
                         fix_com=fix_com, union_rows=union_rows, self_check=self_check)
+            with self._config.scope():  # at the precision the model calls run with (another model's: IEEE FP32)
+                warn_implicit_tf32(self._config.matmul_precision, self._entry)
             self._trajectory_name = trajectory
             if logfile is not None:
                 self._log = open(logfile, "w")
@@ -234,83 +295,309 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                self_check) -> None:
         adapter = self._adapter
         check_system_cells(adapter)  # before anything is negotiated or measured
-        if not negotiated(adapter):
-            raise NegotiationError(f"model {adapter.name!r} is planned by the runtime's own rules, not batched here")
-        plan = negotiate(adapter, replace(resolved, execution="whole_step"), entry="gpu_md", device=self.device)
+        whole_step = replace(resolved, execution="whole_step")
+        if negotiated(adapter):
+            plan = negotiate(adapter, whole_step, entry="gpu_md", device=self.device)
+        else:  # MatRIS: the runtime's own rules, recorded as GPU-resident MD records them (its largest system)
+            plan = dry_run(adapter, whole_step, entry="gpu_md", device=self.device,
+                           atoms=max(systems, key=len))
         execution = plan.decision("execution")
         if execution.chosen != "whole_step":
             raise NegotiationError(f"MultiSystemMolecularDynamics needs a whole-step CUDA graph for model "
                                    f"{adapter.name!r}: {execution.reason}")
-        # The plan's precision applies to every model call from here on (IEEE FP32 unless TF32 is asked for).
-        self._config = replace(resolved, execution="whole_step", matmul_precision=plan.matmul_precision)
-        self._float64 = adapter.topology_spec().model_dtype == "float64"
+        # The plan's precision applies to every model call from here on (IEEE FP32 unless TF32 is asked for;
+        # MatRIS's configuration as it is).
+        self._config = (replace(whole_step, matmul_precision=plan.matmul_precision) if negotiated(adapter)
+                        else whole_step)
+        # As GPU-resident MD: eval mode and frozen weights (forces are derivatives in the coordinates; MatRIS's
+        # inference kernels need weights without gradients), and the baseline of MatRIS's memory decisions.
+        module = adapter.module
+        module.eval()
+        saved_recompute.check_model(module, saved_recompute.explicit_mode(resolved.saved_tensor_recompute))
+        saved_recompute.note_entry_point(module)
+        for parameter in module.parameters():
+            parameter.requires_grad_(False)
+        # float64 state: a float64 model the engine differentiates (MatRIS evaluates float32 graphs)
+        self._float64 = engine_derivative(adapter) is not None and adapter.topology_spec().model_dtype == "float64"
         if self._float64 and self.ensemble != "nvt_nhc":
             raise ValueError("MultiSystemMolecularDynamics: a float64 model needs ensemble='nvt_nhc' (the integrator "
                              "with a float64 state); nve and nvt keep a float32 state")
         self.candidate_skin = float(self._config.capacity.candidate_skin)
-        self._capacity_step = adapter.capacity_step() if callable(getattr(adapter, "capacity_step", None)) else None
-        self.capacity_headroom, self.triplet_headroom = union_headrooms(self._capacity_step, self._headroom)
-        self._line_graph = False  # systems with cells of their own: edges only (check_system_cells)
-        self.templates = [atoms.copy() for atoms in systems]
-        self._writes = [0] * self.systems  # the systems written into each slot since construction
-        self.masses = [np.asarray(atoms.get_masses(), dtype=np.float64) for atoms in systems]
-        self._numbers = [np.asarray(atoms.get_atomic_numbers(), dtype=np.int32) for atoms in systems]
-        self._cells = [np.asarray(atoms.cell.array, dtype=np.float64) for atoms in systems]
-        positions = [np.asarray(atoms.get_positions(), dtype=np.float64) for atoms in systems]
-        momenta = [maxwell_boltzmann_momenta(masses, self.temperature, seed=self.seed + index) if value is None
-                   else value for index, (masses, value) in enumerate(zip(self.masses, momenta))]
+        self._line_graph = adapter.topology_spec().triplet_cutoff is not None  # each system's triplets too
+        self._system_tables(systems)
+        self.splits = []  # unions split by a growth out of memory: (rows, the parts' rows, why)
         self._kinds = dict(taut=float(taut), tdamp=float(100.0 * self.timestep if tdamp is None else tdamp),
                            tchain=int(tchain), tloop=int(tloop),
                            fix_com=default_fix_com(self.ensemble) if fix_com is None else bool(fix_com))
-        with self._config.scope():
+        # The checks and the probes of time and memory in the runner's fusion scope (MatRIS's fused kernels; generic:
+        # none).
+        with self._config.scope(), fusion_scope(self._config.optimization_profile != "generic"):
             if self_check:
                 floor, energy_floor = (1e-10, 1e-12) if self._float64 else (1e-5, 1e-6)
                 check = self._self_check(floor, energy_floor)
                 plan = batch_systems(plan, adapter, systems=self.systems, self_check=check, own_cells=True)
             else:
                 plan = batch_systems(plan, adapter, systems=self.systems, own_cells=True)
-            union_rows = DEFAULT_UNION_ROWS if union_rows is None else union_rows
+            # The rows per union by throughput where they are not given (the systems in the slots may change here:
+            # a relaxation's slots and queue follow the union it chooses).
+            union_rows, throughput = self._union_rows(union_rows)
+            self._capacity_tiers()
             union_rows, plan = self._size_unions(plan, union_rows)
-            bounds = self._partition(union_rows)
-            self._unions = [_SlotUnion(start, stop, self.ceilings[start:stop])
-                            for start, stop in zip(bounds[:-1], bounds[1:])]
+            if throughput is not None:
+                plan.decisions[-1].evidence["throughput"] = throughput
+            positions = [np.asarray(atoms.get_positions(), dtype=np.float64) for atoms in self.templates]
+            if len(momenta) != self.systems:  # other systems in the slots (a relaxation's: FIRE starts at rest)
+                momenta = [None] * self.systems
+            momenta = [maxwell_boltzmann_momenta(masses, self.temperature, seed=self.seed + index) if value is None
+                       else value for index, (masses, value) in enumerate(zip(self.masses, momenta))]
+            while True:  # unions that run out of CUDA memory as they start: fewer rows, down to one system each
+                bounds = self._partition(union_rows)
+                self._unions = [_SlotUnion(start, stop, self.ceilings[start:stop])
+                                for start, stop in zip(bounds[:-1], bounds[1:])]
+                # One CUDA graph memory pool for every union's captures: they replay one after another.
+                self._graph_pool = torch.cuda.graph_pool_handle()
+                try:
+                    for union in self._unions:
+                        self._start_union(union, positions[union.start:union.stop], momenta[union.start:union.stop])
+                    break
+                except torch.OutOfMemoryError as error:
+                    why = str(error).splitlines()[0][:160]
+                # As ReplicaMolecularDynamics: release them outside the except block (its traceback would pin the
+                # failed union's buffers), and start them again with at most half the largest union's rows (less
+                # where the partition would not change).
+                count, failed = len(self._unions), max(union.layout.rows for union in self._unions)
+                self._unions, self._graph_pool = [], None
+                gc.collect()
+                torch.cuda.empty_cache()
+                if count == self.systems:
+                    raise NegotiationError(f"{self.systems} systems do not fit: a union of one system ran out of CUDA "
+                                           f"memory as it started ({why})")
+                union_rows = max(1, failed // 2)
+                while union_rows > 1 and len(self._partition(union_rows)) - 1 <= count:
+                    union_rows = max(1, union_rows // 2)
+                plan.decisions = [replace(decision, chosen=str(union_rows), reason=(
+                    f"{decision.reason}; unions of {failed} rows ran out of CUDA memory as they started ({why}): "
+                    f"{union_rows} rows per union"), evidence={**decision.evidence, "out_of_memory_at_start": [
+                        *decision.evidence.get("out_of_memory_at_start", []), failed]})
+                                  if decision.id == "union_size" else decision for decision in plan.decisions]
             # The decision records the partition the systems run in (rows per union).
             plan.decisions = [replace(decision, evidence={**decision.evidence, "unions": [
                 union.layout.rows for union in self._unions]}) if decision.id == "union_size" else decision
                 for decision in plan.decisions]
             self._plan = plan
-            # One CUDA graph memory pool for every union's captures: they replay one after another.
-            self._graph_pool = torch.cuda.graph_pool_handle()
-            for union in self._unions:
-                self._start_union(union, positions[union.start:union.stop], momenta[union.start:union.stop])
+
+    def _system_tables(self, systems) -> None:
+        """The per-system tables of ``systems`` in slot order: templates, masses, species, cells, writes."""
+        self.templates = [atoms.copy() for atoms in systems]
+        self._writes = [0] * self.systems  # the systems written into each slot since construction
+        self.masses = [np.asarray(atoms.get_masses(), dtype=np.float64) for atoms in systems]
+        self._numbers = [np.asarray(atoms.get_atomic_numbers(), dtype=np.int32) for atoms in systems]
+        self._cells = [np.asarray(atoms.cell.array, dtype=np.float64) for atoms in systems]
+
+    def _capacity_tiers(self) -> None:
+        """The model's capacity step and the unions' growth headrooms; MatRIS's from the configuration and the
+        systems in the slots (another model declares its own)."""
+        adapter = self._adapter
+        self._capacity_step = (adapter.capacity_step() if callable(getattr(adapter, "capacity_step", None))
+                               else None if negotiated(adapter) else self._matris_capacity_step(self.templates))
+        self.capacity_headroom, self.triplet_headroom = union_headrooms(self._capacity_step, self._headroom)
+
+    def _union_rows(self, union_rows: int | None) -> tuple[int, dict | None]:
+        """The rows per union before the memory sizing, and the throughput measurement's record (None where none
+        ran): ``union_rows`` as given; else for a model the runtime plans by its own rules (MatRIS, whose
+        recompute level climbs with a union's rows) by throughput (``UNION_THROUGHPUT_SLACK``'s comment): of the
+        measured unions within the slack of the best rows per second, the largest of those at the lowest recompute
+        level, ``DEFAULT_UNION_ROWS`` where that is the union of every system; else ``DEFAULT_UNION_ROWS`` (a union
+        boundary costs launches and gains nothing where the rows per second hold: #76's 128 WBM structures, MACE,
+        SevenNet, CHGNet and ORB v3, level or growing up to all of them; the probes would cost 7-20 s)."""
+        self._step_seconds = []
+        if union_rows is not None:
+            return union_rows, None
+        if negotiated(self._adapter):
+            return DEFAULT_UNION_ROWS, None
+        points = self._step_seconds = self._probe_step_seconds(min(sum(self.ceilings), DEFAULT_UNION_ROWS))
+        if len(points) < 2:
+            return DEFAULT_UNION_ROWS, None
+        best = max(rows / seconds for rows, seconds, *_ in points)
+        level = [point for point in points if point[0] / point[1] >= (1.0 - UNION_THROUGHPUT_SLACK) * best]
+        lowest = min(point[4] for point in level)
+        chosen = max(point[0] for point in level if point[4] == lowest)
+        record = self._throughput_record(points, chosen)
+        # a probe holds its first systems' atoms; the unions hold slots of their ceilings
+        k = int(np.searchsorted(np.cumsum([len(numbers) for numbers in self._numbers]), chosen)) + 1
+        return (DEFAULT_UNION_ROWS if k >= self.systems else sum(self.ceilings[:k])), record
+
+    def _throughput_record(self, points, chosen: int) -> dict:
+        return {"chosen_rows": int(chosen), "slack": UNION_THROUGHPUT_SLACK,
+                "probes": [{"rows": int(rows), "step_s": round(seconds, 6), "eager_step_s": round(eager, 6),
+                            "capture_s": round(capture, 6), "rows_per_s": round(rows / seconds, 1),
+                            "recompute": saved_recompute.LADDER[level]}
+                           for rows, seconds, eager, capture, level in points],
+                "probe_limit": getattr(self, "_probe_limit", None),
+                "probe_seconds": round(getattr(self, "_probe_seconds", 0.0), 3)}
+
+    def _probe_step_seconds(self, total: int, *, stress: bool = False,
+                            stop_when_level: bool = False) -> list[tuple[int, float, float, float, int]]:
+        """The step time of slot unions of the first systems (each slot its own atoms, in slot order) at rows
+        doubling from the largest system (at least ``UNION_PROBE_MIN_ROWS``) up to ``total``: one ``(rows, seconds
+        captured, seconds eager, seconds of the capture, recompute level)`` per union (one evaluation, with each
+        system's stress for ``stress``; the eager one after a first, untimed; the level MatRIS's automatic recompute
+        chose, as an index of ``saved_recompute.LADDER``, 0 for another model), none where ``total`` is less than
+        twice the first. Stops at a union that runs
+        out of CUDA memory or fails (``_probe_limit`` says why), and with ``stop_when_level`` after two doublings
+        whose rows per second gained no more than ``UNION_THROUGHPUT_SLACK`` on the best before them. MatRIS's
+        automatic recompute decides each union by itself, in a state of the probes' own
+        (``saved_recompute.detached_auto``: its rule never steps down from a larger union's level); the entry
+        points' state stays as it was."""
+        self._probe_limit, started = None, time.perf_counter()
+        sizes = [len(numbers) for numbers in self._numbers]
+        first = max(UNION_PROBE_MIN_ROWS, max(sizes))
+        if total < 2 * first:
+            return []
+        targets, size = [], first
+        while 2 * size <= total:
+            targets.append(size)
+            size *= 2
+        targets.append(int(total))
+        counts = np.cumsum(sizes)
+        points, why = [], None
+        stream = torch.cuda.Stream(self.device)
+        with saved_recompute.detached_auto(self._adapter.module, self._config) as forget:
+            for target in targets:
+                k = min(int(np.searchsorted(counts, target)) + 1, self.systems)
+                if points and int(counts[k - 1]) <= points[-1][0]:
+                    continue
+                forget()
+                gc.collect()
+                torch.cuda.empty_cache()
+                try:
+                    points.append(self._probe_union(k, stream, stress))
+                except (torch.OutOfMemoryError, RuntimeError) as error:  # the probes inform a choice: they stop
+                    why = (f"a union of {int(counts[k - 1])} rows failed ({type(error).__name__}: "
+                           f"{str(error).splitlines()[0][:120] if str(error) else ''})")
+                if why is not None:  # outside the except block: its traceback would pin the failed union's buffers
+                    self._probe_limit = why
+                    break
+                rates = [rows / seconds for rows, seconds, *_ in points]
+                if stop_when_level and len(rates) >= 3 and all(
+                        rates[last] <= (1.0 + UNION_THROUGHPUT_SLACK) * max(rates[:last]) for last in (-1, -2)):
+                    self._probe_limit = f"the rows per second stayed level up to {points[-1][0]} rows"
+                    break
+        gc.collect()
+        torch.cuda.empty_cache()
+        self._probe_seconds = time.perf_counter() - started
+        return points
+
+    def _probe_union(self, k: int, stream, stress: bool) -> tuple[int, float, float, float, int]:
+        """``(rows, seconds captured, seconds eager, seconds of the capture, recompute level)`` of one evaluation of
+        the slot union of the first ``k`` systems at its own demand (the model's capacity tiers)."""
+        adapter, device = self._adapter, self.device
+        atoms = [len(numbers) for numbers in self._numbers[:k]]
+        layout = SlotLayout(tuple(atoms))
+        numbers = torch.as_tensor(np.concatenate(self._numbers[:k]), device=device)
+        positions = torch.as_tensor(np.concatenate([system.get_positions() for system in self.templates[:k]]),
+                                    dtype=torch.float32, device=device)
+        cells = torch.as_tensor(np.stack(self._cells[:k]), dtype=torch.float64, device=device)
+        pairs, triplets = slot_union_demand(adapter, positions, layout=layout, cells=cells, atomic_numbers=numbers,
+                                            atoms=atoms, candidate_skin=self.candidate_skin, device=device)
+        step = self._probe_capacity_step()
+        builder = slot_union_builder(
+            adapter, layout=layout, cells=cells, atomic_numbers=numbers, atoms=atoms,
+            u_capacity=union_capacity(pairs, step, line_graph=self._line_graph),
+            t_capacity=union_triplet_capacity(triplets, step, replicas=k) if self._line_graph else 0,
+            candidate_skin=self.candidate_skin, device=device)
+        builder.refresh_candidates(positions)
+
+        def evaluate() -> None:
+            graph, _ = builder.build(positions, rebuild_candidates=False)
+            system_energy_derivative(adapter, builder.batch, graph, stress=stress)
+
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream):
+            evaluate()
+            torch.cuda.synchronize(device)
+            started = time.perf_counter()
+            evaluate()
+            torch.cuda.synchronize(device)
+            eager = time.perf_counter() - started
+        torch.cuda.current_stream(device).wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        torch.cuda.synchronize(device)
+        started = time.perf_counter()
+        with capture_graph(graph, stream=stream):
+            evaluate()
+        torch.cuda.synchronize(device)
+        capture = time.perf_counter() - started
+        replays = []
+        for _ in range(_PROBE_REPLAYS):
+            torch.cuda.synchronize(device)
+            started = time.perf_counter()
+            graph.replay()
+            torch.cuda.synchronize(device)
+            replays.append(time.perf_counter() - started)
+        del graph, builder
+        level = saved_recompute.LADDER.index(saved_recompute.current_mode(adapter.module, self._config))
+        return layout.rows, min(replays), eager, capture, level
+
+    def _probe_capacity_step(self):
+        """The capacity tiers of a probe: the model's, MatRIS's the configuration's (no headroom: a probe holds its
+        own demand)."""
+        if callable(getattr(self._adapter, "capacity_step", None)):
+            return self._adapter.capacity_step()
+        if negotiated(self._adapter):
+            return None
+        capacity = self._config.capacity
+        return CapacityStep(u_step=capacity.u_step, min_pad_u=capacity.min_pad_u, t_step=capacity.t_step,
+                            min_pad_t=capacity.min_pad_t)
+
+    def _matris_capacity_step(self, systems) -> CapacityStep:
+        """MatRIS's capacity tiers in slots: the configuration's pair and triplet steps and padding, and a headroom
+        (its first capture's pairs' and each growth's) of CapturePolicy's growth fraction (GPU-resident MD's
+        whole-step growth) plus the minimum padding of all systems but one relative to their counts (as
+        ``ReplicaMolecularDynamics`` pads MatRIS's replicas): a union pads as its systems would alone."""
+        from ..engine.capacity_policy import CapturePolicy
+        capacity = self._config.capacity
+        growth = CapturePolicy.from_config(capacity).growth_headroom
+        pbc = torch.ones(3, dtype=torch.bool, device=self.device)
+        pairs = triplets = 0
+        for atoms in systems:
+            demand = union_demand(self._adapter, torch.as_tensor(atoms.get_positions(), dtype=torch.float32,
+                                                                 device=self.device), replicas=1,
+                                  cell=torch.as_tensor(atoms.cell.array, dtype=torch.float64, device=self.device),
+                                  atomic_numbers=torch.as_tensor(atoms.get_atomic_numbers(), dtype=torch.int32,
+                                                                 device=self.device),
+                                  pbc=pbc, candidate_skin=self.candidate_skin, device=self.device)
+            pairs, triplets = pairs + demand[0], triplets + demand[1]
+        others = len(systems) - 1
+        return CapacityStep(u_step=capacity.u_step, min_pad_u=capacity.min_pad_u, t_step=capacity.t_step,
+                            min_pad_t=capacity.min_pad_t,
+                            u_union_headroom=min(1.0, growth + others * capacity.min_pad_u / max(pairs, 1)),
+                            t_union_headroom=min(1.0, growth + others * capacity.min_pad_t / max(triplets, 1)))
 
     def _self_check(self, floor: float, energy_floor: float):
-        """The negotiation's check of the declaration: the smallest system and the smallest one in another cell
-        (else the second smallest) as one union and alone (two copies of the system for a set of one)."""
+        """The negotiation's check of the declaration (``systems_self_check``: in slots with vacant rows, and with
+        twice the cell as the model's argument): the smallest system and the smallest one in another cell (else
+        the second smallest) as one union and alone; two differently rattled copies of the system for a set of
+        one."""
         geometry = dict(candidate_skin=self.candidate_skin, device=self.device)
-        if self.systems == 1:
-            numbers = torch.as_tensor(self._numbers[0], device=self.device)
-            cell = torch.as_tensor(self._cells[0], dtype=torch.float64, device=self.device)
-            pbc = torch.ones(3, dtype=torch.bool, device=self.device)
-            positions = torch.as_tensor(self.templates[0].get_positions(), dtype=torch.float32, device=self.device)
-            return lambda: union_self_check(self._adapter, positions=positions, cell=cell, atomic_numbers=numbers,
-                                            pbc=pbc, absolute_floor=floor, energy_floor=energy_floor, **geometry)
         order = sorted(range(self.systems), key=lambda index: (len(self.templates[index]), index))
         other = next((index for index in order[1:] if not np.array_equal(self._cells[index], self._cells[order[0]])),
-                     order[1])
+                     order[1] if self.systems > 1 else order[0])
         smallest = [order[0], other]
         pair = [(self.templates[index].get_positions(), self._cells[index], self._numbers[index])
                 for index in smallest]
+        copies = {"evaluated": "two copies of the system"} if self.systems == 1 else {}
         return lambda: {**systems_self_check(self._adapter, pair, absolute_floor=floor, energy_floor=energy_floor,
-                                             **geometry), "system_indices": smallest}
+                                             **geometry), "system_indices": smallest, **copies}
 
     def _size_unions(self, plan, union_rows: int):
         """The rows per union the measured memory admits, and the plan with that decision ("union_size"):
         ``union_rows``, or less where the largest union of that partition would not fit (``size_unions``, in rows).
         The memory of a union is measured on sub-unions of the largest one (its first systems, at
         ``UNION_PROBE_FRACTIONS`` of them, eager and captured, peak reserved bytes), fitted over their edge
-        capacities and predicted at the union's capacity after one growth, plus the other unions' buffers outside
-        the shared pool; a union of fewer than ``_MEASURED_UNION`` systems is not measured."""
+        capacities (with a line graph also their triplet capacities: ``slot_union_probe_capacities``) and predicted
+        at the union's capacity after one growth, plus the other unions' buffers outside the shared pool; a union of
+        fewer than ``_MEASURED_UNION`` systems is not measured."""
         bounds = self._partition(union_rows)
         rows = [sum(self.ceilings[start:stop]) for start, stop in zip(bounds[:-1], bounds[1:])]
         largest = int(np.argmax(rows))
@@ -318,20 +605,40 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         requested, total = int(rows[largest]), int(sum(self.ceilings))
         systems = [(self.templates[index].get_positions(), self._cells[index], self._numbers[index])
                    for index in range(start, stop)]
-        runs, pairs = slot_union_memory_runs(self._adapter, systems, candidate_skin=self.candidate_skin,
-                                             device=self.device, step=self._capacity_step,
-                                             headroom=self.capacity_headroom, ceilings=self.ceilings[start:stop])
+        runs, demand = slot_union_memory_runs(self._adapter, systems, candidate_skin=self.candidate_skin,
+                                              device=self.device, step=self._capacity_step,
+                                              headroom=self.capacity_headroom, ceilings=self.ceilings[start:stop],
+                                              triplet_headroom=self.triplet_headroom)
         occupied = sum(len(numbers) for _, _, numbers in systems)
+        line_graph = self._line_graph
 
         def union_edges(size: int) -> int:  # a union of `size` rows, at the largest union's pairs per row
-            return 2 * union_capacity(math.ceil(pairs(stop - start) * size / requested), self._capacity_step,
-                                      headroom=self.capacity_headroom)
+            return 2 * union_capacity(math.ceil(demand(stop - start)[0] * size / requested), self._capacity_step,
+                                      headroom=self.capacity_headroom, line_graph=line_graph)
+
+        def union_triplets(size: int) -> int:  # and at its triplets per row, its systems in proportion
+            return union_triplet_capacity(math.ceil(demand(stop - start)[1] * size / requested), self._capacity_step,
+                                          headroom=self.triplet_headroom,
+                                          replicas=max(1, math.ceil((stop - start) * size / requested)))
+
+        def probe_edges(k: int) -> int:  # the sub-union of the first k systems, grown once
+            return 2 * union_capacity(demand(k)[0], self._capacity_step, headroom=self.capacity_headroom,
+                                      line_graph=line_graph)
+
+        def probe_triplets(k: int) -> int:
+            return union_triplet_capacity(demand(k)[1], self._capacity_step, headroom=self.triplet_headroom,
+                                          replicas=k)
 
         memory, persistent = None, 0
         if stop - start >= _MEASURED_UNION:
-            probes = sorted({max(1, int(round(fraction * (stop - start)))) for fraction in UNION_PROBE_FRACTIONS})
+            # A line graph: (systems, triplet capacity) probes whose triplet ratios vary (the fit's per-triplet cost)
+            # over those of the unions the sizing may choose.
+            probes = (slot_union_probe_capacities(stop - start, requested, probe_edges, probe_triplets, union_edges,
+                                                  union_triplets, slots=self.ceilings) if line_graph else
+                      sorted({max(1, int(round(fraction * (stop - start)))) for fraction in UNION_PROBE_FRACTIONS}))
             try:
-                memory = MeasuredMemoryModel.measure(runs, probes, self.device, triplets=False, metric="reserved")
+                memory = MeasuredMemoryModel.measure(runs, probes, self.device, triplets=line_graph,
+                                                     metric="reserved")
             except torch.OutOfMemoryError as error:
                 why = f"ran out of CUDA memory ({str(error).splitlines()[0][:160]})"
             except RuntimeError as error:
@@ -342,22 +649,27 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
             gc.collect()
             torch.cuda.empty_cache()
             if memory is None:
-                memory = MeasuredMemoryModel.failed(f"the union memory measurement {why}", triplets=False)
+                memory = MeasuredMemoryModel.failed(f"the union memory measurement {why}", triplets=line_graph)
             else:  # the other unions' buffers, should the sizing leave more than one
-                layout = SlotLayout(tuple(self.ceilings[start:start + probes[0]]))
+                first = min(probe[0] if line_graph else probe for probe in probes)
+                layout = SlotLayout(tuple(self.ceilings[start:start + first]))
                 numbers = np.concatenate([np.full(ceiling, z[0], dtype=np.int32) for ceiling, (_, _, z) in
                                           zip(layout.ceilings, systems)])
+                pairs, triplets = demand(first)
                 builder = slot_union_builder(
                     self._adapter, layout=layout,
-                    cells=torch.as_tensor(np.stack([cell for _, cell, _ in systems[:probes[0]]])),
-                    atomic_numbers=torch.as_tensor(numbers), atoms=[len(z) for _, _, z in systems[:probes[0]]],
-                    u_capacity=union_capacity(pairs(probes[0])), candidate_skin=self.candidate_skin,
-                    device=self.device)
+                    cells=torch.as_tensor(np.stack([cell for _, cell, _ in systems[:first]])),
+                    atomic_numbers=torch.as_tensor(numbers), atoms=[len(z) for _, _, z in systems[:first]],
+                    u_capacity=union_capacity(pairs, line_graph=line_graph),
+                    t_capacity=union_triplet_capacity(triplets, replicas=first) if line_graph else 0,
+                    candidate_skin=self.candidate_skin, device=self.device)
                 persistent = slot_union_persistent_bytes(builder)
                 del builder
                 torch.cuda.empty_cache()
+        triplet_sizes = dict(union_triplets=union_triplets) if line_graph else {}
         chosen, plan = size_unions(plan, requested=requested, memory=memory, union_edges=union_edges,
-                                   device=self.device, replicas=total, persistent_per_replica=persistent, unit="rows")
+                                   device=self.device, replicas=total, persistent_per_replica=persistent, unit="rows",
+                                   **triplet_sizes)
         plan.decisions[-1].evidence.update(occupied_rows=occupied, largest_union_systems=stop - start,
                                            largest_slot_rows=max(self.ceilings))
         if chosen >= requested:
@@ -367,7 +679,8 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         index = int(np.argmax(self.ceilings))
         if self.ceilings[index] > chosen:
             alone, _ = size_unions(plan, requested=self.ceilings[index], memory=memory, union_edges=union_edges,
-                                   device=self.device, replicas=total, persistent_per_replica=persistent, unit="rows")
+                                   device=self.device, replicas=total, persistent_per_replica=persistent, unit="rows",
+                                   **triplet_sizes)
             if alone < self.ceilings[index]:
                 raise NegotiationError(f"system {index}'s slot of {self.ceilings[index]} rows does not fit the "
                                        f"measured memory (unions of {chosen} rows do): run it with fewer systems or a "
@@ -440,11 +753,24 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                 system_of_row=layout.system_of_row(self.device), occupied=occupied, ensemble=self.ensemble,
                 temperature=self.temperature, taut_fs=kinds["taut"], fix_com=kinds["fix_com"])
             state = coordinates, torch.as_tensor(moment, dtype=torch.float32, device=self.device)
-        pairs = slot_union_demand(self._adapter, state[0], layout=layout, cells=union.cells,
-                                  atomic_numbers=union.numbers, atoms=union.atoms, candidate_skin=self.candidate_skin,
-                                  device=self.device)
-        union.u_capacity = union_capacity(pairs, self._capacity_step)  # the model's tiers
+        self._set_capacities(union, state[0])
         self._capture(union, *state, forces=None)
+
+    def _set_capacities(self, union: _SlotUnion, positions, *, grown: bool = False,
+                        pair_headroom: bool = False) -> None:
+        """``union``'s pair (and, with a line graph, triplet) capacity for its demand at ``positions``: the model's
+        tiers, or with the union's growth headrooms (``grown``: a union captured again; ``pair_headroom``: the pairs'
+        only)."""
+        pairs, triplets = slot_union_demand(self._adapter, positions, layout=union.layout, cells=union.cells,
+                                            atomic_numbers=union.numbers, atoms=union.atoms,
+                                            candidate_skin=self.candidate_skin, device=self.device)
+        # MatRIS's union also holds its systems' pair padding from the start (ReplicaMolecularDynamics._start_union).
+        first = 0.0 if negotiated(self._adapter) and not pair_headroom else self.capacity_headroom
+        union.u_capacity = union_capacity(pairs, self._capacity_step, headroom=self.capacity_headroom if grown else first,
+                                          line_graph=self._line_graph)
+        union.t_capacity = (union_triplet_capacity(triplets, self._capacity_step, replicas=union.replicas,
+                                                   headroom=self.triplet_headroom if grown else 0.0)
+                            if self._line_graph else 0)
 
     def _capture(self, union: _SlotUnion, positions, momenta, *, forces) -> None:
         """A runner of ``union`` at its capacity (a recapture when ``forces``, the cached F of the state, are
@@ -453,7 +779,8 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         started = time.perf_counter()
         builder = slot_union_builder(self._adapter, layout=union.layout, cells=union.cells,
                                      atomic_numbers=union.numbers, atoms=union.atoms, u_capacity=union.u_capacity,
-                                     candidate_skin=self.candidate_skin, device=self.device)
+                                     t_capacity=union.t_capacity, candidate_skin=self.candidate_skin,
+                                     device=self.device)
         union.runner = SlotWholeStepRunner(
             model=self._adapter, builder=builder, integrator=union.integrator, positions=positions, momenta=momenta,
             forces=forces, steps_per_launch=self.steps_per_launch, warmup=self._config.capacity.warmup,
@@ -461,6 +788,102 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
             validate_isolated_atoms=not self._config.handle_isolated_atoms)
         torch.cuda.synchronize(self.device)
         union.capture_seconds.append(time.perf_counter() - started)
+
+    # ------------------------------------------------------------------ a growth out of memory
+    @staticmethod
+    def _split_groups(rows: Sequence[int], count: int) -> list[list[int]]:
+        """``count`` groups (at most one per slot) of consecutive slots of ``rows`` rows each, each boundary where
+        the rows before it come closest to their share."""
+        n = len(rows)
+        count, cumulative, edges = min(count, n), np.cumsum(rows), [0]
+        for k in range(1, count):
+            share = cumulative[-1] * k / count
+            edges.append(min(range(edges[-1] + 1, n - count + k + 1), key=lambda b: abs(cumulative[b - 1] - share)))
+        edges.append(n)
+        return [list(range(a, b)) for a, b in zip(edges[:-1], edges[1:])]
+
+    def _split(self, union: _SlotUnion, positions, momenta, forces, why: str):
+        """``union``'s growth ran out of CUDA memory (``why``): its systems run on in two unions of consecutive
+        slots with about half its rows each (four, eight... where a part runs out of memory again), each
+        integrator's state carried over (positions, momenta, forces and energies, each system's thermostat chain),
+        captured at the parts' demand with the growth headroom, in ``union``'s place; a system that does not fit
+        alone raises :class:`~fastmd.adapters.protocol.NegotiationError`. Returns the parts."""
+        position, count = self._unions.index(union), 2
+        while True:
+            groups = self._split_groups(union.layout.ceilings, count)
+            if len(groups) == 1:  # one system: no smaller union holds it
+                raise NegotiationError(f"{self._members} [{union.start}, {union.stop}): {why}, and it holds one "
+                                       "system: run it with less memory in use")
+            parts, failure = [], None
+            try:
+                for slots in groups:
+                    parts.append(self._split_part(union, slots, positions, momenta, forces))
+            except torch.OutOfMemoryError as error:
+                failure = str(error).splitlines()[0][:160]
+            except BaseException:
+                for part in parts:
+                    part.runner = part.integrator = None
+                raise
+            if failure is None:
+                break
+            for part in parts:  # outside the except block: its traceback would pin the failed part's buffers
+                part.runner = part.integrator = None
+            parts = []
+            gc.collect()
+            torch.cuda.empty_cache()
+            if len(groups) == union.layout.count:
+                raise NegotiationError(f"{self._members} [{union.start}, {union.stop}): {why}, and a union of one "
+                                       f"system ran out of CUDA memory too ({failure}): run them with less memory "
+                                       "in use or fewer systems")
+            count *= 2
+        parts[0].accumulated = dict(union.accumulated)
+        parts[0].recaptures = union.recaptures + 1
+        parts[0].capture_seconds = union.capture_seconds + parts[0].capture_seconds
+        parts[0].max_edge_count, parts[0].max_triplet_count = union.max_edge_count, union.max_triplet_count
+        self._unions[position:position + 1] = parts
+        self.splits.append((union.layout.rows, [part.layout.rows for part in parts], why))
+        union.runner = union.integrator = None
+        return parts
+
+    def _split_part(self, union: _SlotUnion, slots: list[int], positions, momenta, forces) -> _SlotUnion:
+        """The union of ``union``'s consecutive ``slots`` with their systems' state (``positions``, ``momenta``,
+        ``forces``: ``union``'s runner rows at its window's start; the Nose-Hoover chain's from its integrator),
+        captured."""
+        part = _SlotUnion(union.start + slots[0], union.start + slots[-1] + 1,
+                          [union.layout.ceilings[slot] for slot in slots])
+        starts, ceilings = union.layout.starts, union.layout.ceilings
+        rows = torch.cat([torch.arange(starts[slot], starts[slot] + ceilings[slot]) for slot in slots]).to(self.device)
+        part.atoms = [union.atoms[slot] for slot in slots]
+        part.cells = union.cells.index_select(0, torch.as_tensor(slots, device=self.device)).clone()
+        part.numbers = union.numbers.index_select(0, rows).clone()
+        old, layout = union.integrator, part.layout
+        if self.ensemble == "nvt_nhc":
+            part.integrator = SystemNoseHooverChainNVT(
+                layout, self.masses[part.start:part.stop], [old.system_view(old.state.q, slot) for slot in slots],
+                [old.system_view(old.state.p, slot) for slot in slots], temperature_K=self.temperature,
+                timestep=self.timestep * units.fs, tdamp=self._kinds["tdamp"] * units.fs,
+                tchain=self._kinds["tchain"], tloop=self._kinds["tloop"], device=self.device,
+                force_dtype=old.force_dtype)
+            new = part.integrator
+            with torch.no_grad():
+                for k, slot in enumerate(slots):
+                    new.system_view(new.state.f, k).copy_(old.system_view(old.state.f, slot))
+                    for name in ("eta", "p_eta", "potential_energy"):
+                        getattr(new.state, name)[k].copy_(getattr(old.state, name)[slot])
+                new.backup()
+            state = new.positions.to(torch.float32), new.momenta.to(torch.float32), new.forces.to(forces.dtype)
+        else:
+            masses = old.masses.reshape(-1).index_select(0, rows)
+            occupied = old.occupied.index_select(0, rows)
+            part.integrator = SystemVelocityVerlet(
+                masses, self.timestep, ceilings=torch.tensor(layout.ceilings, dtype=torch.int64, device=self.device),
+                atoms=torch.tensor(part.atoms, dtype=torch.int64, device=self.device),
+                system_of_row=layout.system_of_row(self.device), occupied=occupied, ensemble=self.ensemble,
+                temperature=self.temperature, taut_fs=self._kinds["taut"], fix_com=self._kinds["fix_com"])
+            state = (positions.index_select(0, rows), momenta.index_select(0, rows), forces.index_select(0, rows))
+        self._set_capacities(part, state[0], grown=True)
+        self._capture(part, state[0], state[1], forces=state[2])
+        return part
 
     # ------------------------------------------------------------------ a system into a slot
     def _locate(self, index: int) -> tuple[_SlotUnion, int]:
@@ -549,12 +972,14 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         coordinates = torch.as_tensor(positions, dtype=torch.float64 if self._float64 else torch.float32,
                                       device=device)
         try:
-            pairs, _ = union_demand(adapter, coordinates.float(), replicas=1, candidate_skin=self.candidate_skin,
-                                    **geometry)
+            pairs, triplets = union_demand(adapter, coordinates.float(), replicas=1, candidate_skin=self.candidate_skin,
+                                           **geometry)
             builder = FixedCapacityGraphBuilder(
-                u_capacity=union_capacity(pairs), atom_graph_cutoff=cutoff,
+                u_capacity=union_capacity(pairs, line_graph=self._line_graph), atom_graph_cutoff=cutoff,
                 candidate_cutoff=cutoff + self.candidate_skin, padding=adapter.padding_rule(),
-                prepare=adapter.prepare, **graph_builder_options(adapter), **geometry)
+                prepare=adapter.prepare,
+                **graph_builder_options(adapter, union_triplet_capacity(triplets) if self._line_graph else 0),
+                **geometry)
         except ValueError as error:
             raise ValueError(f"{where}: the model rejects the system: {error}") from error
         builder.refresh_candidates(coordinates)
@@ -566,8 +991,14 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         if isolated and int(status.isolated_atom_count.item()):
             raise ValueError(f"{where}: {int(status.isolated_atom_count.item())} atoms without a neighbour within "
                              f"the cutoff {cutoff} Å")
-        out = engine_derivative(adapter)(builder.batch, graph, task="ef", n_real=len(numbers))
-        return out["f"][0][:len(numbers)].detach(), out["e"].reshape(-1)[0]
+        n = len(numbers)
+        if engine_derivative(adapter) is None:  # a model that differentiates its own energy (MatRIS)
+            with torch.enable_grad():  # its forces are autograd's; write_system runs under no_grad
+                out = adapter.evaluate([graph], task="ef", is_training=False, n_real=n)
+            energy = adapter.extensive_energy(out["e"].reshape(1), n).to(torch.float64)
+            return out["f"][0][:n].detach(), energy.detach().reshape(-1)[0]
+        out = engine_derivative(adapter)(builder.batch, graph, task="ef", n_real=n)
+        return out["f"][0][:n].detach(), out["e"].reshape(-1)[0]
 
     # ------------------------------------------------------------------ state and observables
     def _system_rows(self, read) -> list[np.ndarray]:
@@ -685,11 +1116,12 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
     def stats(self) -> dict:
         """Counters over every union and every capture of it since construction or the last :meth:`restore`:
         windows launched, candidate refreshes, fallback windows, recovery replays and the largest edge count (with
-        the capacities and their fill); since construction: recaptures (capacity growth) and capture times (s);
-        the slots' ceilings and atoms."""
+        the capacities and their fill); since construction: recaptures (capacity growth) and capture times (s),
+        the unions split by a growth out of memory ((rows, the parts' rows, why)); the slots' ceilings and atoms."""
         return {**self._union_stats(systems=self.systems),
                 "slot_atoms": [list(union.layout.ceilings) for union in self._unions],
-                "atoms": [list(union.atoms) for union in self._unions], "writes": list(self._writes)}
+                "atoms": [list(union.atoms) for union in self._unions], "writes": list(self._writes),
+                "splits": [list(split) for split in self.splits]}
 
     # ------------------------------------------------------------------ output
     def _write_log(self) -> None:
