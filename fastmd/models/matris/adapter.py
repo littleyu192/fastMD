@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from torch import Tensor
 
-from fastmd.adapters.protocol import CaptureContract
-from fastmd.adapters.protocol import GraphBatch
-from fastmd.adapters.protocol import PaddingRule
-from fastmd.adapters.protocol import TopologySpec
+from fastmd.adapters.kit import declares
+from fastmd.adapters.protocol import CaptureContract, GraphBatch, PaddingRule, TopologySpec
 
+# Sink atoms: padded edges and triplets sit on sink rows past ``n_real``, which MatRIS leaves out.
 _SINK_ATOMS = PaddingRule("sink_atoms")
 
 
@@ -44,6 +43,10 @@ def check_load_options(model_dtype: str | None, optimization_profile: str | None
         raise ValueError("MatRIS runs float32 on the single-GPU runtime: model_dtype must be None or 'float32'")
 
 
+# Per-edge shifts: MatRIS's ``evaluate`` of a graph of systems with cells of their own (``SystemSegments.cells``)
+# takes each row's coordinates and each edge's shift in its own system's cell (and each system's strain for its
+# stress), so such systems may share one graph (slots).
+@declares(padding=_SINK_ATOMS, edge_shifts=True)
 class MatRISAdapter:
     """A MatRIS module as a :class:`~fastmd.adapters.protocol.ModelAdapter` with a model-owned derivative.
 
@@ -81,17 +84,10 @@ class MatRISAdapter:
         """The graph converter's cutoffs: the atom graph and the line graph of bond pairs (triplets)."""
         converter = self.module.graph_converter
         parameter = next(iter(self.module.parameters()), None)
-        return TopologySpec(
-            cutoff=float(converter.atom_graph_cutoff),
-            num_interactions=len(self.module.interaction_block),
-            triplet_cutoff=float(converter.line_graph_cutoff),
-            undirected_pairs=True,
-            model_dtype="float32" if parameter is None else str(parameter.dtype).removeprefix("torch."),
-        )
-
-    def padding_rule(self) -> PaddingRule:
-        """Sink atoms: padded edges and triplets sit on sink rows past ``n_real``, which MatRIS leaves out."""
-        return _SINK_ATOMS
+        return TopologySpec(cutoff=float(converter.atom_graph_cutoff),
+                            num_interactions=len(self.module.interaction_block),
+                            triplet_cutoff=float(converter.line_graph_cutoff), undirected_pairs=True,
+                            model_dtype="float32" if parameter is None else str(parameter.dtype).removeprefix("torch."))
 
     def prepare(self, batch: GraphBatch):
         """MatRIS's ``RadiusGraph`` over the batch's tensors (the same objects, no copy): what the
@@ -117,12 +113,6 @@ class MatRISAdapter:
         return CaptureContract(sync_free=True, exact_cutoff=True, accuracy_class="bitwise",
                                force_mode="model_owned", stress_unit="GPa",
                                compiled="dynamic" if self.compiled else "none")
-
-    def edge_shift_input(self) -> bool:
-        """True: MatRIS's ``evaluate`` of a graph of systems with cells of their own (``SystemSegments.cells``)
-        takes each row's coordinates and each edge's shift in its own system's cell (and each system's strain for
-        its stress), so such systems may share one graph (slots)."""
-        return True
 
     def system_batching(self) -> str | None:
         """``"union"``: each atom's energy depends on its own system only (message passing over edges and lines,

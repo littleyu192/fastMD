@@ -123,9 +123,7 @@ ENTRY_POINTS = frozenset([*(f"fastmd/applications/{name}.py" for name in ("base"
                                                                           "torchsim_interface")),
                           *(f"fastmd/interfaces/{name}.py" for name in ("calculator", "gpu_md", "md",
                                                                         "multi_system_md", "multi_system_relax",
-                                                                        "relax", "replica_md", "torchsim_interface",
-                                                                        "torchsim_batch", "torchsim_native")),
-                          "fastmd/relaxation.py", "fastmd/relax_cli.py"])
+                                                                        "relax", "replica_md", "torchsim_interface"))])
 ENTRY_INTERFACE = frozenset({"load_adapter", "entry_plan_record"})
 # The entry points' negotiation of another model's plan, imported from these modules.
 NEGOTIATION_INTERFACE = {"fastmd.adapters.negotiate": frozenset({"negotiated", "negotiate", "renegotiate_execution",
@@ -143,8 +141,8 @@ SIMILARITY = 0.30
 # and its submodules, except the packages in INIT_ONLY (their __init__ only: the root package, the model contract's
 # package, which forwards its names lazily, and the model registry, which loads a model by its module's name).
 LAYERS = (("leaf", ("fastmd", "fastmd.config", "fastmd.precision", "fastmd._nvtx", "fastmd._lazy", "fastmd.adapters",
-                    "fastmd.adapters.protocol", "fastmd.adapters.memory", "fastmd.adapters.patches", "fastmd.models",
-                    "fastmd.ops")),
+                    "fastmd.adapters.protocol", "fastmd.adapters.memory", "fastmd.adapters.patches", "fastmd.adapters.kit",
+                    "fastmd.models", "fastmd.ops")),
           ("graph", ("fastmd.graph",)),
           ("engine", ("fastmd.engine",)),
           ("contract", ("fastmd.adapters.negotiate",)),

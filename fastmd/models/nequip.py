@@ -31,6 +31,7 @@ import threading
 import torch
 from torch import Tensor
 
+from fastmd.adapters.kit import declares, file_sha256, frozen
 from fastmd.adapters.protocol import CapacityStep, CaptureContract, GraphBatch, KernelChoice, PaddingRule, TopologySpec
 
 
@@ -198,13 +199,14 @@ def load_nequip(model="nequip", *, model_path=None, device=None,
         if not backends or any(name != "SegmentedPolynomialFusedTP" for name in backends):
             raise RuntimeError(f"NequIP kernel='cueq' requires CUDA fused_tp in every layer; found {backends}")
     graph_model.to(device=target)
-    with path.open("rb") as stream:
-        digest = hashlib.file_digest(stream, "sha256").hexdigest()
     return NequIPAdapter(graph_model, fixed_shape=fixed_shape, kernel_metadata=kernel_metadata,
-                         checkpoint={"name": os.fspath(model), "path": str(path),
-                                                 "sha256": digest})
+                         checkpoint={"name": os.fspath(model), "path": str(path), "sha256": file_sha256(path)})
 
 
+# Padded rows still execute all tensor products, so the capacity steps are finer than the engine's coarser
+# MatRIS-oriented defaults (explicit user capacities take priority).
+@declares(padding=PaddingRule("far_self_loops"), isolated="model", references=None,
+          capacity=CapacityStep(u_step=32, min_pad_u=32, u_thermal_factor=1.01))
 class NequIPAdapter:
     name = "nequip"
     compiled = False
@@ -242,8 +244,7 @@ class NequIPAdapter:
         self._layers = sum(type(part).__name__ == "ConvNetLayer" for part in self.module.modules())
         if self._layers < 1:
             raise ValueError("NequIP adapter requires a message-passing NequIP network")
-        for parameter in self.module.parameters():
-            parameter.requires_grad_(False)
+        frozen(self.module)
         target = next(self.module.parameters()).device
         numbers = [atomic_numbers[name] for name in self.type_names]
         self._species_indices = torch.full((max(numbers) + 1,), -1, dtype=torch.long, device=target)
@@ -387,9 +388,6 @@ class NequIPAdapter:
     def topology_spec(self) -> TopologySpec:
         return TopologySpec(cutoff=self._cutoff, num_interactions=self._layers, model_dtype=self._dtype)
 
-    def padding_rule(self) -> PaddingRule:
-        return PaddingRule("far_self_loops")
-
     def prepare(self, batch: GraphBatch) -> GraphBatch:
         if self.fixed_shape and batch.padding is not None and batch.padding.kind != "far_self_loops":
             raise ValueError("NequIP fixed_shape requires far_self_loops padding")
@@ -431,21 +429,9 @@ class NequIPAdapter:
                 "edge_index": edge_index, "edge_cell_shift": shifts, "edge_vectors": vectors}
         return self.module(data)["atomic_energy"].reshape(-1)
 
-    def isolated_atom_policy(self):
-        return "model"
-
-    def reference_energies(self):
-        return None
-
     def capture_contract(self) -> CaptureContract:
         return CaptureContract(sync_free=self.fixed_shape and self.padding_validation is not None,
-                               exact_cutoff=True, force_mode="engine_autograd",
-                               stress_unit="eV/A^3")
-
-    def capacity_step(self) -> CapacityStep:
-        # Padded rows still execute all tensor products, so avoid the engine's
-        # coarser MatRIS-oriented defaults. Explicit user capacities take priority.
-        return CapacityStep(u_step=32, min_pad_u=32, u_thermal_factor=1.01)
+                               exact_cutoff=True)
 
     def kernel_backends(self) -> tuple[KernelChoice, ...]:
         """Record the explicitly loaded implementation in every engine plan.

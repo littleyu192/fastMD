@@ -1,7 +1,7 @@
 # Layering violations tolerated by tools/lint_layering.py: <file>  <rule>  <target>  <count>.
 # Entries may only be removed, never added: a new violation fails --strict, and so does an
 # entry above the current count (stale: lower or delete it, e.g. with --write-allowlist).
-# Baseline: published FastMD dc1358d source tree, 2026-10-23.
+# Baseline: FastMD dc1358d plus pre-existing local relaxation/TorchSim changes, 2026-10-23.
 # These entries document existing coupling; no production source was changed to silence a rule.
 
 # Existing lazy public MatRIS export (upstream baseline, destination is now the model package).

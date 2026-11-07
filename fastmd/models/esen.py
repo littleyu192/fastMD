@@ -9,7 +9,6 @@ capture-safe form of upstream's rotations. The trained network is unchanged.
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import math
 from pathlib import Path
 from types import MethodType
@@ -17,7 +16,8 @@ from types import MethodType
 import torch
 from torch import Tensor
 
-from fastmd.adapters.patches import PatchRecord, apply_patches, revert_patches
+from fastmd.adapters.kit import check_options, declares, file_sha256, frozen, recorder
+from fastmd.adapters.patches import apply_patches, revert_patches
 from fastmd.adapters.protocol import CapacityStep, CaptureContract, GraphBatch, PaddingRule, TopologySpec
 
 _PREFIX = 'fairchem.core.models.esen.'
@@ -30,12 +30,7 @@ _PINS = {
     'nn.embedding.EdgeDegreeEmbedding.forward': '052f4268d8574f29f26979e3b87670a2325b2bd264f0045c1b7b09945cafdf19',
     'nn.radial.PolynomialEnvelope.forward': 'b5d59cde8279ca79577a87d0ec445ae2220d70ca0ad6c2bc0129acb75c522e86',
 }
-
-
-def _record(name, target, sha, reason, **kwargs):
-    return PatchRecord(name='esen.'+name, target=_PREFIX+target,
-                       distribution='fairchem-core', versions=('1.10.0',),
-                       source_sha256=sha, reason=reason, **kwargs)
+_record = recorder('fairchem-core', ('1.10.0',), name_prefix='esen.', target_prefix=_PREFIX)
 
 
 def _external_graph(self, data):
@@ -126,10 +121,8 @@ def load_esen(model='esen', *, model_path=None, device=None, model_dtype=None, o
     normalizers = {key:normalizer.state_dict() for key,normalizer in trainer.normalizers.items()}
     reference = trainer.elementrefs['energy'].state_dict()['element_references']
     path = Path(model_path).resolve()
-    with path.open('rb') as stream:
-        sha = hashlib.file_digest(stream, 'sha256').hexdigest()
     return ESENAdapter(module, normalizers=normalizers, reference=reference,
-                       checkpoint=dict(name=model, path=str(path), sha256=sha))
+                       checkpoint=dict(name=model, path=str(path), sha256=file_sha256(path)))
 
 
 @dataclasses.dataclass
@@ -139,18 +132,19 @@ class ESENInput:
     natoms: Tensor
 
 
+# Every padded edge traverses ten large message-passing blocks: tiers of 32 pairs, at least 12 above the demand.
+@declares(padding=PaddingRule('far_self_loops'), capacity=CapacityStep(u_step=32, min_pad_u=12), isolated='model',
+          patches=('_patches', '_operator_patches'))
 class ESENAdapter:
     name = 'esen'
     compiled = False
 
     def __init__(self, module, *, normalizers, reference, checkpoint=None):
-        self.module = module.eval()
+        self.module = frozen(module)
         self._operator_patches = []
         self.operator_backend = 'upstream'
         self._in_use = False
         self.checkpoint = dict(checkpoint or {})
-        for parameter in module.parameters():
-            parameter.requires_grad_(False)
         backbone = module.backbone
         if not backbone.use_envelope or backbone.direct_forces:
             raise ValueError('eSEN requires a conservative, envelope-enabled checkpoint')
@@ -204,13 +198,6 @@ class ESENAdapter:
         return TopologySpec(cutoff=b.cutoff, num_interactions=b.num_layers, model_dtype='float32',
                             max_neighbors=b.max_neighbors)
 
-    def padding_rule(self):
-        return PaddingRule('far_self_loops')
-
-    def capacity_step(self):
-        # Every padded edge traverses ten large message-passing blocks.
-        return CapacityStep(u_step=32, min_pad_u=12)
-
     def prepare(self, batch):
         self._in_use = True
         if batch.species is not self._checked_species:
@@ -250,16 +237,9 @@ class ESENAdapter:
     def reference_energies(self):
         return self.reference[1:].reshape(1,-1)
 
-    def isolated_atom_policy(self):
-        return 'model'
-
     def capture_contract(self):
         return CaptureContract(sync_free=all(p.applied and not p.reverted for p in self._patches),
-                               exact_cutoff=True, accuracy_class='fp32_noise',
-                               tol_multiplier=2., force_mode='engine_autograd',stress_unit='eV/A^3',compiled='none')
-
-    def upstream_patches(self):
-        return list(self._patches) + list(self._operator_patches)
+                               exact_cutoff=True, tol_multiplier=2.)
 
     def enable_operator_rewrites(self, backend='torch'):
         if backend not in ('torch', 'triton'):
@@ -286,10 +266,6 @@ class ESENAdapter:
 
 def check_load_options(model_dtype, optimization_profile, model_path):
     """Validate registry options without loading the optional framework."""
-    from fastmd.adapters.protocol import NegotiationError
-    if optimization_profile == "legacy":
-        raise NegotiationError("optimization_profile='legacy' is MatRIS-only")
-    if model_dtype == "float64":
-        raise ValueError("Legacy eSEN supports float32 on this runtime")
-    if model_path is None:
-        raise ValueError("eSEN requires an explicit local model_path")
+    check_options(optimization_profile, "optimization_profile='legacy' is MatRIS-only", model_dtype=model_dtype,
+                  float64="Legacy eSEN supports float32 on this runtime", model_path=model_path,
+                  path_missing="eSEN requires an explicit local model_path")

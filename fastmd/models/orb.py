@@ -72,7 +72,6 @@ from __future__ import annotations
 
 import contextlib
 import functools
-import hashlib
 import os
 import threading
 import warnings
@@ -82,6 +81,8 @@ from typing import Any
 import torch
 from torch import Tensor
 
+from fastmd.adapters.kit import check_options, checked_file, declares, device_of, dtype_name, file_sha256, \
+    frozen, recorder, times_cell
 from fastmd.adapters.patches import PatchRecord, apply_patches, revert_patches
 from fastmd.adapters.protocol import (
     CapacityStep, CaptureContract, GraphBatch, KernelChoice, PaddingRule, TopologySpec,
@@ -105,6 +106,9 @@ _FAR_SELF_LOOPS = PaddingRule("far_self_loops")
 # (768 -> 1024 -> 1024 -> 256) in each of its five layers.
 _CAPACITY_STEP = CapacityStep(u_step=32, min_pad_u=12)
 _ELEMENTS = 118  # ORB's one-hot classes (atomic numbers 0-117)
+_LEGACY = ("optimization_profile='legacy' is MatRIS-only; ORB has the profiles 'topology' "
+           "(compiled backbone, the default) and 'generic' (eager, its reference)")
+_record = recorder("orb-models", ORB_VERSIONS)
 
 
 def is_orb_model(model, model_path: str | None = None) -> bool:
@@ -114,21 +118,8 @@ def is_orb_model(model, model_path: str | None = None) -> bool:
 
 def check_load_options(model_dtype: str | None, optimization_profile: str | None, model_path: str | None) -> None:
     """The loading options ``load_adapter`` rejects for ORB."""
-    from fastmd.adapters import NegotiationError
-
-    if optimization_profile == "legacy":
-        raise NegotiationError("optimization_profile='legacy' is MatRIS-only; ORB has the profiles 'topology' "
-                               "(compiled backbone, the default) and 'generic' (eager, its reference)")
-    if model_dtype == "float64":
-        raise ValueError("ORB runs float32 on this runtime: model_dtype must be None or 'float32'")
-
-
-def _sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    check_options(optimization_profile, _LEGACY, model_dtype=model_dtype,
+                  float64="ORB runs float32 on this runtime: model_dtype must be None or 'float32'")
 
 
 def _checkpoint(name: str, model_path: str | None) -> dict:
@@ -138,14 +129,10 @@ def _checkpoint(name: str, model_path: str | None) -> dict:
     if model_path is None:
         from cached_path import cached_path  # orb-models' own downloader
 
-        path = str(cached_path(url))
-        found = _sha256(path)
-        if found != expected:
-            raise ValueError(f"ORB checkpoint {name!r} at {path}: sha256 {found} is not the pinned {expected}")
-        return {"name": name, "path": path, "sha256": found}
+        return checked_file("ORB", name, str(cached_path(url)), expected)
     if not os.path.isfile(model_path):
         raise FileNotFoundError(f"ORB checkpoint not found: {model_path!r}")
-    found = _sha256(model_path)
+    found = file_sha256(model_path)
     if found != expected:
         # Another checkpoint of the same architecture may have been trained for another neighbour cap (the
         # "-20" models: 20) or another graph: only the pinned one's declarations are known to hold.
@@ -205,18 +192,15 @@ def _cutoff_with_host_power(original, power, r, r_max, p):
     return original(r, r_max, power)
 
 
-AGGREGATE_NODES = PatchRecord(
-    name="orb.aggregate_nodes_sizes_on_host",
-    target="orb_models.forcefield.segment_ops.aggregate_nodes",
-    distribution="orb-models", versions=ORB_VERSIONS,
-    source_sha256="c97e0abf1626c9177855026914cab711c44a523406b37de7a0bf9b6e71e3dc2f",
-    reason="host synchronization: repeat_interleave without output_size and scatters without dim_size read "
-           "sizes back from the device in every pooling (energy head, reference energy, ZBL) of the adapter's calls",
+AGGREGATE_NODES = _record(
+    "orb.aggregate_nodes_sizes_on_host", "orb_models.forcefield.segment_ops.aggregate_nodes",
+    "c97e0abf1626c9177855026914cab711c44a523406b37de7a0bf9b6e71e3dc2f",
+    "host synchronization: repeat_interleave without output_size and scatters without dim_size read "
+    "sizes back from the device in every pooling (energy head, reference energy, ZBL) of the adapter's calls",
     replacement=_aggregate_nodes)
 
 # Upstream code the energy tap runs or mirrors unpatched (pins: checked, nothing installed).
-PINS = tuple(PatchRecord(name=name, target=target, distribution="orb-models", versions=ORB_VERSIONS,
-                         source_sha256=digest, reason=reason) for name, target, digest, reason in (
+PINS = tuple(_record(*pin) for pin in (
     ("orb.regressor_energy_lines", "orb_models.forcefield.conservative_regressor.ConservativeForcefieldRegressor"
      ".forward", "48bc2a2b59a7d25bc00067a78501a942e4ea6f2714ccf571d0ed53e737fb0e33",
      "the energy tap runs this forward's energy lines (backbone, energy head, denormalize, ZBL)"),
@@ -277,12 +261,11 @@ def _zbl_power_record(zbl) -> PatchRecord:
     """The per-instance record of one ZBL module: its cutoff with the power read once here (outside any
     graph)."""
     original = zbl._polynomial_cutoff_with_derivative
-    return PatchRecord(
-        name="orb.zbl_cutoff_power_on_host",
-        target="orb_models.forcefield.pair_repulsion.ZBLBasis._polynomial_cutoff_with_derivative",
-        distribution="orb-models", versions=ORB_VERSIONS,
-        source_sha256="4308142915ca37eed724baba3970c5ad12c5936d4b9b0d75b823367b138cdb23",
-        reason="host synchronization: float(p) of the power, a device buffer, at every call",
+    return _record(
+        "orb.zbl_cutoff_power_on_host",
+        "orb_models.forcefield.pair_repulsion.ZBLBasis._polynomial_cutoff_with_derivative",
+        "4308142915ca37eed724baba3970c5ad12c5936d4b9b0d75b823367b138cdb23",
+        "host synchronization: float(p) of the power, a device buffer, at every call",
         replacement=functools.partial(_cutoff_with_host_power, original, int(zbl.p)), per_instance=True)
 
 
@@ -300,8 +283,7 @@ def load_orb(model, *, model_path: str | None = None, device: str | None = None,
     from fastmd.adapters import NegotiationError
 
     if optimization_profile == "legacy":
-        raise NegotiationError("optimization_profile='legacy' is MatRIS-only; ORB has the profiles 'topology' "
-                               "(compiled backbone, the default) and 'generic' (eager, its reference)")
+        raise NegotiationError(_LEGACY)
     if model_dtype not in (None, "float32"):
         raise ValueError(f"ORB runs float32 on this runtime: model_dtype must be None or 'float32', got "
                          f"{model_dtype!r}")
@@ -311,7 +293,7 @@ def load_orb(model, *, model_path: str | None = None, device: str | None = None,
 
     name = os.fspath(model)
     upstream_name = ORB_CHECKPOINTS[name][0]
-    device = torch.device("cuda" if device is None and torch.cuda.is_available() else (device or "cpu"))
+    device = device_of(device)
     checkpoint = _checkpoint(name, model_path)
 
     default_dtype = torch.get_default_dtype()
@@ -346,6 +328,14 @@ class ORBInput:
     one_hot: Tensor  # [118, 118] identity in the model's dtype: row Z is the one-hot of atomic number Z
 
 
+# Declared: far self-loops (exactly nothing under ORB's exact cutoff, never a zero length); tiers of 32 undirected
+# pairs (64 edge rows) at least 12 above the demand (a padded row costs a full edge-network row in every layer);
+# isolated atoms "model" (an atom without neighbours enters ORB's mean pooling and ZBL mean like any other);
+# per-edge shifts (system_energy's edge vectors read the positions and the shifts only, the cell it hands ORB's graph
+# is not part of the energy, so systems with cells of their own run in the slots of one union); the backbone's
+# kernels: upstream's torch.compile (fastest) or eager (the reference).
+@declares(padding=_FAR_SELF_LOOPS, capacity=_CAPACITY_STEP, isolated="model", edge_shifts=True,
+          kernels=KernelChoice(site=KERNEL_SITE, options=KERNEL_OPTIONS, reference="eager"))
 class ORBAdapter:
     """An upstream ORB v3 ``ConservativeForcefieldRegressor`` as a
     :class:`~fastmd.adapters.protocol.ModelAdapter` with a
@@ -360,12 +350,10 @@ class ORBAdapter:
     def __init__(self, module, *, checkpoint: dict | None = None) -> None:
         from importlib.metadata import version
 
-        self.module = module.eval()
+        self.module = frozen(module)
         self._operator_patches = []
         self._steady_installation = None
         self.operator_backend = 'upstream'
-        for parameter in self.module.parameters():
-            parameter.requires_grad_(False)
         self.checkpoint = dict(checkpoint or {})
         self.kernel = "eager"
         self.kernel_reason = ""
@@ -411,20 +399,10 @@ class ORBAdapter:
 
     def topology_spec(self) -> TopologySpec:
         """Directed edges within ORB's radius, five layers, no triplets, at most 120 neighbours."""
-        parameter = next(self.module.parameters())
-        return TopologySpec(
-            cutoff=self._cutoff,
-            num_interactions=len(self.module.model.gnn_stacks),
-            triplet_cutoff=None,
-            undirected_pairs=False,
-            model_dtype=str(parameter.dtype).removeprefix("torch."),
-            edge_order="by_centre",  # ORB scatters messages to both ends; the order changes sums by rounding
-            max_neighbors=self._max_neighbors,
-        )
-
-    def padding_rule(self) -> PaddingRule:
-        """Far self-loops: exactly nothing under ORB's exact cutoff, never a zero length."""
-        return _FAR_SELF_LOOPS
+        # by centre: ORB scatters messages to both ends; the order changes sums by rounding
+        return TopologySpec(cutoff=self._cutoff, num_interactions=len(self.module.model.gnn_stacks),
+                            model_dtype=dtype_name(self.module), edge_order="by_centre",
+                            max_neighbors=self._max_neighbors)
 
     def prepare(self, batch: GraphBatch) -> ORBInput:
         """The batch and its shape constants; rejects sink rows and elements ORB cannot encode (host
@@ -447,15 +425,6 @@ class ORBAdapter:
                         n_edge=torch.full((1,), batch.edge_index.shape[0], dtype=torch.int64, device=device),
                         max_num_neighbors=torch.full((1,), self._max_neighbors, dtype=torch.int64, device=device),
                         one_hot=self._one_hot[str(device)])
-
-    def capacity_step(self) -> CapacityStep:
-        """Tiers of 32 undirected pairs (64 edge rows), at least 12 pairs above the demand: a padded row
-        costs a full edge-network row in every layer."""
-        return _CAPACITY_STEP
-
-    def isolated_atom_policy(self) -> str:
-        """"model": an atom without neighbours enters ORB's mean pooling and ZBL mean like any other."""
-        return "model"
 
     def reference_energies(self) -> Tensor:
         """ORB's linear reference weights as a ``[1, 118]`` float64 row (column ``Z - 1``; NaN for
@@ -514,8 +483,7 @@ class ORBAdapter:
         # featurisation, stress displacement or rotation generator of ORB's own), the shifts row by row (or the
         # engine's per-edge shifts, each in its own system's cell: the same arithmetic per edge).
         # row by row: no TF32 GEMM for FP32
-        shifts = (image[:, 0:1] * cell[0] + image[:, 1:2] * cell[1] + image[:, 2:3] * cell[2] if edge_shifts is None
-                  else edge_shifts)
+        shifts = times_cell(image, cell) if edge_shifts is None else edge_shifts
         # ORB's own order of operations (x[receiver] - x[sender] + shift), not the engine's: the two round
         # differently on edges that cross the cell
         vectors = positions.index_select(0, receivers) - positions.index_select(0, senders) + shifts
@@ -604,13 +572,8 @@ class ORBAdapter:
         cutoff, held to upstream's own call within the eager noise floor (atomic scatters: not bitwise),
         the engine-owned derivative with the stress in eV/Å³, a compiled backbone a CUDA graph may capture
         after the runners' warm-ups."""
-        return CaptureContract(sync_free=self._sync_free, exact_cutoff=True, accuracy_class="fp32_noise",
-                               force_mode="engine_autograd", stress_unit="eV/A^3",
+        return CaptureContract(sync_free=self._sync_free, exact_cutoff=True,
                                compiled="capture_safe" if self.compiled else "none")
-
-    def kernel_backends(self) -> tuple[KernelChoice, ...]:
-        """The backbone: upstream's torch.compile (fastest) or eager (the reference)."""
-        return (KernelChoice(site=KERNEL_SITE, options=KERNEL_OPTIONS, reference="eager"),)
 
     def select_kernel(self, site: str, option: str) -> None:
         """Install ``option`` ("inductor" or "eager") for the backbone through upstream's own switch
@@ -652,12 +615,6 @@ class ORBAdapter:
                for part, name, where in parts):
             return None
         return "segments"
-
-    def edge_shift_input(self) -> bool:
-        """True: :meth:`system_energy` takes the engine's per-edge shifts (its edge vectors read ``positions`` and the
-        shifts only; the cell it hands ORB's graph is not part of the energy), so different systems with cells of
-        their own run in the slots of one union."""
-        return True
 
     def upstream_patches(self) -> list:
         """The patch outcomes (applied and declined)."""

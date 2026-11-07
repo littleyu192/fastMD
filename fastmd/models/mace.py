@@ -44,7 +44,6 @@ does): load only checkpoints you trust.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -52,6 +51,9 @@ from typing import Any
 import torch
 from torch import Tensor
 
+from fastmd.adapters.kit import (
+    check_options, checked_file, declares, device_of, dtype_name, frozen, local_file, times_cell,
+)
 from fastmd.adapters.protocol import (
     CapacityStep, CaptureContract, GraphBatch, KernelChoice, PaddingRule, TopologySpec,
 )
@@ -65,8 +67,11 @@ MACE_CHECKPOINTS = {
 KERNEL_SITE = "equivariant_products"
 KERNEL_OPTIONS = ("cueq", "e3nn")
 
+# Far self-loops: exactly nothing for MACE's exact cutoff, never a zero length.
 _FAR_SELF_LOOPS = PaddingRule("far_self_loops")
-# Measured capacity tiers (GPU-resident MD, whole step, GB200; see capacity_step).
+# Measured capacity tiers (GPU-resident MD, whole step, GB200): every padded edge runs the interactions' tensor
+# products, so a small cell takes a fine pair step. node_energy takes the engine's per-edge shifts (MACE reads
+# ``shifts`` per edge; its ``cell`` and ``unit_shifts`` only for a stress, which the engine takes from its strain).
 _CAPACITY_STEP = CapacityStep(u_step=32, min_pad_u=32, u_thermal_factor=1.02)
 _ELEMENTS = 118  # columns of the reference-energy row (Z - 1)
 # The upstream code the multi-GPU node-halo hooks rely on (``MACEAdapter.shard_spec``): the model's forward, which
@@ -87,19 +92,8 @@ def is_mace_model(model, model_path: str | None = None) -> bool:
 
 def check_load_options(model_dtype: str | None, optimization_profile: str | None, model_path: str | None) -> None:
     """The loading options ``load_adapter`` rejects for MACE (float32 and float64 load)."""
-    from fastmd.adapters import NegotiationError
-
-    if optimization_profile == "legacy":
-        raise NegotiationError("optimization_profile='legacy' is MatRIS-only; MACE has the profiles 'topology' "
-                               "(cuEquivariance kernels, the default) and 'generic' (e3nn, its reference)")
-
-
-def _sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    check_options(optimization_profile, "optimization_profile='legacy' is MatRIS-only; MACE has the profiles "
+                  "'topology' (cuEquivariance kernels, the default) and 'generic' (e3nn, its reference)")
 
 
 def _checkpoint(model, model_path: str | None) -> dict:
@@ -110,16 +104,10 @@ def _checkpoint(model, model_path: str | None) -> dict:
         from mace.calculators.foundations_models import download_mace_mp_checkpoint
 
         upstream, expected = MACE_CHECKPOINTS[name]
-        path = download_mace_mp_checkpoint(upstream)
-        found = _sha256(path)
-        if found != expected:
-            raise ValueError(f"MACE checkpoint {name!r} at {path}: sha256 {found} is not the pinned {expected}")
-        return {"name": name, "path": str(path), "sha256": found}
+        return checked_file("MACE", name, download_mace_mp_checkpoint(upstream), expected)
     path = model_path if model_path is not None else name
-    if path == "mace" or not os.path.isfile(path):
-        raise FileNotFoundError(f"MACE checkpoint not found: {path!r} (pass a .model path or one of "
-                                f"{sorted(MACE_CHECKPOINTS)})")
-    return {"name": os.path.basename(path), "path": str(path), "sha256": _sha256(path)}
+    return local_file("MACE", path, f" (pass a .model path or one of {sorted(MACE_CHECKPOINTS)})",
+                      refuse=path == "mace")
 
 
 def load_mace(model, *, model_path: str | None = None, device: str | None = None, model_dtype: str | None = None,
@@ -136,7 +124,7 @@ def load_mace(model, *, model_path: str | None = None, device: str | None = None
     if optimization_profile == "legacy":
         raise ValueError("optimization_profile='legacy' is MatRIS's (MACE: None, 'topology' or 'generic')")
     dtype = {None: torch.float32, "float32": torch.float32, "float64": torch.float64}[model_dtype]
-    device = torch.device("cuda" if device is None and torch.cuda.is_available() else (device or "cpu"))
+    device = device_of(device)
     checkpoint = _checkpoint(model, model_path)
     default_dtype = torch.get_default_dtype()
     try:
@@ -251,6 +239,8 @@ class MACEInput:
     minus_one: Tensor  # [1] -1 in the model's dtype: unit_shifts = -edge_image in one kernel
 
 
+@declares(padding=_FAR_SELF_LOOPS, isolated="model", capacity=_CAPACITY_STEP, edge_shifts=True,
+          kernels=KernelChoice(site=KERNEL_SITE, options=KERNEL_OPTIONS, reference="e3nn"))
 class MACEAdapter:
     """An upstream MACE module (``ScaleShiftMACE``) as a :class:`~fastmd.adapters.protocol.ModelAdapter`
     with an :class:`~fastmd.adapters.protocol.EnergyTap` (see the module docstring).
@@ -265,9 +255,7 @@ class MACEAdapter:
 
     def __init__(self, module, *, head: str | None = None, checkpoint: dict | None = None,
                  kernel: str = "e3nn") -> None:
-        self.module = module.eval()
-        for parameter in self.module.parameters():
-            parameter.requires_grad_(False)
+        self.module = frozen(module)
         self.checkpoint = dict(checkpoint or {})
         self.kernel = kernel
         self.kernel_reason = ""
@@ -292,19 +280,9 @@ class MACEAdapter:
 
     def topology_spec(self) -> TopologySpec:
         """Directed edges within ``r_max``, ``num_interactions`` layers, no triplets."""
-        parameter = next(self.module.parameters())
-        return TopologySpec(
-            cutoff=float(self.module.r_max),
-            num_interactions=int(self.module.num_interactions),
-            triplet_cutoff=None,
-            undirected_pairs=False,
-            model_dtype=str(parameter.dtype).removeprefix("torch."),
-            edge_order="by_centre",  # MACE sums messages per receiver; the order within one is free
-        )
-
-    def padding_rule(self) -> PaddingRule:
-        """Far self-loops: exactly nothing for MACE's exact cutoff, never a zero length."""
-        return _FAR_SELF_LOOPS
+        # MACE sums messages per receiver; the order within one is free
+        return TopologySpec(cutoff=float(self.module.r_max), num_interactions=int(self.module.num_interactions),
+                            model_dtype=dtype_name(self.module), edge_order="by_centre")
 
     def prepare(self, batch: GraphBatch) -> MACEInput:
         """The batch and its shape constants; rejects elements outside the model's z table (host check,
@@ -338,10 +316,6 @@ class MACEAdapter:
         return MACEInput(batch=batch, graph_index=graph_index, ptr=ptr, head=head, z_index=z_index,
                          one_hot=one_hot, node_attrs_by_z=node_attrs_by_z, minus_one=minus_one)
 
-    def isolated_atom_policy(self) -> str:
-        """"model": MACE evaluates an atom without neighbours itself."""
-        return "model"
-
     def reference_energies(self) -> Tensor:
         """The E0 of each element as a ``[1, 118]`` float64 row (column ``Z - 1``; NaN for elements
         outside the model), read-only."""
@@ -369,8 +343,7 @@ class MACEAdapter:
         elif dtype == torch.float64:
             shifts = unit_shifts @ cell  # an FP64 GEMM (no TF32)
         else:
-            # row by row: no TF32 GEMM for FP32
-            shifts = unit_shifts[:, 0:1] * cell[0] + unit_shifts[:, 1:2] * cell[1] + unit_shifts[:, 2:3] * cell[2]
+            shifts = times_cell(unit_shifts, cell)  # row by row: no TF32 GEMM for FP32
         data = {
             "positions": positions,
             "node_attrs": node_attrs,
@@ -401,17 +374,7 @@ class MACEAdapter:
         """No host synchronization in a call (captured whole), an exact radial cutoff, held to upstream's
         own call within the eager noise floor (atomic scatters: not bitwise), the engine-owned
         derivative with the stress in eV/Å³, no torch.compile."""
-        return CaptureContract(sync_free=True, exact_cutoff=True, accuracy_class="fp32_noise",
-                               force_mode="engine_autograd", stress_unit="eV/A^3", compiled="none")
-
-    def capacity_step(self) -> CapacityStep:
-        """MACE's capacity tiers (``_CAPACITY_STEP``): every padded edge runs the interactions' tensor
-        products, so a small cell takes a fine pair step."""
-        return _CAPACITY_STEP
-
-    def kernel_backends(self) -> tuple[KernelChoice, ...]:
-        """The equivariant products: cuEquivariance (fastest) or e3nn (the reference)."""
-        return (KernelChoice(site=KERNEL_SITE, options=KERNEL_OPTIONS, reference="e3nn"),)
+        return CaptureContract(sync_free=True, exact_cutoff=True)
 
     def select_kernel(self, site: str, option: str) -> None:
         """Install ``option`` ("cueq" or "e3nn") at the kernel site through upstream's own switch
@@ -445,9 +408,7 @@ class MACEAdapter:
                     corrections = _align_cueq_contraction_basis(self.module, module)
             finally:
                 torch.set_default_dtype(default_dtype)
-            module = module.eval()
-            for weight in module.parameters():
-                weight.requires_grad_(False)
+            module = frozen(module)
             _warm_up(module, self._head_index)
         self.module = module
         self.kernel = option
@@ -457,11 +418,6 @@ class MACEAdapter:
     def system_inputs(self) -> dict[str, Any]:
         """The static per-system input: MACE's head."""
         return {"head": self.head}
-
-    def edge_shift_input(self) -> bool:
-        """True: :meth:`node_energy` takes the engine's per-edge shifts (MACE reads ``shifts`` per edge; its
-        ``cell`` and ``unit_shifts`` only for a stress, which the engine takes from its own strain)."""
-        return True
 
     def system_batching(self) -> str | None:
         """"union" for upstream's ``ScaleShiftMACE`` itself (as loaded, or as upstream's cuEquivariance

@@ -57,14 +57,13 @@ inside sevenn): load only checkpoints you trust.
 """
 from __future__ import annotations
 
-import hashlib
 import os
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 from torch import Tensor
 
+from fastmd.adapters.kit import check_options, checked_file, declares, device_of, frozen, local_file, times_cell
 from fastmd.adapters.patches import PatchRecord, apply_patches, revert_patches
 from fastmd.adapters.protocol import (
     CapacityStep, CaptureContract, GraphBatch, KernelChoice, PaddingRule, TopologySpec,
@@ -82,7 +81,8 @@ SEVENNET_CHECKPOINTS = {
 KERNEL_SITE = "convolution"
 KERNEL_OPTIONS = ("cueq_uniform_1d", "cueq_fused_tp", "e3nn")
 _TP_METHODS = {"cueq_uniform_1d": "uniform_1d", "cueq_fused_tp": "fused_tp"}
-# Measured capacity tiers (GPU-resident MD, whole step, GB200; see capacity_step).
+# Measured capacity tiers (GPU-resident MD, whole step, GB200): every padded edge runs the convolutions' tensor
+# products, so a small cell takes a fine pair step.
 _CAPACITY_STEP = CapacityStep(u_step=32, min_pad_u=32, u_thermal_factor=1.01)
 # The cuEquivariance implementation class of each method (a method whose ops are missing falls back to
 # "naive" silently: checked after every install).
@@ -133,22 +133,10 @@ def is_sevennet_model(model, model_path: str | None = None) -> bool:
 
 def check_load_options(model_dtype: str | None, optimization_profile: str | None, model_path: str | None) -> None:
     """The loading options ``load_adapter`` rejects for SevenNet."""
-    from fastmd.adapters import NegotiationError
-
-    if optimization_profile == "legacy":
-        raise NegotiationError("optimization_profile='legacy' is MatRIS-only; SevenNet has the profiles "
-                               "'topology' (cuEquivariance kernels, the default) and 'generic' (e3nn, its "
-                               "reference)")
-    if model_dtype == "float64":
-        raise ValueError("SevenNet-0 is float32 upstream: model_dtype must be None or 'float32'")
-
-
-def _sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    check_options(optimization_profile, "optimization_profile='legacy' is MatRIS-only; SevenNet has the profiles "
+                  "'topology' (cuEquivariance kernels, the default) and 'generic' (e3nn, its reference)",
+                  model_dtype=model_dtype, float64="SevenNet-0 is float32 upstream: model_dtype must be None or "
+                  "'float32'")
 
 
 def _checkpoint(model, model_path: str | None) -> dict:
@@ -159,16 +147,10 @@ def _checkpoint(model, model_path: str | None) -> dict:
         from sevenn.util import pretrained_name_to_path
 
         upstream, expected = SEVENNET_CHECKPOINTS[name]
-        path = pretrained_name_to_path(upstream)
-        found = _sha256(path)
-        if found != expected:
-            raise ValueError(f"SevenNet checkpoint {name!r} at {path}: sha256 {found} is not the pinned {expected}")
-        return {"name": name, "path": str(path), "sha256": found}
+        return checked_file("SevenNet", name, pretrained_name_to_path(upstream), expected)
     path = model_path if model_path is not None else name
-    if path == "sevennet" or not os.path.isfile(path):
-        raise FileNotFoundError(f"SevenNet checkpoint not found: {path!r} (pass a checkpoint path or one of "
-                                f"{sorted(SEVENNET_CHECKPOINTS)})")
-    return {"name": os.path.basename(path), "path": str(path), "sha256": _sha256(path)}
+    return local_file("SevenNet", path, f" (pass a checkpoint path or one of {sorted(SEVENNET_CHECKPOINTS)})",
+                      refuse=path == "sevennet")
 
 
 def load_sevennet(model, *, model_path: str | None = None, device: str | None = None,
@@ -193,7 +175,7 @@ def load_sevennet(model, *, model_path: str | None = None, device: str | None = 
     from sevenn.checkpoint import SevenNetCheckpoint  # (ImportError: the sevennet extra is not installed)
 
     pins = _checked_pins()
-    device = torch.device("cuda" if device is None and torch.cuda.is_available() else (device or "cpu"))
+    device = device_of(device)
     checkpoint = _checkpoint(model, model_path)
     source = SevenNetCheckpoint(checkpoint["path"])
     # Keep the selected fidelity across rebuilds when negotiating e3nn/cuEquivariance.
@@ -272,10 +254,7 @@ def _build(source, cueq: bool, device) -> torch.nn.Module:
     elif modal is not None:
         raise ValueError("SevenNet modal was supplied for a single-modality checkpoint")
     module.delete_module_by_key("force_output")
-    module = module.to(device).eval()
-    for parameter in module.parameters():
-        parameter.requires_grad_(False)
-    return module
+    return frozen(module.to(device))
 
 
 def _convolutions(module) -> list:
@@ -361,6 +340,13 @@ class SevenNetInput:
     rows: Tensor  # [edge rows] int64 arange: the rows past batch.n_edges are padding
 
 
+# isolated "model": SevenNet evaluates an atom without neighbours itself. No reference table: the species shift is in
+# 7net-0's energy. Batching "union": node_energy's input holds edges and atoms only, no graph index or cell, so every
+# atom's energy comes from its own edges and its per-atom readout (multi-fidelity checkpoints: one fixed modality).
+# node_energy takes the engine's per-edge shifts (SevenNet reads edge vectors only). The kernels: cuEquivariance
+# uniform_1d, then fused_tp, then e3nn (the reference), in every execution mode (see KERNEL_OPTIONS).
+@declares(isolated="model", references=None, capacity=_CAPACITY_STEP, batching="union", edge_shifts=True,
+          kernels=KernelChoice(site=KERNEL_SITE, options=KERNEL_OPTIONS, reference="e3nn"), patches=("_patches",))
 class SevenNetAdapter:
     """An upstream SevenNet module (``AtomGraphSequential`` without its force head) as a
     :class:`~fastmd.adapters.protocol.ModelAdapter` with an
@@ -419,14 +405,9 @@ class SevenNetAdapter:
 
     def topology_spec(self) -> TopologySpec:
         """Directed edges within the model cutoff, one layer per convolution, no triplets."""
-        return TopologySpec(
-            cutoff=float(self.module.cutoff),
-            num_interactions=len(_convolutions(self.module)),
-            triplet_cutoff=None,
-            undirected_pairs=False,
-            model_dtype=str(self._dtype).removeprefix("torch."),
-            edge_order="by_centre",  # SevenNet sums messages per receiver; the order within one is free
-        )
+        # SevenNet sums messages per receiver; the order within one is free
+        return TopologySpec(cutoff=float(self.module.cutoff), num_interactions=len(_convolutions(self.module)),
+                            model_dtype=str(self._dtype).removeprefix("torch."), edge_order="by_centre")
 
     def padding_rule(self) -> PaddingRule:
         """Self-loops whose edge vector is (rc, 0, 0): exactly nothing at the double root of the cutoff."""
@@ -448,17 +429,9 @@ class SevenNetAdapter:
                              f"{unknown} (it supports {self._types.tolist()})")
         return SevenNetInput(batch=batch, rows=torch.arange(batch.edge_index.shape[0], device=batch.edge_index.device))
 
-    def isolated_atom_policy(self) -> str:
-        """"model": SevenNet evaluates an atom without neighbours itself."""
-        return "model"
-
     def system_inputs(self) -> dict:
         """The fixed fidelity is part of the runtime plan fingerprint."""
         return {"modal": self.checkpoint.get("modal")}
-
-    def reference_energies(self) -> None:
-        """None: 7net-0 has no per-element reference table (the species-wise shift is in its energy)."""
-        return None
 
     # --- EnergyTap ----------------------------------------------------------
 
@@ -471,8 +444,7 @@ class SevenNetAdapter:
         centre, neighbour = batch.edge_index[:, 0], batch.edge_index[:, 1]
         if edge_shifts is None:
             image = batch.edge_image.to(positions.dtype)
-            # row by row: no TF32 GEMM, and an edge's arithmetic does not depend on the row count
-            shift = image[:, 0:1] * cell[0] + image[:, 1:2] * cell[1] + image[:, 2:3] * cell[2]
+            shift = times_cell(image, cell)
         else:
             shift = edge_shifts
         vectors = positions.index_select(0, neighbour) + shift - positions.index_select(0, centre)
@@ -498,36 +470,13 @@ class SevenNetAdapter:
         cueq = f", cuequivariance {version('cuequivariance')}" if self.kernel.startswith("cueq") else ""
         return f"sevenn {version('sevenn')}{cueq}"
 
-    def capacity_step(self) -> CapacityStep:
-        """SevenNet's capacity tiers (``_CAPACITY_STEP``): every padded edge runs the convolutions' tensor
-        products, so a small cell takes a fine pair step."""
-        return _CAPACITY_STEP
-
     def capture_contract(self) -> CaptureContract:
         """Sync-free with the one-hot patch applied (else not captured), exact at the cutoff but not
         beyond (the builders' exact list), held to upstream's call within the eager noise floor (atomic
         scatters: not bitwise), the engine-owned derivative with the stress in eV/Å³, no torch.compile."""
         onehot = next(outcome for outcome in self._patches if outcome.record.name == "sevennet.onehot_table_on_device")
         return CaptureContract(sync_free=onehot.applied and not onehot.reverted and self._exact_rc_padding,
-                               exact_cutoff=False, exact_at_cutoff=self._exact_rc_padding,
-                               accuracy_class="fp32_noise", force_mode="engine_autograd",
-                               stress_unit="eV/A^3", compiled="none")
-
-    def kernel_backends(self) -> tuple[KernelChoice, ...]:
-        """The convolutions' tensor products: cuEquivariance uniform_1d, then fused_tp, then e3nn (the
-        reference), in every execution mode (see :data:`KERNEL_OPTIONS`)."""
-        return (KernelChoice(site=KERNEL_SITE, options=KERNEL_OPTIONS, reference="e3nn"),)
-
-    def system_batching(self) -> str:
-        """"union": the module's input (:meth:`node_energy`) holds edges and atoms only, no graph index or
-        cell, so every atom's energy comes from its own edges' convolutions and its per-atom readout, and
-        replicas evaluated as one graph give each atom its own system's energy. Multi-fidelity
-        checkpoints use the same fixed modality for every atom in the union."""
-        return "union"
-
-    def edge_shift_input(self) -> bool:
-        """True: :meth:`node_energy` takes the engine's per-edge shifts (SevenNet reads edge vectors only)."""
-        return True
+                               exact_cutoff=False, exact_at_cutoff=self._exact_rc_padding)
 
     def select_kernel(self, site: str, option: str) -> None:
         """Install ``option`` at the convolutions through sevenn's own switches, then run it once (the
@@ -591,10 +540,6 @@ class SevenNetAdapter:
 
 
     # --- upstream patches ---------------------------------------------------
-
-    def upstream_patches(self) -> list:
-        """The outcomes of the pins and the one-hot patch (:mod:`fastmd.adapters.patches`)."""
-        return list(self._patches)
 
     def close(self) -> None:
         """Revert the one-hot patch (the module copies its table per call again); idempotent."""

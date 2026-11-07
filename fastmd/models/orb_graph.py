@@ -9,14 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import torch
-from fastmd.models.orb import ORBAdapter, ORBInput, ORB_VERSIONS, _sync_free_aggregation
-from fastmd.adapters.patches import PatchRecord, apply_patches, revert_patches
+from fastmd.models.orb import ORBAdapter, ORBInput, _record, _sync_free_aggregation
+from fastmd.adapters.patches import apply_patches, revert_patches
 from fastmd.adapters.protocol import GraphBatch, KernelChoice
 
 _DIRECT_PINS = tuple(
-    PatchRecord(name=name, target=target, distribution='orb-models', versions=ORB_VERSIONS,
-                source_sha256=digest, reason=reason)
-    for name, target, digest, reason in (
+    _record(*pin) for pin in (
         ('orb.direct_predict', 'orb_models.forcefield.direct_regressor.DirectForcefieldRegressor.predict',
          '89e3f31e23f2a526c582b3d429e6271bf08493e512ee54f09d4fb9635228534f',
          'direct energy, force, stress heads and additive ZBL; omit unused confidence'),

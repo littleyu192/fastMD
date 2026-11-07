@@ -68,7 +68,6 @@ Loading unpickles upstream's bundled checkpoint after checking its sha256.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import os
 import threading
 from dataclasses import dataclass
@@ -78,6 +77,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from fastmd.adapters.kit import check_options, checked_file, declares, device_of, dtype_name, frozen, recorder
 from fastmd.adapters.patches import PatchRecord, apply_patches, revert_patches
 from fastmd.adapters.protocol import CapacityStep, CaptureContract, GraphBatch, PaddingRule, \
     TopologySpec
@@ -91,7 +91,9 @@ CHGNET_VERSIONS = ("0.4.2",)  # the chgnet releases the patch records were valid
 
 _FAR_SELF_LOOPS = PaddingRule("far_self_loops")
 _SINK_ATOMS = PaddingRule("sink_atoms")
-# Measured capacity tiers (GPU-resident MD, whole step, IEEE FP32, GB200; see capacity_step).
+# Measured capacity tiers (GPU-resident MD, whole step, IEEE FP32, GB200): every padded edge runs the atom
+# convolution's gated MLP and every padded triplet the bond convolution's and the angle update's, so a small cell
+# takes fine tiers of both.
 # A union of replicas grows by 10 % (pairs) and 25 % (triplets) over the overflowing demand: on the 135-atom
 # CsSnI3 frame at 500 K the union's pair count drifts by up to 9.4 % within 1,000 steps of 0.25 fs, its triplets
 # from 0 to 22-38 per replica on average and up to 76 (GPU-resident MD, IEEE FP32, GB200).
@@ -198,9 +200,7 @@ def _bond_bases(encoder, center: Tensor, neighbor: Tensor,
             bond_vectors)
 
 
-def _record(name: str, target: str, sha256: str, reason: str, **fields) -> PatchRecord:
-    return PatchRecord(name=name, target=target, distribution="chgnet", versions=CHGNET_VERSIONS,
-                       source_sha256=sha256, reason=reason, **fields)
+_record = recorder("chgnet", CHGNET_VERSIONS)
 
 
 # The replacements (sync_free needs all three) and the pins of the code the adapter replicates.
@@ -278,24 +278,11 @@ def is_chgnet_model(model, model_path: str | None = None) -> bool:
 
 def check_load_options(model_dtype: str | None, optimization_profile: str | None, model_path: str | None) -> None:
     """The loading options ``load_adapter`` rejects for CHGNet."""
-    from fastmd.adapters import NegotiationError
-
-    if optimization_profile == "legacy":
-        raise NegotiationError("optimization_profile='legacy' is MatRIS-only; CHGNet runs upstream's kernels "
-                               "under 'topology' (the default) and 'generic'")
-    if model_dtype == "float64":
-        raise ValueError("CHGNet runs float32 (upstream's AtomRef is float32 only): model_dtype must be None "
-                         "or 'float32'")
-    if model_path is not None:
-        raise ValueError("CHGNet loads its bundled pretrained weights by name; model_path is not supported")
-
-
-def _sha256(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    check_options(optimization_profile, "optimization_profile='legacy' is MatRIS-only; CHGNet runs upstream's "
+                  "kernels under 'topology' (the default) and 'generic'", model_dtype=model_dtype,
+                  float64="CHGNet runs float32 (upstream's AtomRef is float32 only): model_dtype must be None or "
+                  "'float32'", model_path=model_path,
+                  path_given="CHGNet loads its bundled pretrained weights by name; model_path is not supported")
 
 
 def load_chgnet(model, *, model_path: str | None = None, device: str | None = None, model_dtype: str | None = None,
@@ -313,13 +300,9 @@ def load_chgnet(model, *, model_path: str | None = None, device: str | None = No
     from chgnet.model import CHGNet
 
     name, relative, expected = CHGNET_CHECKPOINTS[model]
-    path = os.path.join(os.path.dirname(chgnet.__file__), relative)
-    found = _sha256(path)
-    if found != expected:
-        raise ValueError(f"CHGNet checkpoint {model!r} at {path}: sha256 {found} is not the pinned {expected}")
-    device = torch.device("cuda" if device is None and torch.cuda.is_available() else (device or "cpu"))
-    module = CHGNet.load(model_name=name, use_device=str(device), verbose=False)
-    return CHGNetAdapter(module, checkpoint={"name": model, "path": path, "sha256": found})
+    checkpoint = checked_file("CHGNet", model, os.path.join(os.path.dirname(chgnet.__file__), relative), expected)
+    module = CHGNet.load(model_name=name, use_device=str(device_of(device)), verbose=False)
+    return CHGNetAdapter(module, checkpoint=checkpoint)
 
 
 @dataclass
@@ -332,6 +315,10 @@ class CHGNetInput:
     atoms_per_graph: Tensor  # [1] int64: the rows of graph 0
 
 
+# isolated "model": CHGNet evaluates an atom without neighbours itself. node_energy takes the engine's per-edge shifts
+# (the bond vectors, and the angles from them, read ``positions`` and the shifts only; its ``cell`` is then not read),
+# so different systems with cells of their own run in the slots of one union with their line graph.
+@declares(isolated="model", edge_shifts=True, capacity=_CAPACITY_STEP, patches=("_patches",))
 class CHGNetAdapter:
     """An upstream CHGNet module as a :class:`~fastmd.adapters.protocol.ModelAdapter` with an
     :class:`~fastmd.adapters.protocol.EnergyTap` (see the module docstring).
@@ -348,9 +335,7 @@ class CHGNetAdapter:
                  records: tuple[PatchRecord, ...] = PATCH_RECORDS) -> None:
         if not getattr(module, "mlp_first", False):
             raise ValueError("the CHGNet energy tap reads per-atom energies before pooling (mlp_first=True)")
-        self.module = module.eval()
-        for parameter in self.module.parameters():
-            parameter.requires_grad_(False)
+        self.module = frozen(module)
         self.checkpoint = dict(checkpoint or {})
         # Far self-loops where the smooth cutoffs make them add nothing (the pretrained models); else sink rows.
         self._padding = _FAR_SELF_LOOPS if _loops_add_nothing(self.module) else _SINK_ATOMS
@@ -376,13 +361,9 @@ class CHGNetAdapter:
         """Directed edges within the atom-graph cutoff, their pairs, and the triplets of bonds within the
         bond-graph cutoff (upstream's graph converter's cutoffs); one atom-graph layer per atom convolution."""
         converter = self.module.graph_converter
-        return TopologySpec(
-            cutoff=float(converter.atom_graph_cutoff),
-            num_interactions=int(self.module.n_conv),
-            triplet_cutoff=float(converter.bond_graph_cutoff),
-            undirected_pairs=True,
-            model_dtype=str(next(self.module.parameters()).dtype).removeprefix("torch."),
-        )
+        return TopologySpec(cutoff=float(converter.atom_graph_cutoff), num_interactions=int(self.module.n_conv),
+                            triplet_cutoff=float(converter.bond_graph_cutoff), undirected_pairs=True,
+                            model_dtype=dtype_name(self.module))
 
     def padding_rule(self) -> PaddingRule:
         """Far self-loops: CHGNet's smooth cutoffs give the padded pairs and triplets zero weight, so the
@@ -408,10 +389,6 @@ class CHGNetAdapter:
                                     torch.full((1,), rows, dtype=torch.int64, device=device))
         owners, atoms_per_graph = self._constants[key]
         return CHGNetInput(batch=batch, owners=owners, atoms_per_graph=atoms_per_graph)
-
-    def isolated_atom_policy(self) -> str:
-        """"model": CHGNet evaluates an atom without neighbours itself."""
-        return "model"
 
     def reference_energies(self) -> Tensor:
         """The AtomRef weights as a ``[1, 94]`` float32 row (column ``Z - 1``), read-only: the reference
@@ -508,9 +485,7 @@ class CHGNetAdapter:
         """No host synchronization in a call with the patches applied (captured whole), an exact
         cutoff, held to upstream's call within twice the eager noise floor (atomic scatters: not
         bitwise), the engine-owned derivative with the stress in eV/Å³, no torch.compile."""
-        return CaptureContract(sync_free=self.sync_free, exact_cutoff=True, accuracy_class="fp32_noise",
-                               tol_multiplier=2.0, force_mode="engine_autograd", stress_unit="eV/A^3",
-                               compiled="none")
+        return CaptureContract(sync_free=self.sync_free, exact_cutoff=True, tol_multiplier=2.0)
 
     def system_batching(self) -> str | None:
         """"union" for upstream's ``CHGNet`` itself: its per-atom energies come from convolutions over the
@@ -521,22 +496,6 @@ class CHGNetAdapter:
         if (type(self.module).__name__, type(self.module).__module__) != ("CHGNet", "chgnet.model.model"):
             return None
         return "union"
-
-    def edge_shift_input(self) -> bool:
-        """True: :meth:`node_energy` takes the engine's per-edge shifts (the bond vectors, and the angles from them,
-        read ``positions`` and the shifts only; its ``cell`` is then not read), so different systems with cells of
-        their own run in the slots of one union with their line graph."""
-        return True
-
-    def capacity_step(self) -> CapacityStep:
-        """CHGNet's capacity tiers (``_CAPACITY_STEP``): every padded edge runs the atom convolution's gated
-        MLP and every padded triplet the bond convolution's and the angle update's, so a small cell takes
-        fine tiers of both; and a union's growth headrooms, above its counts' drift at 500 K."""
-        return _CAPACITY_STEP
-
-    def upstream_patches(self) -> list:
-        """The outcome of each patch record (applied or declined)."""
-        return list(self._patches)
 
     def close(self) -> None:
         """Revert the applied patches (idempotent); the adapter then runs upstream's code paths (not
