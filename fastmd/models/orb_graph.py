@@ -139,10 +139,12 @@ class ORBGraphAdapter:
                 'source_pins': dict(handle.source_pins)}
         return inputs
 
-    def enable_operator_rewrites(self, backend='torch', *, steady_options=None):
+    def enable_operator_rewrites(self, backend='torch', *, steady_options=None,
+                                 projection_backend=None):
         if self._energy_installation is not None:
             raise RuntimeError('Disable energy compilation before changing ORB operator rewrites')
-        self._base.enable_operator_rewrites(backend, steady_options=steady_options)
+        self._base.enable_operator_rewrites(backend, steady_options=steady_options,
+                                            projection_backend=projection_backend)
 
     def enable_energy_compile(self, *, autotune=False):
         """Explicit conservative FP32 energy compilation; select before prepare.

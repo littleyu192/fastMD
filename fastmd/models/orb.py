@@ -364,6 +364,7 @@ class ORBAdapter:
         self._operator_patches = []
         self._steady_installation = None
         self.operator_backend = 'upstream'
+        self.projection_backend = None
         for parameter in self.module.parameters():
             parameter.requires_grad_(False)
         self.checkpoint = dict(checkpoint or {})
@@ -665,7 +666,8 @@ class ORBAdapter:
         return (list(self.patches) + list(self._operator_patches)
                 + ([] if steady is None else list(steady.outcomes)))
 
-    def enable_operator_rewrites(self, backend='torch', *, steady_options=None) -> None:
+    def enable_operator_rewrites(self, backend='torch', *, steady_options=None,
+                                 projection_backend=None) -> None:
         """Select operators before warm-up; weights and FP32 precision stay unchanged.
 
         ``steady_options`` explicitly selects conservative-only output/projection
@@ -673,11 +675,19 @@ class ORBAdapter:
         ``prune``, ``merge_node`` and ``merge_attention``. ``None`` preserves the
         existing operator path and plan fingerprint. Installation is atomic:
         a refused option or source pin leaves this adapter available for retry.
+        ``projection_backend='triton'`` independently fuses the decomposed
+        projection's gather-add-SiLU and its input VJP; the aggregation backend
+        stays as selected by ``backend``. ``'torch'`` is its explicit reference.
+        This candidate cannot currently be combined with ``steady_options``.
         """
         if backend not in ('torch', 'triton'):
             raise ValueError("operator backend must be 'torch' or 'triton'")
         if self._in_use or self._operator_patches:
             raise RuntimeError('Select operator rewrites once, before preparing model inputs')
+        if projection_backend not in (None, 'torch', 'triton'):
+            raise ValueError("projection_backend must be None, 'torch' or 'triton'")
+        if projection_backend is not None and steady_options is not None:
+            raise ValueError('projection_backend cannot be combined with steady_options')
         if steady_options is not None:
             if not isinstance(steady_options, dict):
                 raise TypeError('steady_options must be a dictionary of boolean options or None')
@@ -694,14 +704,18 @@ class ORBAdapter:
         backbone = self.module.model
         previous_compiled = backbone._compiled_call_impl
         previous_backend = self.operator_backend
+        previous_projection_backend = self.projection_backend
         # The original rewrite caches projection tensors outside state_dict.
         # Preserve these too if either installation stage is refused.
         auxiliary = [(layer, name, name in vars(layer), vars(layer).get(name))
                      for layer in backbone.gnn_stacks
-                     for name in ('_fastmd_projection_weights', '_fastmd_operator_backend')]
+                     for name in ('_fastmd_projection_weights', '_fastmd_operator_backend',
+                                  '_fastmd_projection_backend')]
         try:
-            self._operator_patches = install_orb(self.module, backend)
+            self._operator_patches = install_orb(self.module, backend,
+                                                  projection_backend=projection_backend)
             self.operator_backend = backend
+            self.projection_backend = projection_backend
             if steady_options is not None:
                 from fastmd.models.orb_ops.orb_steady import install
                 self._steady_installation = install(self, **steady_options)
@@ -723,11 +737,14 @@ class ORBAdapter:
                 elif name in vars(layer):
                     delattr(layer, name)
             self.operator_backend = previous_backend
+            self.projection_backend = previous_projection_backend
             backbone._compiled_call_impl = previous_compiled
             raise
 
     def system_inputs(self):
         inputs = {'operator_backend': self.operator_backend}
+        if self.projection_backend is not None:
+            inputs['projection_backend'] = self.projection_backend
         steady = self._steady_installation
         if steady is not None and not steady.restored:
             inputs.update(steady_options=dict(steady.options),

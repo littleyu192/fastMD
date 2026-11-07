@@ -352,6 +352,10 @@ class CHGNetAdapter:
         for parameter in self.module.parameters():
             parameter.requires_grad_(False)
         self.checkpoint = dict(checkpoint or {})
+        self._in_use = False
+        self._operator_patches = []
+        self._operator_installation = None
+        self.operator_backend = "upstream"
         # Far self-loops where the smooth cutoffs make them add nothing (the pretrained models); else sink rows.
         self._padding = _FAR_SELF_LOOPS if _loops_add_nothing(self.module) else _SINK_ATOMS
         # Shape constants per (rows, device): built once and never freed, since captured graphs read them.
@@ -396,6 +400,7 @@ class CHGNetAdapter:
         if batch.triplets is None or batch.positions is None:
             raise ValueError("CHGNet reads a line graph with Cartesian positions (a graph batch with triplets "
                              "and positions)")
+        self._in_use = True
         if batch.species is not self._checked_species:
             species = batch.species
             if bool(((species < 1) | (species > _ELEMENTS)).any()):
@@ -534,13 +539,39 @@ class CHGNetAdapter:
         fine tiers of both; and a union's growth headrooms, above its counts' drift at 500 K."""
         return _CAPACITY_STEP
 
+    def enable_operator_rewrites(self, backend: str = "torch") -> None:
+        """Opt into indexed first-Linear projections before preparing any inputs.
+
+        ``torch`` projects source tables before gathering. ``triton`` additionally
+        uses MatRIS's fused gather/add/SiLU for FP32 hidden SiLU layers (first
+        derivatives only); output-only angle updates preserve their normalization.
+        Sparse shapes with no projection reuse keep the original gathered MLP.
+        The default profiles remain upstream until performance gates pass.
+        """
+        if backend not in ("torch", "triton"):
+            raise ValueError("operator backend must be 'torch' or 'triton'")
+        if self._in_use or self._operator_installation is not None:
+            raise RuntimeError("Select operator rewrites once, before preparing model inputs")
+        from fastmd.models.chgnet_fusion import install
+
+        installation = install(self.module, backend)
+        self._operator_installation = installation
+        self._operator_patches = installation.outcomes
+        self.operator_backend = backend
+
+    def system_inputs(self) -> dict:
+        """Record the explicit operator choice alongside the source-pinned patches."""
+        return {"operator_backend": self.operator_backend}
+
     def upstream_patches(self) -> list:
         """The outcome of each patch record (applied or declined)."""
-        return list(self._patches)
+        return list(self._patches) + list(self._operator_patches)
 
     def close(self) -> None:
         """Revert the applied patches (idempotent); the adapter then runs upstream's code paths (not
         sync-free)."""
+        if self._operator_installation is not None:
+            self._operator_installation.restore()
         revert_patches(self._patches)
         self.sync_free = False
 

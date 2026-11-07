@@ -41,7 +41,8 @@ Reads a checkout's ``fastmd/`` with ``ast`` (nothing is imported) and reports:
                    accuracy, a package's __main__ (its command line), applications
 
   FastMD's ``models.orb_graph`` and ``models.orb_ops`` belong to the ORB family;
-  ``models.esen_ops`` belongs to eSEN. NequIP follows the ordinary model rules.
+  ``models.esen_ops`` belongs to eSEN and ``models.chgnet_fusion`` to CHGNet.
+  NequIP follows the ordinary model rules.
   Compatibility modules in ``ops`` retain their actual destination's layer.
 
   A model module (``fastmd.models.<family>``, MatRIS's package included) may import leaf, graph, engine and its own
@@ -181,7 +182,7 @@ OLD_PATHS.update({f"fastmd.ops.{name}": (MODELS, family) for family, names in (
     ("orb", ("orb_inference", "orb_energy", "orb_steady", "triton_orb_inference")),
     ("esen", ("esen_inference", "triton_esen_nonlinear", "triton_esen_rotation"))) for name in names})
 # A model may use its own auxiliary package, but not another model's operators.
-FAMILY_ALIASES = {"orb_graph": "orb", "orb_ops": "orb", "esen_ops": "esen"}
+FAMILY_ALIASES = {"orb_graph": "orb", "orb_ops": "orb", "esen_ops": "esen", "chgnet_fusion": "chgnet"}
 OLD_PATHS["fastmd.adapters.orb_graph"] = (MODELS, "orb")
 FACADE = "fastmd/applications/__init__.py"
 # What a package __init__ may import when the package is imported, besides the standard library.

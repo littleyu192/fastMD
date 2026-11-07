@@ -31,9 +31,17 @@ def interaction(self, nodes, edges, senders, receivers, cutoff, cond_nodes=None,
         nodes = nodes + self._cond_node_proj(cond_nodes)
     if cond_edges is not None:
         edges = edges + self._cond_edge_proj(cond_edges)
-    updated = projected_edge_input(nodes, edges, senders, receivers,
-                                   self._fastmd_projection_weights, self._edge_mlp.mlp[0].bias)
-    for layer in list(self._edge_mlp.mlp.children())[1:]:
+    tail = list(self._edge_mlp.mlp.children())[1:]
+    if (getattr(self, '_fastmd_projection_backend', None) == 'triton'
+            and tail and type(tail[0]) is torch.nn.SiLU):
+        from fastmd.models.orb_ops.triton_orb_projection import projected_edge_silu
+        updated = projected_edge_silu(nodes, edges, senders, receivers,
+                                     self._fastmd_projection_weights, self._edge_mlp.mlp[0].bias)
+        tail = tail[1:]
+    else:
+        updated = projected_edge_input(nodes, edges, senders, receivers,
+                                       self._fastmd_projection_weights, self._edge_mlp.mlp[0].bias)
+    for layer in tail:
         updated = layer(updated)
     updated = self._edge_mlp.layer_norm(updated)
     # ORB's attention reads the OLD edges, before the edge residual update.

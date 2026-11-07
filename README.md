@@ -184,6 +184,30 @@ print(atoms.get_stress())           # eV/Å³, ASE Voigt order
 
 For a CPU example, use `model="matris_10m_oam"` and `device="cpu"`. The adapters and shared derivative layer handle model energy normalization, gradients, and stress units while preserving ASE conventions at the interface.
 
+CHGNet and ORB have explicit frozen-weight projection rewrites. Select them
+before passing the adapter to a calculator or MD driver:
+
+```python
+from fastmd import load_adapter
+
+chgnet = load_adapter("chgnet_0_3_0", device="cuda")
+chgnet.enable_operator_rewrites("triton")  # "torch" is also available
+
+orb = load_adapter("orb_v3", device="cuda")
+orb.enable_operator_rewrites("torch")  # project source nodes before gathering
+# On a fresh adapter, additionally fuse gather/add/SiLU and its input VJP:
+# orb.enable_operator_rewrites("torch", projection_backend="triton")
+```
+
+These options preserve FP32/highest precision and remain opt-in. CHGNet keeps
+the original concat/Linear for sparse angle graphs when projecting the whole
+source table would cost more. Its Triton epilogue supports first derivatives
+for forces/stress; use the Torch backend for higher derivatives. ORB's
+`projection_backend` is independent of its aggregation backend and cannot be
+combined with `steady_options`. Speed depends on graph size, feature widths,
+and compilation; [the S01 projection experiment](validation/indexed_projection_20261107/README.md)
+reports operator, fixed-geometry E/F/S, and whole-step timings separately.
+
 ## Molecular dynamics
 
 ```bash

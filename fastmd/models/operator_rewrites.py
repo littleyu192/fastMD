@@ -23,7 +23,7 @@ def _install(outcomes, instance, family, target, sha, implementation):
         raise RuntimeError(f'Operator rewrite refused: {[p.reason for p in added]}')
 
 
-def install_orb(module, backend):
+def install_orb(module, backend, *, projection_backend=None):
     from fastmd.models.orb_ops.orb_inference import interaction
     outcomes=[]
     try:
@@ -38,6 +38,8 @@ def install_orb(module, backend):
                 raise ValueError('Unexpected ORB first edge projection shape')
             layer._fastmd_projection_weights=tuple(w.contiguous() for w in linear.weight.split(width,dim=1))
             layer._fastmd_operator_backend=backend
+            if projection_backend is not None:
+                layer._fastmd_projection_backend=projection_backend
             _install(outcomes,layer,'orb','gns.AttentionInteractionNetwork.forward',
                      '5c3b6f57cdca3abafc47869a6d363dae2582c26a863d9e5a34507b39074f90d0',interaction)
     except BaseException:

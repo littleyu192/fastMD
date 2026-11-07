@@ -30,7 +30,7 @@ from fastmd.adapters.patches import PatchRecord, apply_patches, revert_patches
 _PINS = {
     "MoleculeGNS.forward": "a02ec27dc12566dc38198e09fca6ce486d898895ced0746c7ef4206f2cc6f026",
     "AttentionInteractionNetwork.forward": "5c3b6f57cdca3abafc47869a6d363dae2582c26a863d9e5a34507b39074f90d0",
-    "interaction": "a7a0ac45ff3ad391fb76519bc3fcf4251665b4d89c1a0d465e7b6dc9eb2a4601",
+    "interaction": "f4e971212d17a53afdfb5806d7f95672a723028dc9e3a7b0318cbc3d736f0327",
 }
 
 
@@ -173,6 +173,8 @@ def install(adapter, *, prune=False, merge_node=False, merge_attention=False):
         raise RuntimeError("Install candidates before prepare or MD construction")
     if base.operator_backend != "torch":
         raise RuntimeError("First call adapter.enable_operator_rewrites('torch')")
+    if getattr(base, 'projection_backend', None) is not None:
+        raise ValueError("Steady candidates cannot be combined with projection_backend")
     if module.training or any(p.requires_grad for p in module.parameters()):
         raise ValueError("Candidates require eval mode and frozen weights")
     if any(p.dtype != torch.float32 for p in backbone.parameters()):
