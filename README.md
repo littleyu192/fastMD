@@ -1,6 +1,38 @@
-# FastMD
+<div align="center">
 
-FastMD is a single-device simulation framework for machine-learned interatomic potentials (MLIPs). It provides a common interface for ASE calculators, structure relaxation, ASE molecular dynamics, and GPU-resident molecular dynamics, with `eager`, `model_graph`, and `whole_step` execution modes.
+<h1>FastMD</h1>
+
+<p><strong>Molecular simulation with machine-learned interatomic potentials</strong></p>
+<p>One interface for energy, forces, relaxation, and molecular dynamics.</p>
+
+<p>
+  <a href="#installation"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square" alt="Python 3.10 or newer"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/PyTorch-2.6%2B-EE4C2C?style=flat-square" alt="PyTorch 2.6 or newer"></a>
+  <a href="#molecular-dynamics"><img src="https://img.shields.io/badge/Execution-CPU%20%7C%20CUDA-76B900?style=flat-square" alt="CPU and CUDA execution"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-BSD--3--Clause-64748B?style=flat-square" alt="BSD 3-Clause license"></a>
+</p>
+
+<p>
+  <a href="#installation">Install</a> &nbsp;·&nbsp;
+  <a href="#unified-calculator">Quick start</a> &nbsp;·&nbsp;
+  <a href="#supported-models">Models</a> &nbsp;·&nbsp;
+  <a href="#s01-benchmark-results">Benchmarks</a> &nbsp;·&nbsp;
+  <a href="#molecular-dynamics">MD</a> &nbsp;·&nbsp;
+  <a href="#structure-relaxation">Relaxation</a>
+</p>
+
+</div>
+
+---
+
+FastMD is a **single-device simulation framework** for machine-learned interatomic
+potentials (MLIPs). It connects model backends to a shared simulation runtime, with
+`eager`, `model_graph`, and `whole_step` execution modes.
+
+| Calculate | Simulate | Relax |
+| :--- | :--- | :--- |
+| Energy, forces, and stress through a common ASE calculator | ASE-driven and GPU-resident molecular dynamics | Single-structure and batched structure optimization |
+| [`MLIPCalculator`](#unified-calculator) | [`MolecularDynamics` / `GPUResidentMolecularDynamics`](#molecular-dynamics) | [`StructOptimizer` / `MultiSystemRelaxation`](#structure-relaxation) |
 
 ## Supported models
 
@@ -8,17 +40,36 @@ Checkpoint names link to official weight files or model pages.
 
 | Model | Name or entry point | Model implementation |
 | --- | --- | --- |
-| MatRIS | [matris_10m_oam](https://ndownloader.figshare.com/files/59142728), [matris_10m_mp](https://ndownloader.figshare.com/files/59143058), or `model_path=...` | Bundled single-device implementation; weights loaded separately |
-| MACE | [mace_mp_0](https://github.com/ACEsuit/mace-mp/releases/download/mace_mp_0/2023-12-03-mace-128-L1_epoch-199.model), [mace_mpa_0](https://github.com/ACEsuit/mace-mp/releases/download/mace_mpa_0/mace-mpa-0-medium.model), `mace` + `model_path`, or a `.model` path | Optional `mace-torch` package |
-| SevenNet | [sevennet_0](https://github.com/MDIL-SNU/SevenNet/blob/main/sevenn/pretrained_potentials/SevenNet_0__11Jul2024/checkpoint_sevennet_0.pth), [7net-0](https://github.com/MDIL-SNU/SevenNet/blob/main/sevenn/pretrained_potentials/SevenNet_0__11Jul2024/checkpoint_sevennet_0.pth), or `sevennet` + `model_path` | Optional `sevenn` package |
-| ORB | [orb_v3](https://orbitalmaterials-public-models.s3.us-west-1.amazonaws.com/forcefields/orb-v3/orb-v3-conservative-inf-mpa-20250404.ckpt), with optional `model_path` | Optional `orb-models` package |
-| CHGNet | [chgnet_0_3_0](https://github.com/CederGroupHub/chgnet/blob/main/chgnet/pretrained/0.3.0/chgnet_0.3.0_e29f68s314m37.pth.tar) | Pretrained weights supplied by the optional `chgnet` package |
-| eSEN | [esen](https://huggingface.co/facebook/OMAT24#model-checkpoints) + `model_path` | Legacy `fairchem-core==1.10.0`; isolated environment and local weights required |
-| NequIP | [nequip-oam-l](https://www.nequip.net/models/mir-group/NequIP-OAM-L:0.1), [nequip-oam-xl](https://www.nequip.net/models/mir-group/NequIP-OAM-XL:0.1), [nequip-mp-l](https://www.nequip.net/models/mir-group/NequIP-MP-L:0.1), or `nequip`, each with `model_path` | Official energy network; CPU/GPU eager, with opt-in validated padding and CUDA Graph capture |
+| **MatRIS** | [matris_10m_oam](https://ndownloader.figshare.com/files/59142728), [matris_10m_mp](https://ndownloader.figshare.com/files/59143058), or `model_path=...` | Bundled single-device implementation; weights loaded separately |
+| **MACE** | [mace_mp_0](https://github.com/ACEsuit/mace-mp/releases/download/mace_mp_0/2023-12-03-mace-128-L1_epoch-199.model), [mace_mpa_0](https://github.com/ACEsuit/mace-mp/releases/download/mace_mpa_0/mace-mpa-0-medium.model), `mace` + `model_path`, or a `.model` path | Optional `mace-torch` package |
+| **SevenNet** | [sevennet_0](https://github.com/MDIL-SNU/SevenNet/blob/main/sevenn/pretrained_potentials/SevenNet_0__11Jul2024/checkpoint_sevennet_0.pth), [7net-0](https://github.com/MDIL-SNU/SevenNet/blob/main/sevenn/pretrained_potentials/SevenNet_0__11Jul2024/checkpoint_sevennet_0.pth), or `sevennet` + `model_path` | Optional `sevenn` package |
+| **ORB** | [orb_v3](https://orbitalmaterials-public-models.s3.us-west-1.amazonaws.com/forcefields/orb-v3/orb-v3-conservative-inf-mpa-20250404.ckpt), with optional `model_path` | Optional `orb-models` package |
+| **CHGNet** | [chgnet_0_3_0](https://github.com/CederGroupHub/chgnet/blob/main/chgnet/pretrained/0.3.0/chgnet_0.3.0_e29f68s314m37.pth.tar) | Pretrained weights supplied by the optional `chgnet` package |
+| **eSEN** | [esen](https://huggingface.co/facebook/OMAT24#model-checkpoints) + `model_path` | Legacy `fairchem-core==1.10.0`; isolated environment and local weights required |
 
 ## S01 benchmark results
 
-The table contains **41 checkpoints across five model families**, with a complete official/FastMD pair for each checkpoint.
+**41 checkpoints · 5 model families · NVIDIA H100 80 GB**
+
+S01: 135-atom CsSnI₃ at 500 K, run for 80,000 steps (20 ps) on one GPU.
+Every checkpoint has a complete official/FastMD pair.
+
+> **Timing basis:** speedup = official full-run time / FastMD full-run time.
+> Timings include trajectory output; model loading, compilation, capture, and
+> post-run validation are excluded. Results apply to the S01 setup below.
+
+<!-- s01-results:begin -->
+
+| Model family | Completed checkpoint pairs | Recorded speedup range |
+| --- | ---: | ---: |
+| MatRIS | 2 | 5.13–5.52× |
+| MACE | 15 | 12.88–24.73× |
+| SevenNet | 8 | 14.87–24.47× |
+| ORB | 13 | 3.23–7.19× |
+| CHGNet | 3 | 18.45–21.05× |
+
+<details>
+<summary><strong>Benchmark setup and timing protocol</strong></summary>
 
 | Setting | Value |
 | --- | --- |
@@ -34,15 +85,10 @@ The table contains **41 checkpoints across five model families**, with a complet
 
 **Speedup = official full-run time / FastMD full-run time.** The displayed step times are the complete MD wall times divided by 80,000.
 
-<!-- s01-results:begin -->
+</details>
 
-| Model family | Completed checkpoint pairs | Recorded speedup range |
-| --- | ---: | ---: |
-| MatRIS | 2 | 5.13–5.52× |
-| MACE | 15 | 12.88–24.73× |
-| SevenNet | 8 | 14.87–24.47× |
-| ORB | 13 | 3.23–7.19× |
-| CHGNet | 3 | 18.45–21.05× |
+<details>
+<summary><strong>MatRIS</strong> — 2 checkpoints</summary>
 
 ### MatRIS
 
@@ -50,6 +96,11 @@ The table contains **41 checkpoints across five model families**, with a complet
 | --- | ---: | ---: | ---: |
 | [matris_10m_oam](https://ndownloader.figshare.com/files/59142728) | 154.5975 | 28.0180 | 5.5178× |
 | [matris_10m_mp](https://ndownloader.figshare.com/files/59143058) | 164.6329 | 32.0987 | 5.1290× |
+
+</details>
+
+<details>
+<summary><strong>MACE</strong> — 15 checkpoints</summary>
 
 ### MACE
 
@@ -71,6 +122,11 @@ The table contains **41 checkpoints across five model families**, with a complet
 | [mace-mace-matpes-r2scan-0](https://github.com/ACEsuit/mace-foundations/releases/download/mace_matpes_0/MACE-matpes-r2scan-omat-ft.model) | 36.5004 | 2.4031 | 15.1891× |
 | [mace-large-2024-01-07](https://github.com/ACEsuit/mace-mp/releases/download/mace_mp_0/2024-01-07-mace-128-L2_epoch-199.model) | 36.9483 | 2.1359 | 17.2991× |
 
+</details>
+
+<details>
+<summary><strong>SevenNet</strong> — 8 checkpoints</summary>
+
 ### SevenNet
 
 | Checkpoint | Official (ms/step) | FastMD (ms/step) | Speedup |
@@ -83,6 +139,11 @@ The table contains **41 checkpoints across five model families**, with a complet
 | [7net-nano-5.0](https://github.com/MDIL-SNU/SevenNet/releases/download/v0.13.1.cp/checkpoint_7net_nano_5.0.pth) | 20.3308 | 1.3669 | 14.8732× |
 | [7net-nano-5.5](https://github.com/MDIL-SNU/SevenNet/releases/download/v0.13.1.cp/checkpoint_7net_nano_5.5.pth) | 32.0208 | 1.4654 | 21.8514× |
 | [7net-nano-6.0](https://github.com/MDIL-SNU/SevenNet/releases/download/v0.13.1.cp/checkpoint_7net_nano_6.0.pth) | 23.2114 | 1.3616 | 17.0477× |
+
+</details>
+
+<details>
+<summary><strong>ORB</strong> — 13 checkpoints</summary>
 
 ### ORB
 
@@ -102,6 +163,11 @@ The table contains **41 checkpoints across five model families**, with a complet
 | [orb-d3-xs-v2](https://orbitalmaterials-public-models.s3.us-west-1.amazonaws.com/forcefields/orb-d3-xs-v2-20241011.ckpt) | 6.7959 | 1.7014 | 3.9943× |
 | [orb-mptraj-only-v2](https://orbitalmaterials-public-models.s3.us-west-1.amazonaws.com/forcefields/orb-mptraj-only-v2-20241014.ckpt) | 10.9139 | 3.2807 | 3.3267× |
 
+</details>
+
+<details>
+<summary><strong>CHGNet</strong> — 3 checkpoints</summary>
+
 ### CHGNet
 
 | Checkpoint | Official (ms/step) | FastMD (ms/step) | Speedup |
@@ -110,63 +176,61 @@ The table contains **41 checkpoints across five model families**, with a complet
 | [chgnet-0.2.0](https://github.com/CederGroupHub/chgnet/blob/main/chgnet/pretrained/0.2.0/chgnet_0.2.0_e30f77s348m32.pth.tar) | 52.0884 | 2.4750 | 21.0455× |
 | [chgnet-r2scan](https://github.com/CederGroupHub/chgnet/blob/main/chgnet/pretrained/r2scan/chgnet_r2scan_transfer_learning_e15f36s161m23.pth.tar) | 51.5925 | 2.7956 | 18.4548× |
 
+</details>
+
+<!-- s01-results:end -->
 
 ## Installation
 
-Use Python 3.10 or newer and run these commands from the repository root. Base and optional dependencies are managed in `pyproject.toml`:
+Use **Python 3.10+** and run installation commands from the repository root.
+Dependencies and optional backends are defined in [`pyproject.toml`](pyproject.toml).
 
 ```bash
 python -m pip install -e .
-# GPU neighbor-graph construction:
-python -m pip install -e '.[gpu-graph]'
-# CHGNet with GPU graph construction:
-python -m pip install -e '.[gpu-graph,chgnet]'
-# Install other model backends as needed:
-python -m pip install -e '.[gpu-graph,mace]'
-# Experimental M3GNet integration:
-python -m pip install -e '.[m3gnet]'
 ```
 
-The base installation requires Torch ≥ 2.6. The `gpu-graph` extra requires Torch ≥ 2.8, `nvalchemi-toolkit-ops[torch]>=0.4.1,<0.5`, and `warp-lang>=1.13.0`. Installing this extra can upgrade an older Torch installation; prepare a Torch build matching your CUDA environment first. These dependencies provide the GPU neighbor-list backend. The former `graph/setup.py` and `fastmd_op` build are no longer required. Use `-e .` and `-e '.[m3gnet]'` in place of the old `requirements.txt` and `requirements-m3gnet.txt` installation paths.
+Choose the extra for your workload:
+
+| Workload | Install command |
+| :--- | :--- |
+| GPU neighbor graphs | `python -m pip install -e '.[gpu-graph]'` |
+| CHGNet + GPU graphs | `python -m pip install -e '.[gpu-graph,chgnet]'` |
+| MACE + GPU graphs | `python -m pip install -e '.[gpu-graph,mace]'` |
+| SevenNet + GPU graphs | `python -m pip install -e '.[gpu-graph,sevennet]'` |
+| ORB + GPU graphs | `python -m pip install -e '.[gpu-graph,orb]'` |
+| Experimental M3GNet integration | `python -m pip install -e '.[m3gnet]'` |
+
+> **GPU setup:** the base package requires Torch ≥ 2.6; `gpu-graph` requires
+> Torch ≥ 2.8, `nvalchemi-toolkit-ops[torch]>=0.4.1,<0.5`, and `warp-lang>=1.13.0`.
+> Prepare a Torch build matching your CUDA environment first, because installing
+> the extra can upgrade Torch. MACE and SevenNet need separate environments due
+> to their different e3nn requirements.
+
+<details>
+<summary><strong>cuEquivariance acceleration and dependency notes</strong></summary>
 
 The MACE and SevenNet `topology` profiles use cuEquivariance. The upstream CUDA 13 dependency set is available through `python -m pip install -e '.[gpu-graph,mace,cueq-cu13]'`; substitute `sevennet` for `mace` as needed. Use `optimization_profile="generic"` without that acceleration environment. MACE and SevenNet require different e3nn versions and should use separate environments.
 
 `requirements-{mace,sevennet,orb,chgnet}.txt` preserve upstream test-environment versions and hashes. They do not replace the base installation, contain Python/platform-specific wheel hashes, and are not complete dependency lockfiles. Use the extras above for normal installation. The upstream CI scripts mentioned in those records are not included here.
 
+The former `graph/setup.py` and `fastmd_op` build are no longer required. Use
+`-e .` and `-e '.[m3gnet]'` in place of the old `requirements.txt` and
+`requirements-m3gnet.txt` installation paths.
+
+</details>
+
+<details>
+<summary><strong>eSEN: isolated legacy environment</strong></summary>
 
 ### eSEN environment
 
 Legacy eSEN uses an isolated environment because fairchem 1.10.0 conflicts with the base package's dependency constraints. The recorded environment uses Python 3.11, fairchem-core 1.10.0, Torch 2.8.0+cu128, NumPy 1.26.4, SciPy 1.14.1, e3nn 0.5.9, ASE 3.26.0, nvalchemi-toolkit-ops 0.2.0, and warp-lang 1.10.0, with PyG extensions matching Torch/CUDA. Torch 2.8 is an explicit override of fairchem's declared Torch 2.4 requirement. There is no `esen` extra: use the prepared environment and load this checkout through `PYTHONPATH`, for example `PYTHONPATH="$PWD" python your_script.py` from the repository root. Supply an [eSEN-30M-OAM](https://huggingface.co/facebook/OMAT24#model-checkpoints) checkpoint explicitly; fairchem 2.x/UMA and direct-force heads are not supported by this adapter.
 
-### NequIP CPU usage
-
-Install `python -m pip install -e '.[nequip]'` in a separate environment. NequIP 0.14 requires e3nn < 0.6. Download the official local `.nequip.zip` package from the model page. Current `.ckpt` training checkpoints are also accepted; legacy deployed and compiled artifacts are not. The adapter preserves the saved weight precision, double-precision geometry, per-type energy shifts, and ZBL potential. FastMD builds the radius graph and differentiates the upstream atomic energies for forces and stress.
-
-```python
-import torch
-from ase.io import read
-from fastmd import InferenceConfig, MLIPCalculator
-
-torch.set_num_threads(4)
-atoms = read("S02.traj")
-with MLIPCalculator(
-    model="nequip-oam-l",
-    model_path="NequIP-OAM-L-0.1.nequip.zip",
-    device="cpu",
-    task="efs",
-    config=InferenceConfig(execution="eager", optimization_profile="generic"),
-) as calculator:
-    atoms.calc = calculator
-    print(atoms.get_potential_energy(), atoms.get_forces(), atoms.get_stress())
-```
-
-NequIP defaults to eager execution with dynamic edge filtering. To opt into CUDA Graph capture, load an adapter with `fastmd.models.nequip.load_nequip(..., fixed_shape=True)` and pass it as `model` to the calculator or GPU MD driver. This checks the supported upstream energy pipeline and verifies zero energy/gradient contributions from far self-loop padding before permitting capture; unsupported pipelines raise an error. CPU and GPU calculators preserve double-precision geometry independently of the FP32 neural weights. GPU-resident MD retains that precision with `ensemble="nvt_nhc"`, including whole-step force, energy, and stress buffers.
-
-The loader also accepts `kernel="cueq"` to apply NequIP's official cuEquivariance modifier. This optional path requires `cuequivariance`, `cuequivariance-torch` and matching CUDA ops (tested with version 0.9.1); the default is `kernel="upstream"`. Conversion verifies that every original saved state tensor is unchanged. The execution plan reports the actual backend, and CUDA loading rejects a fallback to naive kernels. Combine `kernel="cueq"` with `fixed_shape=True` to request both optimizations.
-
-The S01–S05 GPU validation and full MD campaign is recorded in [the benchmark manifest](../records2610/nequip_gpu_20261022/manifest.json) and [live results](../records2610/nequip_gpu_20261022/summary.json). The separate [S01 optimization experiment](../records2610/nequip_opt_s01_20261023/) distinguishes short correctness/timing checks from validated full trajectories.
+</details>
 
 ## Unified calculator
+
+Evaluate energy, forces, and stress with ASE conventions:
 
 ```python
 from ase.build import bulk
@@ -186,6 +250,8 @@ For a CPU example, use `model="matris_10m_oam"` and `device="cpu"`. The adapters
 
 ## Molecular dynamics
 
+Run GPU-resident NVT dynamics from the command line:
+
 ```bash
 python examples/simulate.py --structure input.extxyz \
   --model chgnet_0_3_0 --driver gpu --device cuda \
@@ -195,113 +261,96 @@ python examples/simulate.py --structure input.extxyz \
 
 You can also instantiate `GPUResidentMolecularDynamics` directly. Use it as a context manager to finish writing logs and trajectories on exit. `MolecularDynamics` provides ASE-driven MD, and `StructOptimizer` provides structure relaxation. `execution="auto"` selects a path using model capabilities, available memory, and applicable constraints; it does not guarantee whole-step capture for every model.
 
+Inspect the selected execution plan:
+
 ```bash
 fastmd-explain --structure input.extxyz --model chgnet_0_3_0 --device cuda --json
 ```
 
 ## Structure relaxation
 
-The relaxation API ports the task-level behavior of [`hsy_relax`](https://github.com/littleyu192/fastMD/tree/hsy_relax)
-onto the current `MLIPCalculator`. Relaxation and MD share model adapters, energy derivatives,
-operator optimizations, neighbor construction, and `InferenceConfig`. There is no separate
-relaxation model backend. The older branch's `FastMDCalculator` and `CUDAGraphConfig` are
-replaced by `MLIPCalculator` and `InferenceConfig` here.
+`StructOptimizer` shares model adapters and inference settings with the
+calculator and MD drivers. It selects GPU or ASE optimization for each workload.
 
 ```python
-from ase.io import read, write
-from fastmd import InferenceConfig, RelaxationConfig, make_relaxation_calculator, relax
+from ase.io import read
+from fastmd import InferenceConfig, StructOptimizer
 
 atoms = read("input.extxyz")
-settings = RelaxationConfig(relax_cell=True, optimizer="FIRE", fmax=0.05, steps=500)
-with make_relaxation_calculator(
-    model="chgnet_0_3_0", device="cuda", relax_cell=settings.relax_cell,
-    config=InferenceConfig(execution="auto", optimization_profile="topology"),
-) as calculator:
-    result = relax(atoms, calculator, settings)
-    print(result.converged, result.steps, result.final_energy, result.max_filter_force)
-    print(calculator.config_summary()["effective"])
-    # Reuse this same calculator for further structures; each gets a fresh optimizer.
-write("relaxed.extxyz", result.atoms)
+with StructOptimizer(
+    model="chgnet_0_3_0",
+    device="cuda",
+    task="efs",
+    engine="auto",
+    config=InferenceConfig(execution="auto", optimization_profile="generic"),
+) as optimizer:
+    result = optimizer.relax(
+        atoms, fmax=0.05, steps=500, relax_cell=True,
+        verbose=False, assign_magmoms=False,
+    )
+    print(result["trajectory"].energies[-1])
+    print(optimizer.config_summary()["relaxation"]["last"])
+    final_structure = result["final_structure"]
 ```
 
-Use `relax_cell=False` in both settings and the calculator factory for fixed-cell relaxation.
-The factory fixes the prediction task to `ef` for a fixed cell and `efs` for a variable cell,
-so ASE's repeated property requests reuse each geometry's evaluated results. The optimizer
-choices are `FIRE`, `BFGS`, `LBFGS`, `BFGSLineSearch`, `LBFGSLineSearch`, and `MDMin`.
-Pass optimizer parameters through `optimizer_kwargs`, and `FrechetCellFilter` parameters
-such as `mask`, `hydrostatic_strain`, or `scalar_pressure` through `filter_kwargs`.
-Pressure uses ASE units (eV/Å³).
+| Engine | Behavior |
+| :--- | :--- |
+| `auto` | Use the GPU path when supported; otherwise use ASE and record the reason |
+| `gpu` | Require the GPU path; raise an error when it cannot run |
+| `ase` | Use ASE optimization |
 
-The relaxation factory and `StructOptimizer` default to `auto_policy="latency"`.
-With `execution="auto"`, a short task skips expensive online memory calibration
-when there is no compatible cached measurement. Set `auto_policy="throughput"`
-to permit calibration for a longer workload. Ordinary `MLIPCalculator` instances
-retain the throughput default, and a supplied calculator retains its policy.
-`calculator.memory_probe_summary()` reports measurements, cache hits, and skips.
-Measured bounds are reused within the process for the same adapter/model,
-configuration and exact geometry, subject to model mutation and capacity checks;
-they are not extrapolated to new cells or different structures.
+Use `relax_cell=False` for a fixed cell. Keep `InferenceConfig(execution="auto")`
+for GPU relaxation; explicit `eager` or `model_graph` requests select the ASE path
+under `engine="auto"`, or raise an error under `engine="gpu"`.
+The engine can also be selected per `relax(..., engine=...)` call.
 
-An experimental `auto_policy="latency_trial"` permits a normal model-graph
-capture when no fitted memory bound is cached. It uses the first eager peak
-and current device headroom for admission, measures every actual capture
-(including later growth), and falls back to eager on budget rejection or
-capture failure. The estimate is a heuristic, not a guaranteed memory bound.
-Inspect `calculator.capture_trial_summary()` for capture time and outcomes.
-This policy skips multi-point calibration but still pays capture cost; it may
-be slower for short tasks and does not retain graphs across atom-count changes.
-The default remains `latency` until the workload has been measured.
+> **Input and output:** ASE `Atoms` are relaxed **in place** with the optimizer's
+> calculator attached. Each result contains `final_structure` and `trajectory`;
+> a list of inputs returns a list of results in the same order.
 
-`relax` copies the input atoms, retains constraints, and returns an independent final geometry
-with a `SinglePointCalculator`. Reusing or closing the inference calculator cannot invalidate
-previous results. It never closes a calculator supplied by the caller. `steps=0` evaluates
-the initial structure. `max_force` is the maximum constrained atomic force; for variable-cell
-relaxation, convergence uses `max_filter_force`, including scaled cell forces, rather than
-atomic forces alone. `fmax` is therefore not a separate stress tolerance. Non-finite results
-raise an error. Timing includes initial evaluation and graph capture, but excludes model loading.
+<details>
+<summary><strong>Relax multiple structures</strong></summary>
 
-The existing `StructOptimizer` interface also accepts `calculator=calculator`, keeps its
-`final_structure` / `trajectory` return keys, and reports convergence and optimizer steps.
-For an active ASE `MolecularDynamics` instance, `relax(md.atoms, md.calculator, settings)`
-reuses its calculator and cached inference state; a cell relaxation requires its task to
-include stress. Use a shared calculator sequentially. To transfer a model from GPU-resident MD,
-pass `model=md.adapter` to the factory: the weights and adapter are reused, while the ASE
-calculator manages its own execution state.
+Compatible structures run together in GPU slots; structures requiring ASE are
+handled separately. Use an `{index}` placeholder when saving multiple trajectories.
 
-| Path | Optimization reuse | Requirements |
-| --- | --- | --- |
-| `relax` / `StructOptimizer` | Common calculator, operator kernels, compilation where supported, `eager` or `model_graph` | Model's calculator support; stress and a full periodic cell for variable-cell relaxation |
-| `BatchedMLIPModel` / `relax_batch` | Borrowed model adapters and installed kernels; one heterogeneous GPU batch per forward with TorchSim FIRE | Optional `fastmd[torchsim]`; small, fully periodic, unconstrained structures; eager tensor batch |
-| `MultiSystemRelaxation` | Existing multi-system engine, slot batching, GPU FIRE and whole-step CUDA Graphs | CUDA, union/per-edge-shift adapter capabilities, full periodic cells, no ASE constraints |
-
-See [TorchSim batch relaxation](docs/torchsim_relaxation.md) for batching examples,
-timing boundaries and supported model families.
-
-`execution="auto"` uses the calculator's existing capability and memory decisions. Explicit
-`model_graph` requests must satisfy those checks. ASE optimization runs on the host, so
-`whole_step` is not an execution mode for the functional API. Variable cells continue through
-the shared calculator's cell/topology invalidation and graph-capacity logic. Graph capture
-is not guaranteed to improve short relaxations; inspect the effective configuration and
-measure the workload. The third-party CUDA/PBC requirements in [Installation](#installation)
-also apply to relaxation.
-
-The CLI can process one structure or a multi-frame file with one loaded model:
-
-```bash
-fastmd-relax --structure input.extxyz --model chgnet_0_3_0 --device cuda \
-  --execution auto --fmax 0.05 --steps 500 --output relaxed.extxyz
-
-# Fixed cell; all frames, fresh optimizers, shared model and inference caches:
-python -m fastmd.relax_cli --structure inputs.extxyz --index ':' --fixed-cell \
-  --model mace --model-path /path/to/model.model --device cuda \
-  --trajectory-dir relax-trajectories --output relaxed.extxyz --summary relaxation.json
+```python
+structures = read("inputs.extxyz", index=":")
+with StructOptimizer(
+    model="mace", model_path="/path/to/model.model",
+    device="cuda", engine="auto",
+    config=InferenceConfig(execution="auto", optimization_profile="generic"),
+) as optimizer:
+    results = optimizer.relax(
+        structures, steps=500, fmax=0.02, relax_cell=True,
+        loginterval=5, save_path="relax-{index}.pkl",
+        verbose=False, assign_magmoms=False,
+    )
 ```
 
-`python examples/relax.py` exposes the same options. Final structures are written as
-`.extxyz` or `.traj`, and the JSON summary includes per-structure energies, convergence,
-step counts, timing, and the final calculator configuration. Exit code 0 means every
-structure converged; exit code 1 means at least one reached the step limit, with its results
-still written. This CLI processes frames sequentially. For supported GPU batched workloads:
+`save_path` writes the trajectory observer's pickle format. `loginterval` controls
+recording, and the final frame is always included. Final magnetic moments require
+an `m` prediction task.
+
+</details>
+
+<details>
+<summary><strong>GPU requirements and execution details</strong></summary>
+
+The GPU path uses FIRE and whole-step CUDA Graphs. It requires CUDA, full periodic
+boundary conditions, unconstrained atoms, no activation checkpointing, and the
+default `FrechetCellFilter` for variable cells. Model support includes MatRIS,
+MACE's `ScaleShiftMACE`, SevenNet, ORB v3, and CHGNet, subject to adapter checks.
+Trajectory records must fit the GPU memory budget; unsupported workloads use ASE
+under `engine="auto"`.
+
+Capture and setup cost time, so short relaxations are not guaranteed to be faster.
+`StructOptimizer` defaults to `auto_policy="latency"`, which skips uncached online
+memory probes; `auto_policy="throughput"` permits calibration for longer workloads.
+Inspect `config_summary()["relaxation"]["last"]` for the selected path and, for
+GPU runs, timings.
+
+For lower-level batching and cell-filter control, use `MultiSystemRelaxation`:
 
 ```python
 from ase.io import read
@@ -316,9 +365,22 @@ with MultiSystemRelaxation(
     results = runner.run()
 ```
 
-Use `cell_filter=None` for fixed cells. Batched execution retains its existing capability
-checks; it does not accept every calculator backend. The old branch's Discovery dataset
-workflow is separate from the relaxation API and is not included in this port.
+Use `cell_filter=None` for fixed cells. The `topology` profile in this example
+requires the [cuEquivariance environment](#installation). Batched execution retains
+its model capability checks.
+
+</details>
+
+<details>
+<summary><strong>Migration from earlier relaxation APIs</strong></summary>
+
+The functional `relax` / `RelaxationConfig` API, `make_relaxation_calculator`,
+`fastmd-relax` CLI, and TorchSim `relax_batch` have been removed. Use
+`StructOptimizer` for relaxation. The compatibility import
+`fastmd.applications.relax.StructOptimizer` resolves to the same implementation as
+`fastmd.interfaces.relax.StructOptimizer`.
+
+</details>
 
 ## Layout and extension points
 
@@ -338,3 +400,11 @@ fastmd/
 ```
 
 To add an MLIP, implement `ModelAdapter` (available through `adapters/protocol.py`) and expose an `EnergyTap`, `SystemEnergyTap`, or `ModelOwnedDerivative` interface. Pass the adapter as `model=` to reuse the simulation runtime. Declare fixed-shape capture, padding, and cutoff-continuity capabilities accurately so the runtime can select a supported execution path.
+
+## Development and license
+
+| Resource | Description |
+| :--- | :--- |
+| [Tests](tests/README.md) | Regression coverage and validation commands |
+| [Developer tools](tools/README.md) | Layering checks and backend validation |
+| [License](LICENSE) · [Third-party notices](NOTICE) | BSD 3-Clause license and dependency notices |
