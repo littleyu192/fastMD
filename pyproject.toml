@@ -22,6 +22,8 @@ mace = ["mace-torch==0.3.16"]
 sevennet = ["sevenn==0.13.0"]
 orb = ["orb-models==0.5.4", "dm-tree==0.1.8", "cached-path==1.8.10"]
 chgnet = ["chgnet==0.4.2"]
+# Optional TorchSim model interface for simulation; relaxation uses StructOptimizer.
+torchsim = ["torch-sim-atomistic==0.3.0"]
 # The released NequIP 0.1 foundation packages use the 0.14 eager model API.
 nequip = ["nequip==0.14.0", "torch>=2.8,<2.10"]
 # Acceleration is separate from the model extras because these wheels require CUDA 13.
