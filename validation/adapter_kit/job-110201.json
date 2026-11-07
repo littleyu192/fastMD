@@ -1,0 +1,515 @@
+{
+  "schema_version": 1,
+  "completed_at": "2026-11-07T22:58:49.985541+08:00",
+  "scope": "Selected regression checks for the shared adapter kit refactor; not a full release certification.",
+  "base_commit": "ee78412ced5c7403da724f4457fa57aa92480953",
+  "job_id": "110201",
+  "node": "g08",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "cpu_and_architecture_tests": {
+    "tests_run": 82,
+    "passed": 82,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "strict_layering": {
+    "new_violations": 0,
+    "stale_entries": 0
+  },
+  "diff_whitespace_check": "pass",
+  "model_checks_in_gpu_job": {
+    "tests_run": 26,
+    "passed": 23,
+    "failures": 3,
+    "errors": 0,
+    "skipped": 0
+  },
+  "by_family": {
+    "matris": {
+      "tests_run": 2,
+      "passed": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "mace": {
+      "tests_run": 5,
+      "passed": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "sevennet": {
+      "tests_run": 5,
+      "passed": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "orb": {
+      "tests_run": 4,
+      "passed": 2,
+      "failures": 2,
+      "errors": 0,
+      "skipped": 0
+    },
+    "chgnet": {
+      "tests_run": 6,
+      "passed": 5,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 0
+    },
+    "nequip": {
+      "tests_run": 2,
+      "passed": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "esen": {
+      "tests_run": 2,
+      "passed": 2,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "counting_note": "Model checks include some CPU loading/declaration checks and the eSEN padding case. An initial test-loader namespace collision was fixed in the external launcher; the four affected CPU tests then passed and are counted in cpu_and_architecture_tests.",
+  "baseline_reproduction": {
+    "orb": {
+      "exit_code": 1,
+      "selected_tests": [
+        "adapters.test_orb_adapter.ORBAccuracyTest.test_matches_the_orb_calculator",
+        "adapters.test_orb_adapter.ORBDynamicsTest.test_execution_modes_agree"
+      ],
+      "tests_run": 2,
+      "passed": 0,
+      "failures": 2,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 27.544087641872466
+    },
+    "chgnet": {
+      "exit_code": 1,
+      "selected_tests": [
+        "adapters.test_chgnet_adapter.CHGNetAccuracyTest.test_padding_adds_exactly_nothing"
+      ],
+      "tests_run": 1,
+      "passed": 0,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 0,
+      "seconds": 15.972356855869293
+    }
+  },
+  "orb_same_geometry_diagnostic": {
+    "tests_run": 1,
+    "passed": 1,
+    "failures": 0,
+    "errors": 0,
+    "metrics": {
+      "atoms": 40,
+      "calculators": {
+        "eager": {
+          "effective_execution": "eager",
+          "first_errors": {
+            "energy_eV_per_atom": 2.384185791015625e-07,
+            "force_max_eV_A": 5.19677996635437e-07,
+            "stress_max_eV_A3": 1.4435499904805194e-09
+          },
+          "first_passed": true,
+          "mean_errors": {
+            "energy_eV_per_atom": 2.384185791015625e-07,
+            "force_max_eV_A": 2.980232238769531e-07,
+            "stress_max_eV_A3": 9.778887033896205e-10
+          },
+          "noise_floor_force_eV_A": 1.1920928955078125e-06,
+          "noise_floor_stress_eV_A3": 5.587935447692871e-09,
+          "per_repeat_errors": [
+            {
+              "energy_eV_per_atom": 2.384185791015625e-07,
+              "force_max_eV_A": 5.19677996635437e-07,
+              "stress_max_eV_A3": 1.4435499904805194e-09
+            },
+            {
+              "energy_eV_per_atom": 2.384185791015625e-07,
+              "force_max_eV_A": 2.861022949662839e-07,
+              "stress_max_eV_A3": 4.4703483579808245e-09
+            },
+            {
+              "energy_eV_per_atom": 2.384185791015625e-07,
+              "force_max_eV_A": 5.492009222507043e-07,
+              "stress_max_eV_A3": 1.8393620849523062e-09
+            },
+            {
+              "energy_eV_per_atom": 2.384185791015625e-07,
+              "force_max_eV_A": 5.245208740678464e-07,
+              "stress_max_eV_A3": 8.847564460581769e-10
+            },
+            {
+              "energy_eV_per_atom": 2.384185791015625e-07,
+              "force_max_eV_A": 8.821487427201902e-07,
+              "stress_max_eV_A3": 1.1175870897120466e-09
+            }
+          ],
+          "thresholds": {
+            "energy_eV_per_atom": 1e-06,
+            "force_max_eV_A": 1.7881393432617188e-06,
+            "stress_max_eV_A3": 1e-08
+          }
+        },
+        "model_graph": {
+          "effective_execution": "model_graph",
+          "first_errors": {
+            "energy_eV_per_atom": 2.384185791015625e-07,
+            "force_max_eV_A": 5.736947059631348e-07,
+            "stress_max_eV_A3": 2.514570951418424e-09
+          },
+          "first_passed": true,
+          "mean_errors": {
+            "energy_eV_per_atom": 2.384185791015625e-07,
+            "force_max_eV_A": 3.3378601071998304e-07,
+            "stress_max_eV_A3": 1.3969838619232178e-09
+          },
+          "noise_floor_force_eV_A": 1.1026859283447266e-06,
+          "noise_floor_stress_eV_A3": 5.587935447692871e-09,
+          "per_repeat_errors": [
+            {
+              "energy_eV_per_atom": 2.384185791015625e-07,
+              "force_max_eV_A": 5.736947059631348e-07,
+              "stress_max_eV_A3": 2.514570951418424e-09
+            },
+            {
+              "energy_eV_per_atom": 2.384185791015625e-07,
+              "force_max_eV_A": 7.629394531694089e-07,
+              "stress_max_eV_A3": 2.1420419214421282e-09
+            },
+            {
+              "energy_eV_per_atom": 2.384185791015625e-07,
+              "force_max_eV_A": 6.209127604960962e-07,
+              "stress_max_eV_A3": 1.0710209607210641e-09
+            },
+            {
+              "energy_eV_per_atom": 2.384185791015625e-07,
+              "force_max_eV_A": 4.574656486538986e-07,
+              "stress_max_eV_A3": 3.771856427019216e-09
+            },
+            {
+              "energy_eV_per_atom": 2.384185791015625e-07,
+              "force_max_eV_A": 4.291534423384036e-07,
+              "stress_max_eV_A3": 2.1420419214421282e-09
+            }
+          ],
+          "thresholds": {
+            "energy_eV_per_atom": 1e-06,
+            "force_max_eV_A": 1.6540288925170898e-06,
+            "stress_max_eV_A3": 1e-08
+          }
+        }
+      },
+      "gate": "first FastMD evaluation versus mean of upstream repeats, as in original test",
+      "geometry": {
+        "changed_coordinate_components": 41,
+        "generic_FP32_wrap_vs_ORB_FP64_wrap_RMS_A": 3.5245787687144146e-07,
+        "generic_FP32_wrap_vs_ORB_FP64_wrap_max_abs_A": 9.5367431640625e-07,
+        "generic_graph_edges": 614,
+        "orb_graph_edges": 614
+      },
+      "reference_input": "original atoms, no generic FP32 wrap",
+      "repeats_per_path": 5,
+      "upstream_noise_floor": {
+        "force_eV_A": 1.1026859283447266e-06,
+        "stress_eV_A3": 4.190951585769653e-09
+      }
+    }
+  },
+  "interpretation": [
+    "The three original failing checks also fail on baseline ee78412 in the same environments and on the same GPU.",
+    "ORB old calculator references use generic FP32-wrapped positions; the current calculator uses upstream FP64 wrapping. A separate comparison of the same original coordinates passed eager and model_graph with the original tolerance rules.",
+    "CHGNet old padding test requires sink_atoms; baseline and current adapters choose far_self_loops for the pretrained smooth-cutoff model. The remaining assertions in that padding test were not reached.",
+    "No new failures were observed in this selected regression set. The three repository tests are still failing and must not be reported as passed."
+  ],
+  "limitations": [
+    "Existing model environments were used: Python 3.11.15, Torch 2.8.0+cu128, nvalchemi-toolkit-ops 0.2.0 and warp-lang 1.10.0. This does not validate a fresh installation with the current gpu extra (ops >=0.4.1,<0.5 and warp >=1.13).",
+    "No full dependency matrix or performance benchmarks. ORB compiled backbone and eSEN CUDA graph execution were not covered.",
+    "The three original failing tests remain failing in the repository; baseline reproduction and the independent diagnostic do not mark them as passed."
+  ],
+  "raw_log_availability": "Raw logs and launcher scripts remain in the local job110201-validation artifact directory; this file is a portable summary, not an archive of those logs.",
+  "tested_environments": {
+    "mace": {
+      "python": "3.11.15",
+      "packages": {
+        "torch": "2.8.0",
+        "mace-torch": "0.3.16",
+        "e3nn": "0.4.4",
+        "cuequivariance": "0.9.1",
+        "cuequivariance-torch": "0.9.1",
+        "nvalchemi-toolkit-ops": "0.2.0",
+        "warp-lang": "1.10.0"
+      }
+    },
+    "sevennet": {
+      "python": "3.11.15",
+      "packages": {
+        "torch": "2.8.0",
+        "sevenn": "0.13.0",
+        "e3nn": "0.5.9",
+        "cuequivariance": "0.9.1",
+        "cuequivariance-torch": "0.9.1",
+        "nvalchemi-toolkit-ops": "0.2.0",
+        "warp-lang": "1.10.0"
+      }
+    },
+    "orb": {
+      "python": "3.11.15",
+      "packages": {
+        "torch": "2.8.0",
+        "orb-models": "0.5.4",
+        "nvalchemi-toolkit-ops": "0.2.0",
+        "warp-lang": "1.10.0"
+      }
+    },
+    "chgnet": {
+      "python": "3.11.15",
+      "packages": {
+        "torch": "2.8.0",
+        "chgnet": "0.4.2",
+        "nvalchemi-toolkit-ops": "0.2.0",
+        "warp-lang": "1.10.0"
+      }
+    },
+    "nequip": {
+      "python": "3.11.15",
+      "packages": {
+        "torch": "2.8.0",
+        "nequip": "0.14.0",
+        "e3nn": "0.5.9",
+        "nvalchemi-toolkit-ops": "0.2.0",
+        "warp-lang": "1.10.0"
+      }
+    },
+    "esen": {
+      "python": "3.11.15",
+      "packages": {
+        "torch": "2.8.0",
+        "fairchem-core": "1.10.0",
+        "e3nn": "0.5.9",
+        "nvalchemi-toolkit-ops": "0.2.0",
+        "warp-lang": "1.10.0"
+      }
+    }
+  },
+  "production_source_unchanged_during_validation": true,
+  "production_source_sha256": {
+    "fastmd/__init__.py": "41a859dc5c8999c0fc9f83bdc0ddcf99e2359c33918bebba7e50cd1f0f27527b",
+    "fastmd/_lazy.py": "25c4607970144baecf97dc432a85a926b3ad36a7179579f2654cb92d1f2c413c",
+    "fastmd/_nvtx.py": "c33dfa1a89102868d08cd108d7360977fea80254bc9fd3629e8c229b58ca175c",
+    "fastmd/accuracy/__init__.py": "207d0bef846b1f6f8f02b2416971c81e8b283af1261f2ef9d19d6cfdbb41de43",
+    "fastmd/accuracy/layered_precision.py": "702b0b31d5cc2bfb86220d728173eba860a54a62cca8b704a9ff6e9622446145",
+    "fastmd/accuracy/residual_diagnostics.py": "d5fc6fdbed243cebdf57d90a5cc6ca27a94f1e64e0223cd49578649ce8453346",
+    "fastmd/adapters/__init__.py": "467cd85c3955160e46549ae4fbdac05117061843b2c4b964faf85ecd2286f69b",
+    "fastmd/adapters/chgnet.py": "3ca113e4eb1d5dd45e86dea7a8ab7b072017061babe127405d47f863f9908f3e",
+    "fastmd/adapters/esen.py": "35927cf2fbc53239d2f9fcd57a0f728b19f693d32e5ad9ea99232f7f28f1a20a",
+    "fastmd/adapters/kit.py": "daef09948758878d81cc1f04230a08fee4304ea50e6dce376b9ec282c73f03b1",
+    "fastmd/adapters/mace.py": "95f5766469240e3de26bb98ef655bbc220840741e6fa950ea6efc833eef87aee",
+    "fastmd/adapters/matris.py": "ff456915643e2129e4f2795630a300a8a03cb8c855144c786d7ced271db75e31",
+    "fastmd/adapters/memory.py": "f568fa69e17850aa810948207c6e49945fb8194929d720d4c5977c4e0a070d89",
+    "fastmd/adapters/negotiate.py": "b11a82aaf9f38e7569e947c4f5356887e8a2c35cdce0c1c4984db4ec3548b64e",
+    "fastmd/adapters/operator_rewrites.py": "3faf22de56b91b1827479b2c072f7a38d60c4daa68bd257b6da53e229bfe8428",
+    "fastmd/adapters/orb.py": "99d4106745b0b9fb6dbf0ba38081f548845cb14522784ce2b650ec1043825a93",
+    "fastmd/adapters/orb_graph.py": "47759817837f8274c0084f8f5da0d2d8b4207667fa9f1edf59072969e8e04ae8",
+    "fastmd/adapters/patches.py": "54424fa4cfc3f056f2b84fe942b5a3c4c04177376f1b6688ff1eb5edf7b6cae5",
+    "fastmd/adapters/protocol.py": "77f44bb3e0ec1256f2fa40b5105d191fa01f3268c627ff3a007290b1c27c0399",
+    "fastmd/adapters/sevennet.py": "d78a6ee96c6333418d2a861fb934e5a665f8ee64f7e0c98914510ae3a0e4ae7c",
+    "fastmd/applications/__init__.py": "974436e671621ec9d5d4f6db35b2c86ffa8913a84f6719475a06883c87820d44",
+    "fastmd/applications/_config.py": "88b85a21285c1775cb0d5476ee0576af9b7b2a03dbc182a34b542d92332f5b88",
+    "fastmd/applications/_graph_capture.py": "7912ddabef5f474803346dc148c014dc83e961f4e6e56354b02cb4259caa42e8",
+    "fastmd/applications/_memory_probe.py": "2f058aafa84a42c85c65ce302a8feb1839d1e0ca7db5c3087ea7094c9718625b",
+    "fastmd/applications/base.py": "92f788fe31af2da239b9c7d8852d94aded24cf03e06acc8f90a7268c0d9dc524",
+    "fastmd/applications/capacity_policy.py": "1e9f1ce4f7ff410124fd76099d59d39e89202134787911640bc594de219f4f1d",
+    "fastmd/applications/cuda_graph.py": "3bdee2e57e7a9ce63afaa66356a543db28ea4600dfe0916f55473d735f63e389",
+    "fastmd/applications/energy_derivative.py": "d1d16d3dd61c0f1c4b2ec37358a66f234602f3ea2346b431ba5e6c72f48d6fa5",
+    "fastmd/applications/gpu_integrator.py": "35354217f620057665b6d79fff6bf9fef90b61ce2420973be6e23b86f8d169a2",
+    "fastmd/applications/gpu_logging.py": "d91678de5f5b01de532d4eca3b19f433846a309b79ee1b71386caf9ea934212a",
+    "fastmd/applications/gpu_md.py": "e4a063da3133da0c9c16906a0840e4cf0ad5959a8b300381bf926f61580db099",
+    "fastmd/applications/gpu_nhc.py": "babcd0d289c0fd5783a0c92c9628f764461be381dc6de1bf6a44b42011ae4660",
+    "fastmd/applications/md.py": "e7a3ca610a050347dc1edbb230bf1da6d633bbaef74784251848e52fcb07a75e",
+    "fastmd/applications/md_protocol.py": "0010465bb64d64f63ea03c9acd3b8c660000554d79bf6b86ccc77b2d0492b510",
+    "fastmd/applications/mts.py": "49ffa516d7c044b3fb59af5e4e73fc72b5a40430388ff6f7f22c333812e8a60b",
+    "fastmd/applications/relax.py": "b75cb6e874f6b5bc1178f1264f060f0cd4323e913d84ded5871003e6831ef70e",
+    "fastmd/applications/skin_topology.py": "6756deab8eef4439befd1c4eb8568fbd74e3ee853a553f8cb5d8f8aae3751665",
+    "fastmd/applications/torchsim_interface.py": "23f6f0f108e04bc96369ea5f34899fd4b4393b2eba231ccdd103023995fc8d19",
+    "fastmd/applications/whole_step_cuda_graph.py": "73f0c424523ea771969f4f67193609ff6008d2b746bbf9c761f566def5e033a8",
+    "fastmd/config.py": "f64eed62c4a41c8304ec326484223a49a56149383fc922aecf0dac6af312b2f2",
+    "fastmd/engine/__init__.py": "d830434a75444f63bf59a89ec52a8a2fc57632a38d80a3bdcc2469f41f217a97",
+    "fastmd/engine/_graph_capture.py": "a49f58142941da27da2e4e65a8a4774945c0c7b6f53e71a35754d92f2a5c2169",
+    "fastmd/engine/cache_provenance.py": "78323bfc394b8579aae9b9954bc73be1373a738c23e1ee4d540e80cf17ac33cd",
+    "fastmd/engine/capacity_policy.py": "df87cdc24a23aa7030af3b41ac2330532d245c56ec14727eea0342674582c855",
+    "fastmd/engine/comm.py": "392e39ad9292be436010de97e84361cbe41d4481a1bfa0034be65112cc75cf5f",
+    "fastmd/engine/dispatch.py": "058310f6b39c6c39fed8586cce20304d31e8f9dda4d38115d51c6b28fee71e53",
+    "fastmd/engine/energy_derivative.py": "715a3e94f7ffeb69397d5eed0e0393bf8558ce7605d080be5bfe79dee3e4d81a",
+    "fastmd/engine/entry_config.py": "51b90187ede6c46ffddc11751b66df65f686bd4656a3e9e705a9f22eacb86578",
+    "fastmd/engine/kernels/__init__.py": "546ebe176871461cdb437c71add4b0f307caf6150f0e64507e5664b7ee70476d",
+    "fastmd/engine/kernels/decomposed_indexed_cat_silu_linear.py": "0e0592dc3830a3bccdcf2a1290bf1c397548ac34f2c3d0bd98b2e85efd99c044",
+    "fastmd/engine/kernels/merged_frozen_projections.py": "35672eb86389d8cca4ef5dc6ef0549e76f505749be51ceb27c1348e80bdeae6e",
+    "fastmd/engine/kernels/row_count.py": "3520874795e78405cc90c0a0358aa9f9d7cc065810144e73bb327410bcbf4eb4",
+    "fastmd/engine/kernels/row_tiles.py": "8ca5be1552a6096d99b7d2a4ecfe22b7786aa2e904161a309e8187979621596d",
+    "fastmd/engine/kernels/segment.py": "f8bc196cafa5978f6f46a1a6e5c9b07d21513417f964d73fcedd2fa2b356df9b",
+    "fastmd/engine/kernels/sink_atomics.py": "b8b80dff54de85f8bfacb035236446da045e55c2b4a493929ef12a5e300077f6",
+    "fastmd/engine/kernels/triton_row_gather_scatter.py": "bd9198306c99fc8a2b5387d6ea94f2c9e7134b667db6f73583e56763750629ba",
+    "fastmd/engine/kernels/triton_row_gemm.py": "4f9c3761027dce86a34437eaf588f3ee28cf8b561f55e4902130e55245190ffc",
+    "fastmd/engine/kernels/triton_segment_softmax.py": "2342a9241992e811732ddac98dfca30936ae9d1baa3655bb954c28f4c9a7804e",
+    "fastmd/engine/kernels/triton_wide_gemm.py": "8ac5271dac84a3a16a69c3e559090d9b573d8d1a364803b5bffead942e15dff4",
+    "fastmd/engine/kernels/triton_zero_skip_index.py": "c33e75e09e00c2cb5cfe014361d4982850353f2f189b8f2f7e1be5342b7bdf12",
+    "fastmd/engine/layout.py": "5caafb1ef53e0de41674304dcd25d25743a3bbe30a334f550d18b568517c3fd4",
+    "fastmd/engine/memory_admission.py": "a748f8b7cf1abed35909c72a76e37464ec291b2a33793c59fb8a29c413687725",
+    "fastmd/engine/policy.py": "37b2ac809bc30a694225ba2f5e4bb76c7cdc621ffd5580f8c20addbe1e564ab7",
+    "fastmd/engine/recorder.py": "9c88f2fae0b546051b568ea8fafa533b0e86a203b09234376036d13d0bd72e3a",
+    "fastmd/engine/runtime.py": "0929f35afa51bb49461ee5afee556872b95111f4355ba416a009e72ee1832de4",
+    "fastmd/engine/saved_recompute.py": "d998f1b22b3dc3f14af3bcc0e167c4680643e0b1d1a8024284b07f93f39b6d1a",
+    "fastmd/engine/topology_lowering.py": "967edf0f07536e800d5e29e7b25bbd16f8380d8c3027af58f7def9bd2f82fdc0",
+    "fastmd/execution/__init__.py": "8e3d0d4a2dd04cd34b4d5514e7acce3b0b88dbebea87132c1d4543b7a95ded4f",
+    "fastmd/execution/_capture_trial.py": "b737db24459193fd56ce2bb8418de1b4d37564ce59f690d0c98f9a609113747f",
+    "fastmd/execution/_memory_probe.py": "627c45ce1840159540ac680bd4435abf70ddb0ae8e8509469ec3777799af6305",
+    "fastmd/execution/_memory_probe_cache.py": "ccf1375766e7e88d03e00ac6d575419d0f2f8d55cb7900aa0a68a7266c43a128",
+    "fastmd/execution/cuda_graph.py": "59752aa3d7ec1f453e04d4b237b122a64cfafe863ae9e96cc997d2e97d8ea198",
+    "fastmd/execution/gpu_integrator.py": "ddbbf35a3225c4d9f792f106c1227193e663f45fdb1e47025b27029f9145c5fa",
+    "fastmd/execution/gpu_logging.py": "3c18754fdd850fa2387cf1a80ba3efa28fe95f6bf08f5ce090e655094706c45c",
+    "fastmd/execution/gpu_nhc.py": "ca5c042a79dbfaa45fd28eb8c357dbf2e5f73b36c2f57e1ab0b9fa71e3c1afb0",
+    "fastmd/execution/md_protocol.py": "5f670e6ef7752ffbe229a013d8bf2f5ffc7946acf61d385ac7aaaaa8cdc5702d",
+    "fastmd/execution/replica_batch.py": "6ab95260354ebeaada608e382f33a86881861130e1b78d4f28f378501efcb898",
+    "fastmd/execution/skin_topology.py": "790051d0e9210223decd65b6a218ae5d666e23f67913e3e508def7b0b4951e42",
+    "fastmd/execution/system_batch.py": "f7638ea4b3e4c58c0e6077ee19b3fed3f86cd4c23b7ae37e6bfb95e0c3f0bbb9",
+    "fastmd/execution/system_relax.py": "f1a3405f92205bf163c2d79305ed0a2833adcade50aac7421fee51b14eea0629",
+    "fastmd/execution/whole_step_cuda_graph.py": "6a31d0671b2dcb7d34b35ef56337dec3773d7a4ec830e8d5750d9e134dacbceb",
+    "fastmd/explain.py": "cfba37b4f732e7707674e21b7ba07d85121e3726844612581743023a85d583e3",
+    "fastmd/graph/__init__.py": "ccaccb5dc735210c9cc7d3e81457f8b1740971704d521250e95e9f4105c4d779",
+    "fastmd/graph/converter.py": "cef166e2b84eab3525d3faf3efc94f14f5d18751013dee2d120c970de147ee14",
+    "fastmd/graph/cpu_graph_builder.py": "7858fdadfcd601970f26fd5c4e66156441ef8ff34ce3e99aaee5e8d54234498e",
+    "fastmd/graph/fixed_capacity_builder.py": "eb70d964270634047460e8fecaa6eb5201e4796d2609484ce46c5ab54aecd922",
+    "fastmd/graph/geometry.py": "64e968c7d4680f6beab6c5e95ff0a70997aa2aa7b483706b46ab95e04d1f8976",
+    "fastmd/graph/gpu_graph_builder.py": "dfda73df09649094788a38392d5eb34e624acd0fc52d820c345ddf71efc29506",
+    "fastmd/graph/matris_topology.py": "78a6262f0c0faeb3ceeb2acebc1e701dbd0ee172a8600a14728eec0e08ada390",
+    "fastmd/graph/neighbor_list_backend.py": "d3bfbfa0f51a17e40a8fb45e302c3a2fa6aae40f66fbd5430068dbb65bb2572d",
+    "fastmd/graph/orb_graph.py": "b17d430c3bb139c5bf05cbb6d376b80ba623b10b841171d9e8e4272801d99bc7",
+    "fastmd/graph/radiusgraph.py": "f7ded702f9d05da0b9ea930b7d49fb8141131e817fd3b2d2f93091e8f609d85b",
+    "fastmd/graph/topology_contract.py": "d661ba94f0fed9d55d0eb79343f606d09a5da3c959b9507db9768547b3ed8ad8",
+    "fastmd/graph/topology_lowering.py": "f69b3a42e8c321de8ab0ede8cdf24ed5e96a33095c9e291bf11c2e27689dd849",
+    "fastmd/graph/validation.py": "44673774aeaeec3378cd68940d89304ba859c1b7d37e7ad13ec8a0b72bb7cf71",
+    "fastmd/integrations/__init__.py": "c3cba25b03e2813ae24b6d15a8cd50b93388cfa99956a7538524efb5493c3d19",
+    "fastmd/integrations/m3gnet.py": "86d7971cb0f7648a07ac720435eb7fb72c762d62872099e92d4669071959e7bf",
+    "fastmd/interfaces/__init__.py": "5525692e77e84539a47c09fed9ef12a30b91629f2d6b0ef046ea7b426c575596",
+    "fastmd/interfaces/calculator.py": "e5340a6e6f0a0771e3d3f349903422e1669f7949a2ed6c1ca4d2444f24b62216",
+    "fastmd/interfaces/gpu_md.py": "692621e29668f2f9d778d6e6abc8286e63b4e294452e9ca32209c88cd08e0621",
+    "fastmd/interfaces/md.py": "1700cd58d81d7dc8c07ffb615548194efd45792e8bd2063e2c00241441725a26",
+    "fastmd/interfaces/mts.py": "6f35543a8652aa212f7ff503cd7b32a0ca87c2e3dc31c410325ec6f288c1c82b",
+    "fastmd/interfaces/multi_system_md.py": "6a02a2f28c4cc54aa0b3f99cf48327a7c361400723a1d8585c1f6d2b4cf2ab6f",
+    "fastmd/interfaces/multi_system_relax.py": "6cf83352d5f55046ba391d0ad16af166e15f683d81742f547756ca898b457924",
+    "fastmd/interfaces/relax.py": "5d055cdc34bbec24e3042df5c09180efa1feec0ce9b61d38b699340a8940e1f9",
+    "fastmd/interfaces/replica_md.py": "0000be74b564aad9d78f68009e3e44e9f10111b914465673f8cf21f35cbdb523",
+    "fastmd/interfaces/torchsim_interface.py": "6647d98c602609206610c67a042a3621ec749ab86ceb3823608d59ac0b2a5c0e",
+    "fastmd/models/__init__.py": "f8c2ccee055ddc8bb324097b2e50fcaa8404d7a1b70cf68542f55d026656013d",
+    "fastmd/models/chgnet.py": "a4ae2bbe5be43a908bfd549fab749963de4332c88c5f17558ecd2c96ade72bb3",
+    "fastmd/models/esen.py": "d37820d674d3243bd10dcea42f55345ba7e5560a0ab28fb678055f82e9ca81c1",
+    "fastmd/models/esen_ops/__init__.py": "43a7f111ef3748a01502ffbe38aaf52196edb35579baf27b96910e8eae05d78b",
+    "fastmd/models/esen_ops/esen_inference.py": "edb0fcacdf972cebd3a026615011a1755ebf840f71016eef499e2df2e5da85d2",
+    "fastmd/models/esen_ops/triton_esen_nonlinear.py": "5ff646af07d9daf49fcab917adb04114488036e39bb0e36741f7ea0da1dfcbc9",
+    "fastmd/models/esen_ops/triton_esen_rotation.py": "1b6db9d70448f0fb92b2890edcb39a5128957398b7ebda76645d634a45f9c3ad",
+    "fastmd/models/m3gnet.py": "2f5c185a72715b1e821f13d54ee561be78d31caaa3615104bfdecf639bad91a7",
+    "fastmd/models/mace.py": "e440a1b9809748674c69cc532232fed301c0f92d936d9caa5608f8f12056bb28",
+    "fastmd/models/matris/__init__.py": "44207a6089a89de3341545cdf1cf4523ded09fe4ce5516587d048a23871714ac",
+    "fastmd/models/matris/adapter.py": "70c625f38b5b7a966c300a7a4138c41db1ef7bd9b3242f63228c531103f15550",
+    "fastmd/models/matris/basis_function.py": "2db7a3e0da9ca20d576e0b63f4b5c9bc67ab82eb3833af7f2b350923971c8c45",
+    "fastmd/models/matris/converter.py": "6e73ca2634aed3ed4e8cc0cb40d397e53c23358bb87a42c6043589e7b3bbb700",
+    "fastmd/models/matris/feature_embed.py": "78356d7d8515b17b36c814f8da55c383923242cfac98e30841a3e3c76afc703c",
+    "fastmd/models/matris/forward_runtime.py": "0626f720231e5cf850f4b5748efec0b1ed4dcc0c3cef17a85f27871518f9f45c",
+    "fastmd/models/matris/functions.py": "f50dfd19a54589b19a59ef091e97bdcd2976765da82abd04fd63a6c9da17fac6",
+    "fastmd/models/matris/interaction_block.py": "016f9644f34e58fd0cb696bdadb560ef6d0acf2283d3d1aab644ab6b6fc3ea8d",
+    "fastmd/models/matris/legacy_graph.py": "7f3003a51cd05e2d852bbe9461e5c84a760e02560fb3d107b992dcce1f272ba6",
+    "fastmd/models/matris/model.py": "ffa446320137a2f707199782b387da8e320ba9a59b25e759b2c878063578d073",
+    "fastmd/models/matris/op/__init__.py": "394eb11ef06ce41c7d97b41e6bfe07f94bd7a083b656418ad8801b3510929860",
+    "fastmd/models/matris/op/chunked_gather_linear.py": "a20c81ab763f812886d559f873a505ef14c7d4e7638b87a0e1074a24ca3296db",
+    "fastmd/models/matris/op/compiled_lowerings.py": "1c1cbe1638e2923a7585ab616502f80063b00addcef2b6df6968cea176c4461a",
+    "fastmd/models/matris/op/decomposed_indexed_cat_silu_linear.py": "bbdae8efdbac89d1692780d01d2316530ec39a601103b40564e1e3d6e8c1996c",
+    "fastmd/models/matris/op/fuse_sigmoid_op.py": "f5a6359dfe398d4e37c873bdf865d487ec4af130ab32d30ec9b1cfe5dfbbd8db",
+    "fastmd/models/matris/op/fused_silu_op.py": "a32196e952cfe9fb9e56046fa8b3074c8ac6f382a29f005b1c81fad675c78cf3",
+    "fastmd/models/matris/op/merged_frozen_projections.py": "773911161671dea5d5bf558ceb49211a49d3f625467a0f855ab961b02524517f",
+    "fastmd/models/matris/op/row_count.py": "0da12d537bf581f387abb1e0a66d92fe9b56983b95f6f2e55d4d996c84afe82e",
+    "fastmd/models/matris/op/row_tiles.py": "1d01b181d560d69af782c7675d650553187b9b58a2cec00d08048488cc1d9342",
+    "fastmd/models/matris/op/segment_partials.py": "0e5725464c6063329537917b5547654c69fc87eb1b8f22bc6e4fab475f682812",
+    "fastmd/models/matris/op/sink_atomics.py": "4101882ce80214bf8c29280c1582011d1a6edf8573febec79c68ff73e9dff5b2",
+    "fastmd/models/matris/op/triton_act_linear.py": "e7b691738db0ccfcb3d490a3f23fadccd788d3d05a3342358a8e4104ad4a782b",
+    "fastmd/models/matris/op/triton_csr_segment_sum.py": "acecb607214dc7716df5bf79c0b7fd82131fa0e25a812ebf4754adf43708ebe4",
+    "fastmd/models/matris/op/triton_directed_pair_aggregate.py": "124a93f252f4e8ccf10fddcd49b2fd85d0e416edc28198b75cc4f2a429af7b8f",
+    "fastmd/models/matris/op/triton_edge_ffn.py": "0174b2f2f6ac628106fc34161d986de3751e0e2ad7fb3a24dd8b7cbbfc3fe645",
+    "fastmd/models/matris/op/triton_gated_ln.py": "1c8d06c21559fb78f08213f0ee2aca3bc915f0f5b64ef7be94383a729bcf15f7",
+    "fastmd/models/matris/op/triton_gated_tail.py": "ff509ad28467ea2fe3104f18ad9ecbcb92dabb16570c4338713b554ebb835033",
+    "fastmd/models/matris/op/triton_gather_cat.py": "60bb854c16b8cdb90414062908c41d65c3d44764c5d32fbb2867c4912ec65e4b",
+    "fastmd/models/matris/op/triton_layernorm_act.py": "f3c17b10187b66948b2522655e5b7ac0f0ead9b1195f3732d57463f03998ccff",
+    "fastmd/models/matris/op/triton_line_envelope.py": "c647fb263f4e479a28435012b2c83e0befe7eeb451be8c67ba0f1087cd3ea623",
+    "fastmd/models/matris/op/triton_residual_add.py": "f307b252e706d79738314bc688ec6dce60e218269e80d3ce0fed6d61c6564247",
+    "fastmd/models/matris/op/triton_row_gather_scatter.py": "095ce9e6e863e4e3c56863b13f97d1f6102520afbdbf26617827937060b8fab2",
+    "fastmd/models/matris/op/triton_row_gemm.py": "cfd05bcf26f4ace4e6d1bf402056c1f417172a9027dc971dec83aa3722528a54",
+    "fastmd/models/matris/op/triton_segment_attention.py": "138ecdbdba9bb53110a6db598b4ea6596eccee78f3f341e8737e16bcb0f2808f",
+    "fastmd/models/matris/op/triton_segment_softmax.py": "17d71f9a49c515fc1862578c3e654d73a70e74f4d8ac4a23fc35500a9ba3e844",
+    "fastmd/models/matris/op/triton_threebody_fourier.py": "c7c6d1d966c2448230cda7745c9fdc1918d8da3723f054a26294d83a5af380e5",
+    "fastmd/models/matris/op/triton_weighted_segment_sum.py": "6f85d613511b03886cedfa8ff38bb58bafb85c908012e2f9209b0c7d56ad4a35",
+    "fastmd/models/matris/op/triton_wide_gemm.py": "722f5835287c43b7b19899ef739f78672abf9c444c52f223eaeaf1063b76866a",
+    "fastmd/models/matris/op/triton_zero_skip_index.py": "e5e14a3d1825d512097a20e5123e6700dd8190dbd6180a097f1d6fa4c0e882c4",
+    "fastmd/models/matris/plan_record.py": "6550193c7f99b4e072776e06c8f73db7bca4bf0c4aef5bd8458b66dc2b6103ed",
+    "fastmd/models/matris/processgraph.py": "244d86b7e64ad23b5564c4dab68c1432803894c4f9169d7e1b21017251d95d85",
+    "fastmd/models/matris/projection_caches.py": "d0407e8e15b8897a091c34dbc0a3eef89e94b91e1a9d2a80a45424f6b2a1ea44",
+    "fastmd/models/matris/readout.py": "7008083d0b706dbf2e55b58cc6c45d35e513694132927e2157c26174f3d9fce7",
+    "fastmd/models/matris/reference_energy.py": "e65467bad1f33b971a24038b4e9308a846132150f3d1435517482048b0f4b232",
+    "fastmd/models/matris/topology.py": "5fab418bb5023442a8ba2f010916896ae3bcf5fd10af17020e5a56c936ad8c07",
+    "fastmd/models/nequip.py": "72ed066736d2732064b653e3b8d55870980e2dd0b37b29824e593fb64af16290",
+    "fastmd/models/operator_rewrites.py": "88d4c4ff83cdc6e08680c292890e96f302ab064195e153939d0f7df81c9cf0e6",
+    "fastmd/models/orb.py": "64d36bd073c90a8308d784e286f1c73592e6adb1bb5d6fc4dd1048cdfee8bd9e",
+    "fastmd/models/orb_graph.py": "e849fefb37ce3f0cafc296bc75ef0a91c0c7110bf7c406a91a9b7d07a8166c8f",
+    "fastmd/models/orb_ops/__init__.py": "2b7b16143a83315c3a48e3edb8e6617eec709c64eee8a3c5b056b68d0fe53b1b",
+    "fastmd/models/orb_ops/orb_energy.py": "bc37538816a50ff991fdefa602428dc9fd0be115b4d16b7d1d7d49ed0cac0deb",
+    "fastmd/models/orb_ops/orb_inference.py": "d104bc31db37e7985fb8f41bf40203b122d525ce9b297659dce42a5c6837ba49",
+    "fastmd/models/orb_ops/orb_steady.py": "b7224792eeee64679a6fd9ffcb5085a81e63a622bb1fa651ddda150495916724",
+    "fastmd/models/orb_ops/triton_orb_inference.py": "319422562a06d34b13915f399e0e5784acba00d8167294d7c32ea058db9acbb1",
+    "fastmd/models/sevennet.py": "273a47f92651684a2262159374228bdd137e33d1aab478d7d8f844139b712886",
+    "fastmd/ops/__init__.py": "e5222c32fa60c8886dcca18e365c164b2c902005b1054cf259c09ddd662adc43",
+    "fastmd/ops/chunked_gather_linear.py": "c3e628507e41c1984dfa68004aae4f1b29c9afe16649f33450fa17776c4caaba",
+    "fastmd/ops/compiled_lowerings.py": "f83ec030615c6bf6b8c73b45b60264512022f879d8afddd23787f56cba2ac23f",
+    "fastmd/ops/decomposed_indexed_cat_silu_linear.py": "583e69ed37529019c187588a0960c3d5580f89726057eda37862f13462950600",
+    "fastmd/ops/esen_inference.py": "ba9004e94cfa294e74f3fa5fdea771e9f1d6196a59a1f2cf2ea991f483b7355a",
+    "fastmd/ops/fuse_sigmoid_op.py": "8d3048dd9a681d3d0aa4beabdb48e3a7c58c4166d17de2fd364f52584e371279",
+    "fastmd/ops/fused_silu_op.py": "a1584de09bcd330121c8da9afdb5258b7a0da97e4f2391a8fba2c60c0b3c921f",
+    "fastmd/ops/merged_frozen_projections.py": "3aff5e6c0e6e9c8703ef9e73beffd769f559aa5cfb5b41be8021f91187361f37",
+    "fastmd/ops/orb_energy.py": "37084331da1e033d69baed497085305adffdba0c73e24ce3ce818fa666e109dd",
+    "fastmd/ops/orb_inference.py": "2bbc9b3226f86a5a5fbc5f04e43249aa024d1211f04d60768426181c0875b019",
+    "fastmd/ops/orb_steady.py": "6269bdadd4a0090c602667e2969a3483bff3f3346bad464cf6bdf8aced9d952c",
+    "fastmd/ops/row_count.py": "c95fae147cd0c620e98d69625496ec8d7ac754a227c979148f2f0f63271207f8",
+    "fastmd/ops/row_tiles.py": "7dd88090cb574496642afd923155323e0dd42eaede9add3c75e644816fb60411",
+    "fastmd/ops/segment_partials.py": "3828a97d0908987ba102e33ae9732ed563c771328e32dff8e7616d8f6029cd02",
+    "fastmd/ops/sink_atomics.py": "22dfb376fb1ff9d6ff3a36aa2d2cb5b85d075b90d8c52ee924b6a522b873c784",
+    "fastmd/ops/triton_act_linear.py": "80e4c31a16b03f49a121272971310fe62da387a1a965ffa92f5b273df5177019",
+    "fastmd/ops/triton_csr_segment_sum.py": "da08f51fda1039208790f52497948698c04e4f9b120ff294ed7500108b76d928",
+    "fastmd/ops/triton_directed_pair_aggregate.py": "43a74f669b76a44c8bac8fa9b3d94123126c663c0794ceb04f144bfca130c389",
+    "fastmd/ops/triton_edge_ffn.py": "54736999ee0f8eb5617af6e4a14ffe1b4f45eb6242d72e24aeb2fb3b0ffedc1a",
+    "fastmd/ops/triton_esen_nonlinear.py": "6987407f756e9cf2310104d9d4d80834969d56927eed3a65bf93c2d09b03b95b",
+    "fastmd/ops/triton_esen_rotation.py": "6b37b86625e6a106ec319e68dad1d59165e268308944f09515b2fc0618ff4b8e",
+    "fastmd/ops/triton_gated_ln.py": "0c6419e802e3fa7ca0b79eb7942d336db8809c24b9145741aa6c594bc5934cfc",
+    "fastmd/ops/triton_gated_tail.py": "fad4cbe3d2fa79bba9df32a027a73a72b3d445213bb6b6679c3b5e7cffc641f8",
+    "fastmd/ops/triton_gather_cat.py": "2c12fcbdeb2f09043c35ddbb3d4dd8a20d339d7b730472c932135179ec82ea8a",
+    "fastmd/ops/triton_layernorm_act.py": "ea78cb5bc0148e62d983f5c1d424f9222e3bd82a4e7d85a94ab1a3971f389f5f",
+    "fastmd/ops/triton_line_envelope.py": "031f160d969fe2a8d575c12654a1a6063b687ec0942d97b69cd72c9f832a75f6",
+    "fastmd/ops/triton_orb_inference.py": "1731d453e9239d190ef2be81a6ba69d39cc7444560de5fbf87983044593cd876",
+    "fastmd/ops/triton_residual_add.py": "b3045290a0363bd53c2ce84cf451579c98ce80c0c6d2b868cddcccbe076376dd",
+    "fastmd/ops/triton_row_gather_scatter.py": "2eaf411ad3a488460b3d666bdf6a09adb1764e5a550cde6d0d8ec442b5c92dea",
+    "fastmd/ops/triton_row_gemm.py": "58b61d394c5857e185bacc0b0e1f159ea9b52113a609e705b414129f28e0a084",
+    "fastmd/ops/triton_segment_attention.py": "6d3d0e0d2034c95382ba0b6e80e8eabd793451610ecf9dcbec6a726699826f49",
+    "fastmd/ops/triton_segment_softmax.py": "d4d3d3e80c365bee589482c19eb4b017d6ea1ccec111766237f37b8b12986780",
+    "fastmd/ops/triton_threebody_fourier.py": "02c15fb0a0838508a7565608b1ca2a2e8fb79131700802dbc7dad51612c017c3",
+    "fastmd/ops/triton_weighted_segment_sum.py": "4766d092bad53ec35691cdca6003b2b5ddd5794988d8f0653255e27493dd07bc",
+    "fastmd/ops/triton_wide_gemm.py": "76d1f3bcf6335914166ccc8fb1da9389898965bfa47593423dc29f268f159d6d",
+    "fastmd/ops/triton_zero_skip_index.py": "84103e7a0b0e557388851f688c69f5597af51d90a21d94e7c2e65fc5cdf461c8",
+    "fastmd/precision.py": "aaf3564c1ad3aaf0dffb2cb0175a546562c3311d1cc1b0b24143ba9ed2bf0346"
+  }
+}

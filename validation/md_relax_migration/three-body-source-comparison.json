@@ -1,0 +1,649 @@
+{
+  "description": "Original MD and migrated FastMD produce bitwise-identical final ASE and GPU results on the same RTX 3090; original source exhibits the same accumulated FP32 ASE/GPU trajectory difference.",
+  "date": "2026-10-26",
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "slurm_job_id": 109035,
+  "source_commit": "4fa638dc5a3fd774739a9b46e08b36185196c273",
+  "fastmd_base_commit": "4961fc018b37e58dc2edc4982614d92f555ab626",
+  "case": {
+    "test": "test_md_relaxation_gpu.MultiSystemRelaxationCudaTest.test_structures_relax_as_ase_fire_alone",
+    "structures": 6,
+    "atom_counts": [
+      32,
+      27,
+      8,
+      4,
+      8,
+      12
+    ],
+    "potential": "SmoothPairPotential(strength=0.5), UnionPairAdapter(triplet_cutoff=3.3, angle=0.5)",
+    "reference": "ASE FIRE with calculator execution=model_graph",
+    "cell_filter": false,
+    "slots": 2,
+    "drain": true,
+    "DRAIN_PAYBACK": 0.0,
+    "fmax_eV_per_A": 0.02,
+    "max_steps": 300,
+    "steps_per_launch": 5,
+    "deterministic_algorithms": true
+  },
+  "comparison_method": "Float arrays read from round-trip JSON numbers, converted to float64 little-endian, and compared byte-for-byte including signed zero; integer steps and convergence/status compared exactly.",
+  "all_final_fields_bitwise_equal": true,
+  "source_ase_gpu_differences": [
+    {
+      "index": 0,
+      "ase_steps": 128,
+      "gpu_steps": 128,
+      "status": "converged",
+      "position_abs_max": 1.352703754342599e-06,
+      "forces_abs_max": 4.190951585769653e-06,
+      "cell_abs_max": 0.0,
+      "energy_abs": 8.152567509966957e-07,
+      "energy_relative": 4.389616780082276e-08
+    },
+    {
+      "index": 1,
+      "ase_steps": 137,
+      "gpu_steps": 137,
+      "status": "converged",
+      "position_abs_max": 0.00010046978983790922,
+      "forces_abs_max": 5.537737160921097e-05,
+      "cell_abs_max": 0.0,
+      "energy_abs": 3.5859435847385157e-06,
+      "energy_relative": 2.326995327048331e-07
+    },
+    {
+      "index": 2,
+      "ase_steps": 13,
+      "gpu_steps": 13,
+      "status": "converged",
+      "position_abs_max": 1.4180846115430246e-09,
+      "forces_abs_max": 1.862645149230957e-08,
+      "cell_abs_max": 0.0,
+      "energy_abs": 4.037289613734174e-09,
+      "energy_relative": 4.978171672103852e-09
+    },
+    {
+      "index": 3,
+      "ase_steps": 12,
+      "gpu_steps": 12,
+      "status": "converged",
+      "position_abs_max": 1.5017782573067961e-09,
+      "forces_abs_max": 0.0,
+      "cell_abs_max": 0.0,
+      "energy_abs": 0.0,
+      "energy_relative": 0.0
+    },
+    {
+      "index": 4,
+      "ase_steps": 84,
+      "gpu_steps": 84,
+      "status": "converged",
+      "position_abs_max": 4.0759171486687285e-06,
+      "forces_abs_max": 4.225410521030426e-06,
+      "cell_abs_max": 0.0,
+      "energy_abs": 1.3348834837501045e-07,
+      "energy_relative": 2.2996409400992174e-08
+    },
+    {
+      "index": 5,
+      "ase_steps": 51,
+      "gpu_steps": 51,
+      "status": "converged",
+      "position_abs_max": 6.095825195728821e-07,
+      "forces_abs_max": 6.109476089477539e-07,
+      "cell_abs_max": 0.0,
+      "energy_abs": 4.5121235192624454e-08,
+      "energy_relative": 3.173140241732221e-08
+    }
+  ],
+  "source_vs_migration": {
+    "ase": [
+      {
+        "index": 0,
+        "steps": 128,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              32,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "91a896a22456628b21f1664cd9171446be142b21d6679392165dda1cd9af3102"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              32,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "d83dff0f7467b9742004954aa8e5134cb7acd58da97f5305a758ab4c24334d16"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "2f90974b084062dcd8d506f86a8582284a02766322f9e0d47117ebb0a049555e"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "4c7f2021bad45c08cc5dd49c47581ec20ce27b10efa0319da07c32c5e90c9f50"
+          }
+        }
+      },
+      {
+        "index": 1,
+        "steps": 137,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              27,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "7351856fd6dee67724c7fbd57a782e5eff962907cda83147f9187884c749cf7e"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              27,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "be3deed629d63474af5ebda0592b1275278ce3fd5746394eea33916d45cde3cc"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "823d5026b43cdcd81b4b957f1f9378dfdfe8a1a81cd5980b47b11d8d7fb6ce59"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "70daad99fb6967593790692f384c00cbed1d0c7926620834eb2bffc4a97bcba9"
+          }
+        }
+      },
+      {
+        "index": 2,
+        "steps": 13,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              8,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "420b3c27155f80c506ffc1ec87b0e0f5f717c677b8d4371dff6013e270f264f1"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              8,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "01be55dacda88273f4c2d925a5b24cbf6c2c6c7c09728fb4e6cf68e6e5bb6738"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "99053dda6db1b6d5aa8d364bcb105f67147b66a799b7f4f881fa43758bb9c0de"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "e265e57196ece38d22cd0ae68b026d6770a46c0ad3f4e95c3d7abfb09d7967b2"
+          }
+        }
+      },
+      {
+        "index": 3,
+        "steps": 12,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              4,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "b93cc6f6587545d91e71dda17a67ff269bb36825c5af1f50d4aecd4b3cf532cd"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              4,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "c547a4a9fd923c57123c45ff481c71fb09940f15569e418697fa47fbcaeee263"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "9508531d556be8ae10ff649519646ab6ab6aeba639c24f1d58648550577a25e1"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "f0ff94e7a1702610c9dab07e8cca7f2403961485df59b7dde5a1828319f1780e"
+          }
+        }
+      },
+      {
+        "index": 4,
+        "steps": 84,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              8,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "d5ace032bb3904c365e1d5e704bb5c0368cd88d9eb4354b2110b131e60c87b59"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              8,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "b58b3dd6c10c5d95f917b1e35470bb0058533fcf3601ddda2d34a9e6faf8ba03"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "c1cb2bf9cbaaf1542f0f76af7e92a9f418b6f19e64b6580a77fd8b073dec2358"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "0b4f3b32412baf3b4f815ad094fc7f9a09472e4dfd287855bce4393b2b3584ec"
+          }
+        }
+      },
+      {
+        "index": 5,
+        "steps": 51,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              12,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "49bd82621f0f5a28a3f349f9ee0647c60656eac7dccbd0d5d82d348bc871d990"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              12,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "3d0a8a4f56a22a0ca427eb12d5d33fceda35b456386548255ccf1f6c9e02381e"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "33a0da51985b68c2d584a3d0669b17f50f303a056f7f296af4359468fbdbea0e"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "a6a7880c8d58466ebb2a504daf2bb116b91e1558cf610e5f3b3b88fc190b8582"
+          }
+        }
+      }
+    ],
+    "gpu_results": [
+      {
+        "index": 0,
+        "steps": 128,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              32,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "ffa5f3130550a98815aed1a237627dc1fed4c4e783763e07827dc05cdee74acc"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              32,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "a82e438164885f3404656ae5750b6c7eb3ddf3f00cb4ded068e816bed5c968e5"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "2f90974b084062dcd8d506f86a8582284a02766322f9e0d47117ebb0a049555e"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "b3b6f3e3307ef4a7233bc78df6b35c58cfca7165d63c14cbfedd6f3d313a75cc"
+          },
+          "fmax": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "d46ad49bbdc776df6d377a8a696c428ef2750d254221acc55959cbc654178c3f"
+          }
+        }
+      },
+      {
+        "index": 1,
+        "steps": 137,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              27,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "504f5940144b151ebf77d173381f486dc8736a5819d1f54ac83d789dcef0c582"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              27,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "999b224c404b70dc766e2c7a9f5a5acfed0abf0a518b16c2e786f9fee9333c36"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "823d5026b43cdcd81b4b957f1f9378dfdfe8a1a81cd5980b47b11d8d7fb6ce59"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "f03e41ef88dc3519fb5b9ba218e9cda69d5ec5bccb5173ebf64992195baf7e1d"
+          },
+          "fmax": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "b3e4f00bca55b20404596bc79f130aac93846c5e26fabbfe89418b6aaf9ead25"
+          }
+        }
+      },
+      {
+        "index": 2,
+        "steps": 13,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              8,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "c8226c4c4cafb98ec9e97c7a4e6d945df11e9fdc06fae20d657649268463aa0f"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              8,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "48115232ca26dd4a2e499f94411e8b6c5cccf4a6923218d94e9ce7ce47453158"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "99053dda6db1b6d5aa8d364bcb105f67147b66a799b7f4f881fa43758bb9c0de"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "5e1249f59734483d6b99d01b733ff73f3e8fb48f78df7e2777521b26ba4b6a55"
+          },
+          "fmax": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "0c9091f1eb813c4aae9b8efe333a097ad9cef4fcb40121af2e900dc012815d0f"
+          }
+        }
+      },
+      {
+        "index": 3,
+        "steps": 12,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              4,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "738203f68d78a596f2f8aac8b8993c1ee37c444141db5100528d1eea9c764fe6"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              4,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "c547a4a9fd923c57123c45ff481c71fb09940f15569e418697fa47fbcaeee263"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "9508531d556be8ae10ff649519646ab6ab6aeba639c24f1d58648550577a25e1"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "f0ff94e7a1702610c9dab07e8cca7f2403961485df59b7dde5a1828319f1780e"
+          },
+          "fmax": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "4bd39b17805688a1800617bc3ee401c3828a83ebf014a675557712da820a7fd9"
+          }
+        }
+      },
+      {
+        "index": 4,
+        "steps": 84,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              8,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "bb5cbc87359e282b0871d183670d9e3bb7d59b5e726b85296bc59dbb2dee5437"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              8,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "a3c72592f03f24e742ba006356756edf97145ae15d9845d4d4e2d249663a5b0f"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "c1cb2bf9cbaaf1542f0f76af7e92a9f418b6f19e64b6580a77fd8b073dec2358"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "1e5e3ef859e47bdbf6792c4bce133ed36c43dee59b87453d05a61d68aac585fa"
+          },
+          "fmax": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "078886802710a89a0e3c277782352bba31a82b648f3037a353e3a3174d87936d"
+          }
+        }
+      },
+      {
+        "index": 5,
+        "steps": 51,
+        "status": "converged",
+        "fields": {
+          "positions": {
+            "bitwise_equal": true,
+            "shape": [
+              12,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "8feccea2c32066f3fe7e843fb8fec970234939ed4d5e9e3cbe7147179fe52d74"
+          },
+          "forces": {
+            "bitwise_equal": true,
+            "shape": [
+              12,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "cc21b460bc29d0ccecc32906ed4e3c67c643ea4ea74ddb2335a2bf0a3e75a55a"
+          },
+          "cell": {
+            "bitwise_equal": true,
+            "shape": [
+              3,
+              3
+            ],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "33a0da51985b68c2d584a3d0669b17f50f303a056f7f296af4359468fbdbea0e"
+          },
+          "energy": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "056a8f4e1cc2e8b6412b8cad0731425a3c14b53a5fff1afbc6c8353d345d2948"
+          },
+          "fmax": {
+            "bitwise_equal": true,
+            "shape": [],
+            "max_absolute_difference": 0.0,
+            "float64_le_sha256": "301105c1e674428a45fdd95c987fd2b33b22cd465e300a3ac09b36db7cdb499c"
+          }
+        }
+      }
+    ]
+  },
+  "test_adjustment": {
+    "three_body_positions_absolute_tolerance_A": {
+      "before": 0.0001,
+      "after": 0.0002
+    },
+    "three_body_force_absolute_tolerance_eV_per_A": 0.0001,
+    "three_body_cell_absolute_tolerance_A": 0.0001,
+    "relative_energy_tolerance": 1e-05,
+    "steps": "exact",
+    "production_numerics_changed": false
+  },
+  "rerun": {
+    "status": "passed",
+    "test": "test_md_relaxation_gpu.MultiSystemRelaxationCudaTest.test_structures_relax_as_ase_fire_alone",
+    "slurm_job_id": 109036,
+    "gpu": "NVIDIA GeForce RTX 3090",
+    "seconds": 50.947,
+    "subcases": 18,
+    "coverage": [
+      "fixed and Frechet cell",
+      "all structures and in-flight slots",
+      "draining and failed drain capture",
+      "three-body line graph",
+      "multiple unions",
+      "capacity overflow and out-of-memory union splitting"
+    ]
+  }
+}

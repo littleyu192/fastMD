@@ -1,0 +1,1927 @@
+{
+  "material_id": "wbm-1-12",
+  "formula": "Ag2CdI4",
+  "atoms": 7,
+  "fixture": "/share/home/husiyu/software/MD_framework/FastMD/tests/data/wbm-1-12.initial.extxyz",
+  "fixture_sha256": "6975404b868966a5cbc7a053f7ba12769278b009885f2e8c5df9d36bf61110d2",
+  "source": "https://ndownloader.figshare.com/files/48169597",
+  "model": "mace",
+  "model_path": "/share/home/husiyu/software/MD_framework/records2610/checkpoints/mace-medium.model",
+  "model_sha256": "01bfe22100139f424713cf921144e5509cbe353d67aa9fa1be9c6e1e0ed35845",
+  "ase_version": "3.26.0",
+  "device": "cuda",
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "torch_version": "2.8.0+cu128",
+  "profile": "topology",
+  "matmul_precision": "highest",
+  "max_steps": 500,
+  "fmax_eV_per_A": 0.05,
+  "steps_per_launch": 5,
+  "notes": [
+    "Timings include setup and capture, exclude checkpoint loading, and have no speed assertion.",
+    "Numerical agreement compares execution paths; it is not an evaluation against DFT.",
+    "Position differences are raw Cartesian components without periodic alignment.",
+    "Fixed-cell runs omit stress; variable-cell convergence includes Frechet cell forces."
+  ],
+  "runs": {
+    "fixed_cell": {
+      "eager": {
+        "initial_energy_eV": -15.495022594928741,
+        "final_energy_eV": -15.5098876953125,
+        "max_force_eV_per_A": 0.04427690372094426,
+        "max_filter_force_eV_per_A": 0.04427690372094426,
+        "steps": 7,
+        "converged": true,
+        "elapsed_seconds_including_capture": 2.5738788656890392,
+        "volume_A3": 280.2666906136185,
+        "stats": {
+          "requested": {
+            "execution": "eager",
+            "optimization_profile": "topology",
+            "checkpoint": "off",
+            "isolated_atoms": "reference",
+            "capacity": {
+              "u_step": 512,
+              "t_step": 8192,
+              "n_dummy": 64,
+              "min_pad_u": 256,
+              "min_pad_t": 4096,
+              "warmup": 3,
+              "candidate_skin": 2.0
+            },
+            "expert_overrides": {},
+            "matmul_precision": "highest",
+            "topology_reuse": "auto",
+            "triton_dot_precision": null
+          },
+          "configuration": {
+            "execution": "eager",
+            "optimization_profile": "topology",
+            "checkpoint": "off",
+            "isolated_atoms": "reference",
+            "capacity": {
+              "u_step": 32,
+              "t_step": 8192,
+              "n_dummy": 64,
+              "min_pad_u": 32,
+              "min_pad_t": 4096,
+              "warmup": 3,
+              "candidate_skin": 2.0
+            },
+            "kernel_options": {
+              "MATRIS_GATED_LN_FUSE_MIN_ROWS": 10000,
+              "MATRIS_FUSED_GATED_LN_RESIDUAL": true,
+              "MATRIS_FUSED_SEGMENT_SOFTMAX": true,
+              "MATRIS_FUSED_INDEXED_CAT_LINEAR": true,
+              "MATRIS_FUSED_INDEXED_CAT_LINEAR_BACKEND": "decomposed_indexed_silu",
+              "MATRIS_INDEXED_CAT_LINEAR_MIN_ROWS": 20000,
+              "MATRIS_MIXED_WIDTH_CAT": true,
+              "MATRIS_GATED_LN_BIAS_FOLD": true,
+              "MATRIS_FUSED_GATED_TAIL": true,
+              "MATRIS_TRITON_ROW_GEMM": true,
+              "MATRIS_TRITON_WIDE_GEMM": true,
+              "MATRIS_TRITON_WIDE_GEMM_MIN_ROWS": 65536,
+              "MATRIS_FUSED_EDGE_FFN": true,
+              "MATRIS_FUSED_WEIGHTED_SEGMENT_EAGER": true,
+              "MATRIS_CSR_SEGMENT_SUM": true,
+              "MATRIS_FUSED_GATHER_CAT_EAGER": true,
+              "MATRIS_FUSED_DIRECTED_PAIR_AGGREGATE": true,
+              "MATRIS_FUSED_DIRECTED_PAIR_EXPAND": true,
+              "MATRIS_FUSED_SEGMENT_ATTENTION": true,
+              "MATRIS_FUSED_SEGMENT_ATTENTION_EAGER": true,
+              "MATRIS_FUSED_SEGMENT_ATTENTION_MIN_ROWS": 0,
+              "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION": true,
+              "MATRIS_FUSED_SEGMENT_ATTENTION_REUSE_CSR": true,
+              "MATRIS_FUSED_SEGMENT_ATTENTION_SORTED_TARGET_CSR": true,
+              "MATRIS_FUSED_LINE_ENVELOPE": true,
+              "MATRIS_FUSED_LINE_ENVELOPE_EAGER": true,
+              "MATRIS_FUSED_RESIDUAL_ADD": true,
+              "MATRIS_FUSED_RESIDUAL_ADD_MIN_ROWS": 0,
+              "MATRIS_MERGED_ATTENTION_PROJECTIONS": true,
+              "MATRIS_MERGED_REFINEMENT_PROJECTION": true,
+              "MATRIS_MERGED_PROJECTION_SINGLE_BWD": "auto",
+              "MATRIS_SKIP_DEAD_THREEBODY_TAIL": true,
+              "MATRIS_FUSED_THREEBODY_LINEAR": true,
+              "MATRIS_FUSED_THREEBODY_LINEAR_EAGER": true,
+              "MATRIS_FUSED_THREEBODY_LINEAR_MIN_ROWS": 60000,
+              "MATRIS_FUSED_THREEBODY_BASIS": true,
+              "MATRIS_FUSED_THREEBODY_BASIS_EAGER": true,
+              "MATRIS_FUSED_THREEBODY_BASIS_MIN_ROWS": 60000,
+              "MATRIS_UNDIRECTED_EDGE_INIT": true,
+              "MATRIS_TRITON_DOT_PRECISION": "auto",
+              "MATRIS_SAVED_TENSOR_RECOMPUTE": "auto",
+              "MATRIS_COMPILED_LOWERINGS": false,
+              "MATRIS_COMPILED_LOWERINGS_MODE": "max-autotune-no-cudagraphs",
+              "MATRIS_WIDTH_ROW_TILES": true,
+              "MATRIS_DECOMPOSED_INDEXED_SILU_BM": null,
+              "MATRIS_DECOMPOSED_INDEXED_SILU_BWD_BM": 8,
+              "MATRIS_DECOMPOSED_INDEXED_SORTED_A_PAIR_BWD": true,
+              "MATRIS_DECOMPOSED_INDEXED_GEMM_BACKEND": "torch",
+              "MATRIS_DECOMPOSED_INDEXED_DEBUG_CHECKS": false,
+              "MATRIS_GATED_LN_2D": true,
+              "MATRIS_FUSED_RESIDUAL_ADD_BM": null,
+              "MATRIS_FUSED_RESIDUAL_ADD_BD": 128,
+              "MATRIS_THREEBODY_FOURIER_BM": 128,
+              "MATRIS_LINE_ENVELOPE_BM": null,
+              "MATRIS_LINE_ENVELOPE_BD": 128,
+              "MATRIS_DIRECTED_PAIR_AGG_BM": null,
+              "MATRIS_DIRECTED_PAIR_AGG_BD": 128,
+              "MATRIS_FUSED_SEGMENT_ATTENTION_NUM_WARPS": null,
+              "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BM": 8,
+              "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BD": 128,
+              "MATRIS_WHOLE_STEP_TIER_CACHE": false,
+              "MATRIS_WHOLE_STEP_MAX_TIERS": 3,
+              "MATRIS_TIER_HYSTERESIS_WINDOW": 2000,
+              "MATRIS_TIER_HYSTERESIS_SIGMA": 3.0,
+              "MATRIS_TIER_CHECK_INTERVAL": 256,
+              "MATRIS_TIER_DOWN_COOLDOWN": 4000,
+              "MATRIS_TIER_GROWTH_HEADROOM": 0.03125,
+              "MATRIS_TIER_MIN_FREE_GIB": 6.0,
+              "MATRIS_CAPACITY_THERMAL_FACTOR": 1.0,
+              "MATRIS_LINE_GRAPH_TRITON": true,
+              "MATRIS_LINE_GRAPH_TRITON_BLOCK": 256,
+              "MATRIS_PRESORTED_BUILD": true,
+              "MATRIS_NARROW_SORT_KEYS": true,
+              "MATRIS_TOPOLOGY_VERIFY": "builder",
+              "MATRIS_TOPOLOGY_REUSE_CHECK": 0,
+              "MATRIS_M3GNET_INDEXED_AFFINE": true,
+              "MATRIS_M3GNET_INDEXED_EDGE": true,
+              "MATRIS_M3GNET_INDEXED_NODE": true
+            },
+            "report": true,
+            "matmul_precision": "highest",
+            "saved_tensor_recompute": "auto",
+            "topology_reuse": "auto",
+            "triton_dot_precision": null
+          },
+          "fingerprint": "6d443aeca8809e54",
+          "kernel_policy": {
+            "fingerprint": "c56b3866d6e6b99b",
+            "strict_errors": false
+          },
+          "effective": {
+            "execution": "eager",
+            "checkpoint": null,
+            "isolated_atoms": "model",
+            "matmul_precision": {
+              "fp32_gemm": "ieee",
+              "float32_matmul_precision": "highest",
+              "cuda_matmul_allow_tf32": false,
+              "cudnn_allow_tf32": true,
+              "fp32_precision": null,
+              "environment": {
+                "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": null,
+                "NVIDIA_TF32_OVERRIDE": null,
+                "CUBLAS_EMULATE_SINGLE_PRECISION": null,
+                "CUBLAS_EMULATION_STRATEGY": null
+              }
+            },
+            "triton_dot_precision": {
+              "requested": "auto",
+              "row_gemm": "tf32x3",
+              "edge_ffn": "tf32x3",
+              "gated_tail": "tf32x3",
+              "act_linear": "tf32x3",
+              "wide_gemm": "tf32x3"
+            },
+            "merged_projections": {
+              "status": "observed",
+              "materialized_module_count": 0
+            },
+            "notes": [
+              "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+            ],
+            "topology_reuse": {
+              "requested": "auto",
+              "last_call": "off",
+              "reason": "auto: eager execution rebuilds per call",
+              "fallbacks": 0,
+              "runner": null
+            },
+            "auto_policy": "latency",
+            "memory_probes": {
+              "cache_hits": 0,
+              "measurements": 0,
+              "skipped": 0,
+              "last": "not_requested"
+            },
+            "capture_trials": {
+              "auto_policy": "latency",
+              "attempts": 0,
+              "successes": 0,
+              "failures": 0,
+              "budget_rejections": 0,
+              "total_seconds": 0.0,
+              "records": []
+            }
+          },
+          "relaxation": {
+            "execution": "ase",
+            "reason": "execution='eager' uses the ASE optimizer"
+          }
+        },
+        "validation": {
+          "ase_calculator_calls": 8,
+          "input_unchanged": true,
+          "shared_adapter": true,
+          "terminal_getters_cached": true
+        }
+      },
+      "whole_step": {
+        "initial_energy_eV": -15.495022475719452,
+        "final_energy_eV": -15.50988781452179,
+        "max_force_eV_per_A": 0.04427686651079134,
+        "max_filter_force_eV_per_A": 0.04427686651079134,
+        "steps": 7,
+        "converged": true,
+        "elapsed_seconds_including_capture": 6.189395050518215,
+        "volume_A3": 280.2666906136185,
+        "stats": {
+          "requested": {
+            "execution": "whole_step"
+          },
+          "effective": {
+            "execution": "whole_step"
+          },
+          "relaxation": {
+            "execution": "whole_step",
+            "steps_per_launch": 5,
+            "runner": {
+              "launches": 2,
+              "candidate_refreshes": 1,
+              "fallback_windows": 0,
+              "recovery_replays": 0,
+              "unions": [
+                1
+              ],
+              "steps_per_launch": 5,
+              "recaptures": 0,
+              "u_capacity": [
+                128
+              ],
+              "max_edge_count": [
+                168
+              ],
+              "capacity_fill": [
+                0.65625
+              ],
+              "capture_seconds": [
+                [
+                  2.9113170597702265
+                ]
+              ],
+              "slot_atoms": [
+                [
+                  7
+                ]
+              ],
+              "atoms": [
+                [
+                  7
+                ]
+              ],
+              "relaxation_windows": 2,
+              "structure_writes": 0,
+              "compactions": 0,
+              "drain_failures": [],
+              "turnover_seconds": 0.0011746212840080261,
+              "finished": {
+                "converged": 1,
+                "max_steps": 0,
+                "failed": 0
+              },
+              "structures": 1
+            }
+          },
+          "calculator": {
+            "requested": {
+              "execution": "eager",
+              "optimization_profile": "topology",
+              "checkpoint": "off",
+              "isolated_atoms": "reference",
+              "capacity": {
+                "u_step": 512,
+                "t_step": 8192,
+                "n_dummy": 64,
+                "min_pad_u": 256,
+                "min_pad_t": 4096,
+                "warmup": 3,
+                "candidate_skin": 2.0
+              },
+              "expert_overrides": {},
+              "matmul_precision": "highest",
+              "topology_reuse": "auto",
+              "triton_dot_precision": null
+            },
+            "configuration": {
+              "execution": "eager",
+              "optimization_profile": "topology",
+              "checkpoint": "off",
+              "isolated_atoms": "reference",
+              "capacity": {
+                "u_step": 32,
+                "t_step": 8192,
+                "n_dummy": 64,
+                "min_pad_u": 32,
+                "min_pad_t": 4096,
+                "warmup": 3,
+                "candidate_skin": 2.0
+              },
+              "kernel_options": {
+                "MATRIS_GATED_LN_FUSE_MIN_ROWS": 10000,
+                "MATRIS_FUSED_GATED_LN_RESIDUAL": true,
+                "MATRIS_FUSED_SEGMENT_SOFTMAX": true,
+                "MATRIS_FUSED_INDEXED_CAT_LINEAR": true,
+                "MATRIS_FUSED_INDEXED_CAT_LINEAR_BACKEND": "decomposed_indexed_silu",
+                "MATRIS_INDEXED_CAT_LINEAR_MIN_ROWS": 20000,
+                "MATRIS_MIXED_WIDTH_CAT": true,
+                "MATRIS_GATED_LN_BIAS_FOLD": true,
+                "MATRIS_FUSED_GATED_TAIL": true,
+                "MATRIS_TRITON_ROW_GEMM": true,
+                "MATRIS_TRITON_WIDE_GEMM": true,
+                "MATRIS_TRITON_WIDE_GEMM_MIN_ROWS": 65536,
+                "MATRIS_FUSED_EDGE_FFN": true,
+                "MATRIS_FUSED_WEIGHTED_SEGMENT_EAGER": true,
+                "MATRIS_CSR_SEGMENT_SUM": true,
+                "MATRIS_FUSED_GATHER_CAT_EAGER": true,
+                "MATRIS_FUSED_DIRECTED_PAIR_AGGREGATE": true,
+                "MATRIS_FUSED_DIRECTED_PAIR_EXPAND": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_EAGER": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_MIN_ROWS": 0,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_REUSE_CSR": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_SORTED_TARGET_CSR": true,
+                "MATRIS_FUSED_LINE_ENVELOPE": true,
+                "MATRIS_FUSED_LINE_ENVELOPE_EAGER": true,
+                "MATRIS_FUSED_RESIDUAL_ADD": true,
+                "MATRIS_FUSED_RESIDUAL_ADD_MIN_ROWS": 0,
+                "MATRIS_MERGED_ATTENTION_PROJECTIONS": true,
+                "MATRIS_MERGED_REFINEMENT_PROJECTION": true,
+                "MATRIS_MERGED_PROJECTION_SINGLE_BWD": "auto",
+                "MATRIS_SKIP_DEAD_THREEBODY_TAIL": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR_EAGER": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR_MIN_ROWS": 60000,
+                "MATRIS_FUSED_THREEBODY_BASIS": true,
+                "MATRIS_FUSED_THREEBODY_BASIS_EAGER": true,
+                "MATRIS_FUSED_THREEBODY_BASIS_MIN_ROWS": 60000,
+                "MATRIS_UNDIRECTED_EDGE_INIT": true,
+                "MATRIS_TRITON_DOT_PRECISION": "auto",
+                "MATRIS_SAVED_TENSOR_RECOMPUTE": "auto",
+                "MATRIS_COMPILED_LOWERINGS": false,
+                "MATRIS_COMPILED_LOWERINGS_MODE": "max-autotune-no-cudagraphs",
+                "MATRIS_WIDTH_ROW_TILES": true,
+                "MATRIS_DECOMPOSED_INDEXED_SILU_BM": null,
+                "MATRIS_DECOMPOSED_INDEXED_SILU_BWD_BM": 8,
+                "MATRIS_DECOMPOSED_INDEXED_SORTED_A_PAIR_BWD": true,
+                "MATRIS_DECOMPOSED_INDEXED_GEMM_BACKEND": "torch",
+                "MATRIS_DECOMPOSED_INDEXED_DEBUG_CHECKS": false,
+                "MATRIS_GATED_LN_2D": true,
+                "MATRIS_FUSED_RESIDUAL_ADD_BM": null,
+                "MATRIS_FUSED_RESIDUAL_ADD_BD": 128,
+                "MATRIS_THREEBODY_FOURIER_BM": 128,
+                "MATRIS_LINE_ENVELOPE_BM": null,
+                "MATRIS_LINE_ENVELOPE_BD": 128,
+                "MATRIS_DIRECTED_PAIR_AGG_BM": null,
+                "MATRIS_DIRECTED_PAIR_AGG_BD": 128,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_NUM_WARPS": null,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BM": 8,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BD": 128,
+                "MATRIS_WHOLE_STEP_TIER_CACHE": false,
+                "MATRIS_WHOLE_STEP_MAX_TIERS": 3,
+                "MATRIS_TIER_HYSTERESIS_WINDOW": 2000,
+                "MATRIS_TIER_HYSTERESIS_SIGMA": 3.0,
+                "MATRIS_TIER_CHECK_INTERVAL": 256,
+                "MATRIS_TIER_DOWN_COOLDOWN": 4000,
+                "MATRIS_TIER_GROWTH_HEADROOM": 0.03125,
+                "MATRIS_TIER_MIN_FREE_GIB": 6.0,
+                "MATRIS_CAPACITY_THERMAL_FACTOR": 1.0,
+                "MATRIS_LINE_GRAPH_TRITON": true,
+                "MATRIS_LINE_GRAPH_TRITON_BLOCK": 256,
+                "MATRIS_PRESORTED_BUILD": true,
+                "MATRIS_NARROW_SORT_KEYS": true,
+                "MATRIS_TOPOLOGY_VERIFY": "builder",
+                "MATRIS_TOPOLOGY_REUSE_CHECK": 0,
+                "MATRIS_M3GNET_INDEXED_AFFINE": true,
+                "MATRIS_M3GNET_INDEXED_EDGE": true,
+                "MATRIS_M3GNET_INDEXED_NODE": true
+              },
+              "report": true,
+              "matmul_precision": "highest",
+              "saved_tensor_recompute": "auto",
+              "topology_reuse": "auto",
+              "triton_dot_precision": null
+            },
+            "fingerprint": "6d443aeca8809e54",
+            "kernel_policy": {
+              "fingerprint": "c56b3866d6e6b99b",
+              "strict_errors": false
+            },
+            "effective": {
+              "execution": "eager",
+              "checkpoint": null,
+              "isolated_atoms": "model",
+              "matmul_precision": {
+                "fp32_gemm": "ieee",
+                "float32_matmul_precision": "highest",
+                "cuda_matmul_allow_tf32": false,
+                "cudnn_allow_tf32": true,
+                "fp32_precision": null,
+                "environment": {
+                  "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": null,
+                  "NVIDIA_TF32_OVERRIDE": null,
+                  "CUBLAS_EMULATE_SINGLE_PRECISION": null,
+                  "CUBLAS_EMULATION_STRATEGY": null
+                }
+              },
+              "triton_dot_precision": {
+                "requested": "auto",
+                "row_gemm": "tf32x3",
+                "edge_ffn": "tf32x3",
+                "gated_tail": "tf32x3",
+                "act_linear": "tf32x3",
+                "wide_gemm": "tf32x3"
+              },
+              "merged_projections": {
+                "status": "pending first evaluation",
+                "materialized_module_count": null
+              },
+              "notes": [
+                "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+              ],
+              "topology_reuse": {
+                "requested": "auto",
+                "last_call": "off",
+                "reason": null,
+                "fallbacks": 0,
+                "runner": null
+              },
+              "auto_policy": "latency",
+              "memory_probes": {
+                "cache_hits": 0,
+                "measurements": 0,
+                "skipped": 0,
+                "last": "not_requested"
+              },
+              "capture_trials": {
+                "auto_policy": "latency",
+                "attempts": 0,
+                "successes": 0,
+                "failures": 0,
+                "budget_rejections": 0,
+                "total_seconds": 0.0,
+                "records": []
+              }
+            }
+          }
+        },
+        "validation": {
+          "ase_calculator_calls": 0,
+          "terminal_state_collections": 1,
+          "input_unchanged": true,
+          "shared_adapter": true,
+          "terminal_getters_cached": true
+        }
+      },
+      "differences": {
+        "initial_energy_abs_eV": 1.1920928955078125e-07,
+        "final_energy_abs_eV": 1.1920928955078125e-07,
+        "max_position_component_abs_A": 3.8329667439995774e-08,
+        "max_cell_component_abs_A": 0.0,
+        "max_force_component_abs_eV_per_A": 1.1808006092905998e-06,
+        "max_stress_component_abs_eV_per_A3": null,
+        "step_count_abs": 0,
+        "convergence_matches": true
+      },
+      "strict_short_run": {
+        "max_steps": 5,
+        "fmax_eV_per_A": 1e-10,
+        "eager": {
+          "initial_energy_eV": -15.49502295255661,
+          "final_energy_eV": -15.506488800048828,
+          "max_force_eV_per_A": 0.0832668519235871,
+          "max_filter_force_eV_per_A": 0.0832668519235871,
+          "steps": 5,
+          "converged": false,
+          "elapsed_seconds_including_capture": 0.3923016246408224,
+          "volume_A3": 280.2666906136185,
+          "stats": {
+            "requested": {
+              "execution": "eager",
+              "optimization_profile": "topology",
+              "checkpoint": "off",
+              "isolated_atoms": "reference",
+              "capacity": {
+                "u_step": 512,
+                "t_step": 8192,
+                "n_dummy": 64,
+                "min_pad_u": 256,
+                "min_pad_t": 4096,
+                "warmup": 3,
+                "candidate_skin": 2.0
+              },
+              "expert_overrides": {},
+              "matmul_precision": "highest",
+              "topology_reuse": "auto",
+              "triton_dot_precision": null
+            },
+            "configuration": {
+              "execution": "eager",
+              "optimization_profile": "topology",
+              "checkpoint": "off",
+              "isolated_atoms": "reference",
+              "capacity": {
+                "u_step": 32,
+                "t_step": 8192,
+                "n_dummy": 64,
+                "min_pad_u": 32,
+                "min_pad_t": 4096,
+                "warmup": 3,
+                "candidate_skin": 2.0
+              },
+              "kernel_options": {
+                "MATRIS_GATED_LN_FUSE_MIN_ROWS": 10000,
+                "MATRIS_FUSED_GATED_LN_RESIDUAL": true,
+                "MATRIS_FUSED_SEGMENT_SOFTMAX": true,
+                "MATRIS_FUSED_INDEXED_CAT_LINEAR": true,
+                "MATRIS_FUSED_INDEXED_CAT_LINEAR_BACKEND": "decomposed_indexed_silu",
+                "MATRIS_INDEXED_CAT_LINEAR_MIN_ROWS": 20000,
+                "MATRIS_MIXED_WIDTH_CAT": true,
+                "MATRIS_GATED_LN_BIAS_FOLD": true,
+                "MATRIS_FUSED_GATED_TAIL": true,
+                "MATRIS_TRITON_ROW_GEMM": true,
+                "MATRIS_TRITON_WIDE_GEMM": true,
+                "MATRIS_TRITON_WIDE_GEMM_MIN_ROWS": 65536,
+                "MATRIS_FUSED_EDGE_FFN": true,
+                "MATRIS_FUSED_WEIGHTED_SEGMENT_EAGER": true,
+                "MATRIS_CSR_SEGMENT_SUM": true,
+                "MATRIS_FUSED_GATHER_CAT_EAGER": true,
+                "MATRIS_FUSED_DIRECTED_PAIR_AGGREGATE": true,
+                "MATRIS_FUSED_DIRECTED_PAIR_EXPAND": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_EAGER": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_MIN_ROWS": 0,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_REUSE_CSR": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_SORTED_TARGET_CSR": true,
+                "MATRIS_FUSED_LINE_ENVELOPE": true,
+                "MATRIS_FUSED_LINE_ENVELOPE_EAGER": true,
+                "MATRIS_FUSED_RESIDUAL_ADD": true,
+                "MATRIS_FUSED_RESIDUAL_ADD_MIN_ROWS": 0,
+                "MATRIS_MERGED_ATTENTION_PROJECTIONS": true,
+                "MATRIS_MERGED_REFINEMENT_PROJECTION": true,
+                "MATRIS_MERGED_PROJECTION_SINGLE_BWD": "auto",
+                "MATRIS_SKIP_DEAD_THREEBODY_TAIL": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR_EAGER": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR_MIN_ROWS": 60000,
+                "MATRIS_FUSED_THREEBODY_BASIS": true,
+                "MATRIS_FUSED_THREEBODY_BASIS_EAGER": true,
+                "MATRIS_FUSED_THREEBODY_BASIS_MIN_ROWS": 60000,
+                "MATRIS_UNDIRECTED_EDGE_INIT": true,
+                "MATRIS_TRITON_DOT_PRECISION": "auto",
+                "MATRIS_SAVED_TENSOR_RECOMPUTE": "auto",
+                "MATRIS_COMPILED_LOWERINGS": false,
+                "MATRIS_COMPILED_LOWERINGS_MODE": "max-autotune-no-cudagraphs",
+                "MATRIS_WIDTH_ROW_TILES": true,
+                "MATRIS_DECOMPOSED_INDEXED_SILU_BM": null,
+                "MATRIS_DECOMPOSED_INDEXED_SILU_BWD_BM": 8,
+                "MATRIS_DECOMPOSED_INDEXED_SORTED_A_PAIR_BWD": true,
+                "MATRIS_DECOMPOSED_INDEXED_GEMM_BACKEND": "torch",
+                "MATRIS_DECOMPOSED_INDEXED_DEBUG_CHECKS": false,
+                "MATRIS_GATED_LN_2D": true,
+                "MATRIS_FUSED_RESIDUAL_ADD_BM": null,
+                "MATRIS_FUSED_RESIDUAL_ADD_BD": 128,
+                "MATRIS_THREEBODY_FOURIER_BM": 128,
+                "MATRIS_LINE_ENVELOPE_BM": null,
+                "MATRIS_LINE_ENVELOPE_BD": 128,
+                "MATRIS_DIRECTED_PAIR_AGG_BM": null,
+                "MATRIS_DIRECTED_PAIR_AGG_BD": 128,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_NUM_WARPS": null,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BM": 8,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BD": 128,
+                "MATRIS_WHOLE_STEP_TIER_CACHE": false,
+                "MATRIS_WHOLE_STEP_MAX_TIERS": 3,
+                "MATRIS_TIER_HYSTERESIS_WINDOW": 2000,
+                "MATRIS_TIER_HYSTERESIS_SIGMA": 3.0,
+                "MATRIS_TIER_CHECK_INTERVAL": 256,
+                "MATRIS_TIER_DOWN_COOLDOWN": 4000,
+                "MATRIS_TIER_GROWTH_HEADROOM": 0.03125,
+                "MATRIS_TIER_MIN_FREE_GIB": 6.0,
+                "MATRIS_CAPACITY_THERMAL_FACTOR": 1.0,
+                "MATRIS_LINE_GRAPH_TRITON": true,
+                "MATRIS_LINE_GRAPH_TRITON_BLOCK": 256,
+                "MATRIS_PRESORTED_BUILD": true,
+                "MATRIS_NARROW_SORT_KEYS": true,
+                "MATRIS_TOPOLOGY_VERIFY": "builder",
+                "MATRIS_TOPOLOGY_REUSE_CHECK": 0,
+                "MATRIS_M3GNET_INDEXED_AFFINE": true,
+                "MATRIS_M3GNET_INDEXED_EDGE": true,
+                "MATRIS_M3GNET_INDEXED_NODE": true
+              },
+              "report": true,
+              "matmul_precision": "highest",
+              "saved_tensor_recompute": "auto",
+              "topology_reuse": "auto",
+              "triton_dot_precision": null
+            },
+            "fingerprint": "6d443aeca8809e54",
+            "kernel_policy": {
+              "fingerprint": "c56b3866d6e6b99b",
+              "strict_errors": false
+            },
+            "effective": {
+              "execution": "eager",
+              "checkpoint": null,
+              "isolated_atoms": "model",
+              "matmul_precision": {
+                "fp32_gemm": "ieee",
+                "float32_matmul_precision": "highest",
+                "cuda_matmul_allow_tf32": false,
+                "cudnn_allow_tf32": true,
+                "fp32_precision": null,
+                "environment": {
+                  "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": null,
+                  "NVIDIA_TF32_OVERRIDE": null,
+                  "CUBLAS_EMULATE_SINGLE_PRECISION": null,
+                  "CUBLAS_EMULATION_STRATEGY": null
+                }
+              },
+              "triton_dot_precision": {
+                "requested": "auto",
+                "row_gemm": "tf32x3",
+                "edge_ffn": "tf32x3",
+                "gated_tail": "tf32x3",
+                "act_linear": "tf32x3",
+                "wide_gemm": "tf32x3"
+              },
+              "merged_projections": {
+                "status": "observed",
+                "materialized_module_count": 0
+              },
+              "notes": [
+                "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+              ],
+              "topology_reuse": {
+                "requested": "auto",
+                "last_call": "off",
+                "reason": "auto: eager execution rebuilds per call",
+                "fallbacks": 0,
+                "runner": null
+              },
+              "auto_policy": "latency",
+              "memory_probes": {
+                "cache_hits": 0,
+                "measurements": 0,
+                "skipped": 0,
+                "last": "not_requested"
+              },
+              "capture_trials": {
+                "auto_policy": "latency",
+                "attempts": 0,
+                "successes": 0,
+                "failures": 0,
+                "budget_rejections": 0,
+                "total_seconds": 0.0,
+                "records": []
+              }
+            },
+            "relaxation": {
+              "execution": "ase",
+              "reason": "execution='eager' uses the ASE optimizer"
+            }
+          },
+          "validation": {
+            "ase_calculator_calls": 6,
+            "input_unchanged": true,
+            "shared_adapter": true,
+            "terminal_getters_cached": true
+          }
+        },
+        "whole_step": {
+          "initial_energy_eV": -15.495022594928741,
+          "final_energy_eV": -15.506488621234894,
+          "max_force_eV_per_A": 0.08326685256946488,
+          "max_filter_force_eV_per_A": 0.08326685256946488,
+          "steps": 5,
+          "converged": false,
+          "elapsed_seconds_including_capture": 2.3398277247324586,
+          "volume_A3": 280.2666906136185,
+          "stats": {
+            "requested": {
+              "execution": "whole_step"
+            },
+            "effective": {
+              "execution": "whole_step"
+            },
+            "relaxation": {
+              "execution": "whole_step",
+              "steps_per_launch": 5,
+              "runner": {
+                "launches": 2,
+                "candidate_refreshes": 1,
+                "fallback_windows": 0,
+                "recovery_replays": 0,
+                "unions": [
+                  1
+                ],
+                "steps_per_launch": 5,
+                "recaptures": 0,
+                "u_capacity": [
+                  128
+                ],
+                "max_edge_count": [
+                  168
+                ],
+                "capacity_fill": [
+                  0.65625
+                ],
+                "capture_seconds": [
+                  [
+                    1.6411144053563476
+                  ]
+                ],
+                "slot_atoms": [
+                  [
+                    7
+                  ]
+                ],
+                "atoms": [
+                  [
+                    7
+                  ]
+                ],
+                "relaxation_windows": 2,
+                "structure_writes": 0,
+                "compactions": 0,
+                "drain_failures": [],
+                "turnover_seconds": 0.0010761311277747154,
+                "finished": {
+                  "converged": 0,
+                  "max_steps": 1,
+                  "failed": 0
+                },
+                "structures": 1
+              }
+            },
+            "calculator": {
+              "requested": {
+                "execution": "eager",
+                "optimization_profile": "topology",
+                "checkpoint": "off",
+                "isolated_atoms": "reference",
+                "capacity": {
+                  "u_step": 512,
+                  "t_step": 8192,
+                  "n_dummy": 64,
+                  "min_pad_u": 256,
+                  "min_pad_t": 4096,
+                  "warmup": 3,
+                  "candidate_skin": 2.0
+                },
+                "expert_overrides": {},
+                "matmul_precision": "highest",
+                "topology_reuse": "auto",
+                "triton_dot_precision": null
+              },
+              "configuration": {
+                "execution": "eager",
+                "optimization_profile": "topology",
+                "checkpoint": "off",
+                "isolated_atoms": "reference",
+                "capacity": {
+                  "u_step": 32,
+                  "t_step": 8192,
+                  "n_dummy": 64,
+                  "min_pad_u": 32,
+                  "min_pad_t": 4096,
+                  "warmup": 3,
+                  "candidate_skin": 2.0
+                },
+                "kernel_options": {
+                  "MATRIS_GATED_LN_FUSE_MIN_ROWS": 10000,
+                  "MATRIS_FUSED_GATED_LN_RESIDUAL": true,
+                  "MATRIS_FUSED_SEGMENT_SOFTMAX": true,
+                  "MATRIS_FUSED_INDEXED_CAT_LINEAR": true,
+                  "MATRIS_FUSED_INDEXED_CAT_LINEAR_BACKEND": "decomposed_indexed_silu",
+                  "MATRIS_INDEXED_CAT_LINEAR_MIN_ROWS": 20000,
+                  "MATRIS_MIXED_WIDTH_CAT": true,
+                  "MATRIS_GATED_LN_BIAS_FOLD": true,
+                  "MATRIS_FUSED_GATED_TAIL": true,
+                  "MATRIS_TRITON_ROW_GEMM": true,
+                  "MATRIS_TRITON_WIDE_GEMM": true,
+                  "MATRIS_TRITON_WIDE_GEMM_MIN_ROWS": 65536,
+                  "MATRIS_FUSED_EDGE_FFN": true,
+                  "MATRIS_FUSED_WEIGHTED_SEGMENT_EAGER": true,
+                  "MATRIS_CSR_SEGMENT_SUM": true,
+                  "MATRIS_FUSED_GATHER_CAT_EAGER": true,
+                  "MATRIS_FUSED_DIRECTED_PAIR_AGGREGATE": true,
+                  "MATRIS_FUSED_DIRECTED_PAIR_EXPAND": true,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION": true,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION_EAGER": true,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION_MIN_ROWS": 0,
+                  "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION": true,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION_REUSE_CSR": true,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION_SORTED_TARGET_CSR": true,
+                  "MATRIS_FUSED_LINE_ENVELOPE": true,
+                  "MATRIS_FUSED_LINE_ENVELOPE_EAGER": true,
+                  "MATRIS_FUSED_RESIDUAL_ADD": true,
+                  "MATRIS_FUSED_RESIDUAL_ADD_MIN_ROWS": 0,
+                  "MATRIS_MERGED_ATTENTION_PROJECTIONS": true,
+                  "MATRIS_MERGED_REFINEMENT_PROJECTION": true,
+                  "MATRIS_MERGED_PROJECTION_SINGLE_BWD": "auto",
+                  "MATRIS_SKIP_DEAD_THREEBODY_TAIL": true,
+                  "MATRIS_FUSED_THREEBODY_LINEAR": true,
+                  "MATRIS_FUSED_THREEBODY_LINEAR_EAGER": true,
+                  "MATRIS_FUSED_THREEBODY_LINEAR_MIN_ROWS": 60000,
+                  "MATRIS_FUSED_THREEBODY_BASIS": true,
+                  "MATRIS_FUSED_THREEBODY_BASIS_EAGER": true,
+                  "MATRIS_FUSED_THREEBODY_BASIS_MIN_ROWS": 60000,
+                  "MATRIS_UNDIRECTED_EDGE_INIT": true,
+                  "MATRIS_TRITON_DOT_PRECISION": "auto",
+                  "MATRIS_SAVED_TENSOR_RECOMPUTE": "auto",
+                  "MATRIS_COMPILED_LOWERINGS": false,
+                  "MATRIS_COMPILED_LOWERINGS_MODE": "max-autotune-no-cudagraphs",
+                  "MATRIS_WIDTH_ROW_TILES": true,
+                  "MATRIS_DECOMPOSED_INDEXED_SILU_BM": null,
+                  "MATRIS_DECOMPOSED_INDEXED_SILU_BWD_BM": 8,
+                  "MATRIS_DECOMPOSED_INDEXED_SORTED_A_PAIR_BWD": true,
+                  "MATRIS_DECOMPOSED_INDEXED_GEMM_BACKEND": "torch",
+                  "MATRIS_DECOMPOSED_INDEXED_DEBUG_CHECKS": false,
+                  "MATRIS_GATED_LN_2D": true,
+                  "MATRIS_FUSED_RESIDUAL_ADD_BM": null,
+                  "MATRIS_FUSED_RESIDUAL_ADD_BD": 128,
+                  "MATRIS_THREEBODY_FOURIER_BM": 128,
+                  "MATRIS_LINE_ENVELOPE_BM": null,
+                  "MATRIS_LINE_ENVELOPE_BD": 128,
+                  "MATRIS_DIRECTED_PAIR_AGG_BM": null,
+                  "MATRIS_DIRECTED_PAIR_AGG_BD": 128,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION_NUM_WARPS": null,
+                  "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BM": 8,
+                  "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BD": 128,
+                  "MATRIS_WHOLE_STEP_TIER_CACHE": false,
+                  "MATRIS_WHOLE_STEP_MAX_TIERS": 3,
+                  "MATRIS_TIER_HYSTERESIS_WINDOW": 2000,
+                  "MATRIS_TIER_HYSTERESIS_SIGMA": 3.0,
+                  "MATRIS_TIER_CHECK_INTERVAL": 256,
+                  "MATRIS_TIER_DOWN_COOLDOWN": 4000,
+                  "MATRIS_TIER_GROWTH_HEADROOM": 0.03125,
+                  "MATRIS_TIER_MIN_FREE_GIB": 6.0,
+                  "MATRIS_CAPACITY_THERMAL_FACTOR": 1.0,
+                  "MATRIS_LINE_GRAPH_TRITON": true,
+                  "MATRIS_LINE_GRAPH_TRITON_BLOCK": 256,
+                  "MATRIS_PRESORTED_BUILD": true,
+                  "MATRIS_NARROW_SORT_KEYS": true,
+                  "MATRIS_TOPOLOGY_VERIFY": "builder",
+                  "MATRIS_TOPOLOGY_REUSE_CHECK": 0,
+                  "MATRIS_M3GNET_INDEXED_AFFINE": true,
+                  "MATRIS_M3GNET_INDEXED_EDGE": true,
+                  "MATRIS_M3GNET_INDEXED_NODE": true
+                },
+                "report": true,
+                "matmul_precision": "highest",
+                "saved_tensor_recompute": "auto",
+                "topology_reuse": "auto",
+                "triton_dot_precision": null
+              },
+              "fingerprint": "6d443aeca8809e54",
+              "kernel_policy": {
+                "fingerprint": "c56b3866d6e6b99b",
+                "strict_errors": false
+              },
+              "effective": {
+                "execution": "eager",
+                "checkpoint": null,
+                "isolated_atoms": "model",
+                "matmul_precision": {
+                  "fp32_gemm": "ieee",
+                  "float32_matmul_precision": "highest",
+                  "cuda_matmul_allow_tf32": false,
+                  "cudnn_allow_tf32": true,
+                  "fp32_precision": null,
+                  "environment": {
+                    "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": null,
+                    "NVIDIA_TF32_OVERRIDE": null,
+                    "CUBLAS_EMULATE_SINGLE_PRECISION": null,
+                    "CUBLAS_EMULATION_STRATEGY": null
+                  }
+                },
+                "triton_dot_precision": {
+                  "requested": "auto",
+                  "row_gemm": "tf32x3",
+                  "edge_ffn": "tf32x3",
+                  "gated_tail": "tf32x3",
+                  "act_linear": "tf32x3",
+                  "wide_gemm": "tf32x3"
+                },
+                "merged_projections": {
+                  "status": "pending first evaluation",
+                  "materialized_module_count": null
+                },
+                "notes": [
+                  "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+                ],
+                "topology_reuse": {
+                  "requested": "auto",
+                  "last_call": "off",
+                  "reason": null,
+                  "fallbacks": 0,
+                  "runner": null
+                },
+                "auto_policy": "latency",
+                "memory_probes": {
+                  "cache_hits": 0,
+                  "measurements": 0,
+                  "skipped": 0,
+                  "last": "not_requested"
+                },
+                "capture_trials": {
+                  "auto_policy": "latency",
+                  "attempts": 0,
+                  "successes": 0,
+                  "failures": 0,
+                  "budget_rejections": 0,
+                  "total_seconds": 0.0,
+                  "records": []
+                }
+              }
+            }
+          },
+          "validation": {
+            "ase_calculator_calls": 0,
+            "terminal_state_collections": 1,
+            "input_unchanged": true,
+            "shared_adapter": true,
+            "terminal_getters_cached": true
+          }
+        },
+        "differences": {
+          "initial_energy_abs_eV": 3.5762786865234375e-07,
+          "final_energy_abs_eV": 1.7881393432617188e-07,
+          "max_position_component_abs_A": 3.4598409625439035e-08,
+          "max_cell_component_abs_A": 0.0,
+          "max_force_component_abs_eV_per_A": 2.2351741790771484e-07,
+          "max_stress_component_abs_eV_per_A3": null,
+          "step_count_abs": 0,
+          "convergence_matches": true
+        },
+        "passed": true,
+        "failed_fields": [],
+        "atol": 0.0001,
+        "rtol": 1e-05
+      }
+    },
+    "variable_cell": {
+      "eager": {
+        "initial_energy_eV": -15.495022773742676,
+        "final_energy_eV": -15.508677244186401,
+        "max_force_eV_per_A": 0.04113169577171816,
+        "max_filter_force_eV_per_A": 0.04105566068508055,
+        "steps": 6,
+        "converged": true,
+        "elapsed_seconds_including_capture": 0.510632049292326,
+        "volume_A3": 278.75035426441997,
+        "stats": {
+          "requested": {
+            "execution": "eager",
+            "optimization_profile": "topology",
+            "checkpoint": "off",
+            "isolated_atoms": "reference",
+            "capacity": {
+              "u_step": 512,
+              "t_step": 8192,
+              "n_dummy": 64,
+              "min_pad_u": 256,
+              "min_pad_t": 4096,
+              "warmup": 3,
+              "candidate_skin": 2.0
+            },
+            "expert_overrides": {},
+            "matmul_precision": "highest",
+            "topology_reuse": "auto",
+            "triton_dot_precision": null
+          },
+          "configuration": {
+            "execution": "eager",
+            "optimization_profile": "topology",
+            "checkpoint": "off",
+            "isolated_atoms": "reference",
+            "capacity": {
+              "u_step": 32,
+              "t_step": 8192,
+              "n_dummy": 64,
+              "min_pad_u": 32,
+              "min_pad_t": 4096,
+              "warmup": 3,
+              "candidate_skin": 2.0
+            },
+            "kernel_options": {
+              "MATRIS_GATED_LN_FUSE_MIN_ROWS": 10000,
+              "MATRIS_FUSED_GATED_LN_RESIDUAL": true,
+              "MATRIS_FUSED_SEGMENT_SOFTMAX": true,
+              "MATRIS_FUSED_INDEXED_CAT_LINEAR": true,
+              "MATRIS_FUSED_INDEXED_CAT_LINEAR_BACKEND": "decomposed_indexed_silu",
+              "MATRIS_INDEXED_CAT_LINEAR_MIN_ROWS": 20000,
+              "MATRIS_MIXED_WIDTH_CAT": true,
+              "MATRIS_GATED_LN_BIAS_FOLD": true,
+              "MATRIS_FUSED_GATED_TAIL": true,
+              "MATRIS_TRITON_ROW_GEMM": true,
+              "MATRIS_TRITON_WIDE_GEMM": true,
+              "MATRIS_TRITON_WIDE_GEMM_MIN_ROWS": 65536,
+              "MATRIS_FUSED_EDGE_FFN": true,
+              "MATRIS_FUSED_WEIGHTED_SEGMENT_EAGER": true,
+              "MATRIS_CSR_SEGMENT_SUM": true,
+              "MATRIS_FUSED_GATHER_CAT_EAGER": true,
+              "MATRIS_FUSED_DIRECTED_PAIR_AGGREGATE": true,
+              "MATRIS_FUSED_DIRECTED_PAIR_EXPAND": true,
+              "MATRIS_FUSED_SEGMENT_ATTENTION": true,
+              "MATRIS_FUSED_SEGMENT_ATTENTION_EAGER": true,
+              "MATRIS_FUSED_SEGMENT_ATTENTION_MIN_ROWS": 0,
+              "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION": true,
+              "MATRIS_FUSED_SEGMENT_ATTENTION_REUSE_CSR": true,
+              "MATRIS_FUSED_SEGMENT_ATTENTION_SORTED_TARGET_CSR": true,
+              "MATRIS_FUSED_LINE_ENVELOPE": true,
+              "MATRIS_FUSED_LINE_ENVELOPE_EAGER": true,
+              "MATRIS_FUSED_RESIDUAL_ADD": true,
+              "MATRIS_FUSED_RESIDUAL_ADD_MIN_ROWS": 0,
+              "MATRIS_MERGED_ATTENTION_PROJECTIONS": true,
+              "MATRIS_MERGED_REFINEMENT_PROJECTION": true,
+              "MATRIS_MERGED_PROJECTION_SINGLE_BWD": "auto",
+              "MATRIS_SKIP_DEAD_THREEBODY_TAIL": true,
+              "MATRIS_FUSED_THREEBODY_LINEAR": true,
+              "MATRIS_FUSED_THREEBODY_LINEAR_EAGER": true,
+              "MATRIS_FUSED_THREEBODY_LINEAR_MIN_ROWS": 60000,
+              "MATRIS_FUSED_THREEBODY_BASIS": true,
+              "MATRIS_FUSED_THREEBODY_BASIS_EAGER": true,
+              "MATRIS_FUSED_THREEBODY_BASIS_MIN_ROWS": 60000,
+              "MATRIS_UNDIRECTED_EDGE_INIT": true,
+              "MATRIS_TRITON_DOT_PRECISION": "auto",
+              "MATRIS_SAVED_TENSOR_RECOMPUTE": "auto",
+              "MATRIS_COMPILED_LOWERINGS": false,
+              "MATRIS_COMPILED_LOWERINGS_MODE": "max-autotune-no-cudagraphs",
+              "MATRIS_WIDTH_ROW_TILES": true,
+              "MATRIS_DECOMPOSED_INDEXED_SILU_BM": null,
+              "MATRIS_DECOMPOSED_INDEXED_SILU_BWD_BM": 8,
+              "MATRIS_DECOMPOSED_INDEXED_SORTED_A_PAIR_BWD": true,
+              "MATRIS_DECOMPOSED_INDEXED_GEMM_BACKEND": "torch",
+              "MATRIS_DECOMPOSED_INDEXED_DEBUG_CHECKS": false,
+              "MATRIS_GATED_LN_2D": true,
+              "MATRIS_FUSED_RESIDUAL_ADD_BM": null,
+              "MATRIS_FUSED_RESIDUAL_ADD_BD": 128,
+              "MATRIS_THREEBODY_FOURIER_BM": 128,
+              "MATRIS_LINE_ENVELOPE_BM": null,
+              "MATRIS_LINE_ENVELOPE_BD": 128,
+              "MATRIS_DIRECTED_PAIR_AGG_BM": null,
+              "MATRIS_DIRECTED_PAIR_AGG_BD": 128,
+              "MATRIS_FUSED_SEGMENT_ATTENTION_NUM_WARPS": null,
+              "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BM": 8,
+              "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BD": 128,
+              "MATRIS_WHOLE_STEP_TIER_CACHE": false,
+              "MATRIS_WHOLE_STEP_MAX_TIERS": 3,
+              "MATRIS_TIER_HYSTERESIS_WINDOW": 2000,
+              "MATRIS_TIER_HYSTERESIS_SIGMA": 3.0,
+              "MATRIS_TIER_CHECK_INTERVAL": 256,
+              "MATRIS_TIER_DOWN_COOLDOWN": 4000,
+              "MATRIS_TIER_GROWTH_HEADROOM": 0.03125,
+              "MATRIS_TIER_MIN_FREE_GIB": 6.0,
+              "MATRIS_CAPACITY_THERMAL_FACTOR": 1.0,
+              "MATRIS_LINE_GRAPH_TRITON": true,
+              "MATRIS_LINE_GRAPH_TRITON_BLOCK": 256,
+              "MATRIS_PRESORTED_BUILD": true,
+              "MATRIS_NARROW_SORT_KEYS": true,
+              "MATRIS_TOPOLOGY_VERIFY": "builder",
+              "MATRIS_TOPOLOGY_REUSE_CHECK": 0,
+              "MATRIS_M3GNET_INDEXED_AFFINE": true,
+              "MATRIS_M3GNET_INDEXED_EDGE": true,
+              "MATRIS_M3GNET_INDEXED_NODE": true
+            },
+            "report": true,
+            "matmul_precision": "highest",
+            "saved_tensor_recompute": "auto",
+            "topology_reuse": "auto",
+            "triton_dot_precision": null
+          },
+          "fingerprint": "6d443aeca8809e54",
+          "kernel_policy": {
+            "fingerprint": "c56b3866d6e6b99b",
+            "strict_errors": false
+          },
+          "effective": {
+            "execution": "eager",
+            "checkpoint": null,
+            "isolated_atoms": "model",
+            "matmul_precision": {
+              "fp32_gemm": "ieee",
+              "float32_matmul_precision": "highest",
+              "cuda_matmul_allow_tf32": false,
+              "cudnn_allow_tf32": true,
+              "fp32_precision": null,
+              "environment": {
+                "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": null,
+                "NVIDIA_TF32_OVERRIDE": null,
+                "CUBLAS_EMULATE_SINGLE_PRECISION": null,
+                "CUBLAS_EMULATION_STRATEGY": null
+              }
+            },
+            "triton_dot_precision": {
+              "requested": "auto",
+              "row_gemm": "tf32x3",
+              "edge_ffn": "tf32x3",
+              "gated_tail": "tf32x3",
+              "act_linear": "tf32x3",
+              "wide_gemm": "tf32x3"
+            },
+            "merged_projections": {
+              "status": "observed",
+              "materialized_module_count": 0
+            },
+            "notes": [
+              "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+            ],
+            "topology_reuse": {
+              "requested": "auto",
+              "last_call": "off",
+              "reason": "auto: eager execution rebuilds per call",
+              "fallbacks": 0,
+              "runner": null
+            },
+            "auto_policy": "latency",
+            "memory_probes": {
+              "cache_hits": 0,
+              "measurements": 0,
+              "skipped": 0,
+              "last": "not_requested"
+            },
+            "capture_trials": {
+              "auto_policy": "latency",
+              "attempts": 0,
+              "successes": 0,
+              "failures": 0,
+              "budget_rejections": 0,
+              "total_seconds": 0.0,
+              "records": []
+            }
+          },
+          "relaxation": {
+            "execution": "ase",
+            "reason": "execution='eager' uses the ASE optimizer"
+          }
+        },
+        "validation": {
+          "ase_calculator_calls": 7,
+          "input_unchanged": true,
+          "shared_adapter": true,
+          "terminal_getters_cached": true
+        }
+      },
+      "whole_step": {
+        "initial_energy_eV": -15.495022237300873,
+        "final_energy_eV": -15.508675694465637,
+        "max_force_eV_per_A": 0.041131517764615336,
+        "max_filter_force_eV_per_A": 0.04105548212333883,
+        "steps": 6,
+        "converged": true,
+        "elapsed_seconds_including_capture": 2.590018182992935,
+        "volume_A3": 278.75034897960353,
+        "stats": {
+          "requested": {
+            "execution": "whole_step"
+          },
+          "effective": {
+            "execution": "whole_step"
+          },
+          "relaxation": {
+            "execution": "whole_step",
+            "steps_per_launch": 5,
+            "runner": {
+              "launches": 2,
+              "candidate_refreshes": 1,
+              "fallback_windows": 0,
+              "recovery_replays": 0,
+              "unions": [
+                1
+              ],
+              "steps_per_launch": 5,
+              "recaptures": 0,
+              "u_capacity": [
+                128
+              ],
+              "max_edge_count": [
+                168
+              ],
+              "capacity_fill": [
+                0.65625
+              ],
+              "capture_seconds": [
+                [
+                  1.8529718704521656
+                ]
+              ],
+              "slot_atoms": [
+                [
+                  7
+                ]
+              ],
+              "atoms": [
+                [
+                  7
+                ]
+              ],
+              "relaxation_windows": 2,
+              "structure_writes": 0,
+              "compactions": 0,
+              "drain_failures": [],
+              "turnover_seconds": 0.0012922557070851326,
+              "finished": {
+                "converged": 1,
+                "max_steps": 0,
+                "failed": 0
+              },
+              "structures": 1
+            }
+          },
+          "calculator": {
+            "requested": {
+              "execution": "eager",
+              "optimization_profile": "topology",
+              "checkpoint": "off",
+              "isolated_atoms": "reference",
+              "capacity": {
+                "u_step": 512,
+                "t_step": 8192,
+                "n_dummy": 64,
+                "min_pad_u": 256,
+                "min_pad_t": 4096,
+                "warmup": 3,
+                "candidate_skin": 2.0
+              },
+              "expert_overrides": {},
+              "matmul_precision": "highest",
+              "topology_reuse": "auto",
+              "triton_dot_precision": null
+            },
+            "configuration": {
+              "execution": "eager",
+              "optimization_profile": "topology",
+              "checkpoint": "off",
+              "isolated_atoms": "reference",
+              "capacity": {
+                "u_step": 32,
+                "t_step": 8192,
+                "n_dummy": 64,
+                "min_pad_u": 32,
+                "min_pad_t": 4096,
+                "warmup": 3,
+                "candidate_skin": 2.0
+              },
+              "kernel_options": {
+                "MATRIS_GATED_LN_FUSE_MIN_ROWS": 10000,
+                "MATRIS_FUSED_GATED_LN_RESIDUAL": true,
+                "MATRIS_FUSED_SEGMENT_SOFTMAX": true,
+                "MATRIS_FUSED_INDEXED_CAT_LINEAR": true,
+                "MATRIS_FUSED_INDEXED_CAT_LINEAR_BACKEND": "decomposed_indexed_silu",
+                "MATRIS_INDEXED_CAT_LINEAR_MIN_ROWS": 20000,
+                "MATRIS_MIXED_WIDTH_CAT": true,
+                "MATRIS_GATED_LN_BIAS_FOLD": true,
+                "MATRIS_FUSED_GATED_TAIL": true,
+                "MATRIS_TRITON_ROW_GEMM": true,
+                "MATRIS_TRITON_WIDE_GEMM": true,
+                "MATRIS_TRITON_WIDE_GEMM_MIN_ROWS": 65536,
+                "MATRIS_FUSED_EDGE_FFN": true,
+                "MATRIS_FUSED_WEIGHTED_SEGMENT_EAGER": true,
+                "MATRIS_CSR_SEGMENT_SUM": true,
+                "MATRIS_FUSED_GATHER_CAT_EAGER": true,
+                "MATRIS_FUSED_DIRECTED_PAIR_AGGREGATE": true,
+                "MATRIS_FUSED_DIRECTED_PAIR_EXPAND": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_EAGER": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_MIN_ROWS": 0,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_REUSE_CSR": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_SORTED_TARGET_CSR": true,
+                "MATRIS_FUSED_LINE_ENVELOPE": true,
+                "MATRIS_FUSED_LINE_ENVELOPE_EAGER": true,
+                "MATRIS_FUSED_RESIDUAL_ADD": true,
+                "MATRIS_FUSED_RESIDUAL_ADD_MIN_ROWS": 0,
+                "MATRIS_MERGED_ATTENTION_PROJECTIONS": true,
+                "MATRIS_MERGED_REFINEMENT_PROJECTION": true,
+                "MATRIS_MERGED_PROJECTION_SINGLE_BWD": "auto",
+                "MATRIS_SKIP_DEAD_THREEBODY_TAIL": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR_EAGER": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR_MIN_ROWS": 60000,
+                "MATRIS_FUSED_THREEBODY_BASIS": true,
+                "MATRIS_FUSED_THREEBODY_BASIS_EAGER": true,
+                "MATRIS_FUSED_THREEBODY_BASIS_MIN_ROWS": 60000,
+                "MATRIS_UNDIRECTED_EDGE_INIT": true,
+                "MATRIS_TRITON_DOT_PRECISION": "auto",
+                "MATRIS_SAVED_TENSOR_RECOMPUTE": "auto",
+                "MATRIS_COMPILED_LOWERINGS": false,
+                "MATRIS_COMPILED_LOWERINGS_MODE": "max-autotune-no-cudagraphs",
+                "MATRIS_WIDTH_ROW_TILES": true,
+                "MATRIS_DECOMPOSED_INDEXED_SILU_BM": null,
+                "MATRIS_DECOMPOSED_INDEXED_SILU_BWD_BM": 8,
+                "MATRIS_DECOMPOSED_INDEXED_SORTED_A_PAIR_BWD": true,
+                "MATRIS_DECOMPOSED_INDEXED_GEMM_BACKEND": "torch",
+                "MATRIS_DECOMPOSED_INDEXED_DEBUG_CHECKS": false,
+                "MATRIS_GATED_LN_2D": true,
+                "MATRIS_FUSED_RESIDUAL_ADD_BM": null,
+                "MATRIS_FUSED_RESIDUAL_ADD_BD": 128,
+                "MATRIS_THREEBODY_FOURIER_BM": 128,
+                "MATRIS_LINE_ENVELOPE_BM": null,
+                "MATRIS_LINE_ENVELOPE_BD": 128,
+                "MATRIS_DIRECTED_PAIR_AGG_BM": null,
+                "MATRIS_DIRECTED_PAIR_AGG_BD": 128,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_NUM_WARPS": null,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BM": 8,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BD": 128,
+                "MATRIS_WHOLE_STEP_TIER_CACHE": false,
+                "MATRIS_WHOLE_STEP_MAX_TIERS": 3,
+                "MATRIS_TIER_HYSTERESIS_WINDOW": 2000,
+                "MATRIS_TIER_HYSTERESIS_SIGMA": 3.0,
+                "MATRIS_TIER_CHECK_INTERVAL": 256,
+                "MATRIS_TIER_DOWN_COOLDOWN": 4000,
+                "MATRIS_TIER_GROWTH_HEADROOM": 0.03125,
+                "MATRIS_TIER_MIN_FREE_GIB": 6.0,
+                "MATRIS_CAPACITY_THERMAL_FACTOR": 1.0,
+                "MATRIS_LINE_GRAPH_TRITON": true,
+                "MATRIS_LINE_GRAPH_TRITON_BLOCK": 256,
+                "MATRIS_PRESORTED_BUILD": true,
+                "MATRIS_NARROW_SORT_KEYS": true,
+                "MATRIS_TOPOLOGY_VERIFY": "builder",
+                "MATRIS_TOPOLOGY_REUSE_CHECK": 0,
+                "MATRIS_M3GNET_INDEXED_AFFINE": true,
+                "MATRIS_M3GNET_INDEXED_EDGE": true,
+                "MATRIS_M3GNET_INDEXED_NODE": true
+              },
+              "report": true,
+              "matmul_precision": "highest",
+              "saved_tensor_recompute": "auto",
+              "topology_reuse": "auto",
+              "triton_dot_precision": null
+            },
+            "fingerprint": "6d443aeca8809e54",
+            "kernel_policy": {
+              "fingerprint": "c56b3866d6e6b99b",
+              "strict_errors": false
+            },
+            "effective": {
+              "execution": "eager",
+              "checkpoint": null,
+              "isolated_atoms": "model",
+              "matmul_precision": {
+                "fp32_gemm": "ieee",
+                "float32_matmul_precision": "highest",
+                "cuda_matmul_allow_tf32": false,
+                "cudnn_allow_tf32": true,
+                "fp32_precision": null,
+                "environment": {
+                  "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": null,
+                  "NVIDIA_TF32_OVERRIDE": null,
+                  "CUBLAS_EMULATE_SINGLE_PRECISION": null,
+                  "CUBLAS_EMULATION_STRATEGY": null
+                }
+              },
+              "triton_dot_precision": {
+                "requested": "auto",
+                "row_gemm": "tf32x3",
+                "edge_ffn": "tf32x3",
+                "gated_tail": "tf32x3",
+                "act_linear": "tf32x3",
+                "wide_gemm": "tf32x3"
+              },
+              "merged_projections": {
+                "status": "pending first evaluation",
+                "materialized_module_count": null
+              },
+              "notes": [
+                "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+              ],
+              "topology_reuse": {
+                "requested": "auto",
+                "last_call": "off",
+                "reason": null,
+                "fallbacks": 0,
+                "runner": null
+              },
+              "auto_policy": "latency",
+              "memory_probes": {
+                "cache_hits": 0,
+                "measurements": 0,
+                "skipped": 0,
+                "last": "not_requested"
+              },
+              "capture_trials": {
+                "auto_policy": "latency",
+                "attempts": 0,
+                "successes": 0,
+                "failures": 0,
+                "budget_rejections": 0,
+                "total_seconds": 0.0,
+                "records": []
+              }
+            }
+          }
+        },
+        "validation": {
+          "ase_calculator_calls": 0,
+          "terminal_state_collections": 1,
+          "input_unchanged": true,
+          "shared_adapter": true,
+          "terminal_getters_cached": true
+        }
+      },
+      "differences": {
+        "initial_energy_abs_eV": 5.364418029785156e-07,
+        "final_energy_abs_eV": 1.5497207641601562e-06,
+        "max_position_component_abs_A": 9.387876075342561e-08,
+        "max_cell_component_abs_A": 5.931061419772732e-08,
+        "max_force_component_abs_eV_per_A": 1.0617077350616455e-06,
+        "max_stress_component_abs_eV_per_A3": 1.9121216610074043e-08,
+        "step_count_abs": 0,
+        "convergence_matches": true
+      },
+      "strict_short_run": {
+        "max_steps": 5,
+        "fmax_eV_per_A": 1e-10,
+        "eager": {
+          "initial_energy_eV": -15.495022594928741,
+          "final_energy_eV": -15.50711965560913,
+          "max_force_eV_per_A": 0.0689110469682103,
+          "max_filter_force_eV_per_A": 0.06880176389960621,
+          "steps": 5,
+          "converged": false,
+          "elapsed_seconds_including_capture": 0.4349689520895481,
+          "volume_A3": 279.0858385027756,
+          "stats": {
+            "requested": {
+              "execution": "eager",
+              "optimization_profile": "topology",
+              "checkpoint": "off",
+              "isolated_atoms": "reference",
+              "capacity": {
+                "u_step": 512,
+                "t_step": 8192,
+                "n_dummy": 64,
+                "min_pad_u": 256,
+                "min_pad_t": 4096,
+                "warmup": 3,
+                "candidate_skin": 2.0
+              },
+              "expert_overrides": {},
+              "matmul_precision": "highest",
+              "topology_reuse": "auto",
+              "triton_dot_precision": null
+            },
+            "configuration": {
+              "execution": "eager",
+              "optimization_profile": "topology",
+              "checkpoint": "off",
+              "isolated_atoms": "reference",
+              "capacity": {
+                "u_step": 32,
+                "t_step": 8192,
+                "n_dummy": 64,
+                "min_pad_u": 32,
+                "min_pad_t": 4096,
+                "warmup": 3,
+                "candidate_skin": 2.0
+              },
+              "kernel_options": {
+                "MATRIS_GATED_LN_FUSE_MIN_ROWS": 10000,
+                "MATRIS_FUSED_GATED_LN_RESIDUAL": true,
+                "MATRIS_FUSED_SEGMENT_SOFTMAX": true,
+                "MATRIS_FUSED_INDEXED_CAT_LINEAR": true,
+                "MATRIS_FUSED_INDEXED_CAT_LINEAR_BACKEND": "decomposed_indexed_silu",
+                "MATRIS_INDEXED_CAT_LINEAR_MIN_ROWS": 20000,
+                "MATRIS_MIXED_WIDTH_CAT": true,
+                "MATRIS_GATED_LN_BIAS_FOLD": true,
+                "MATRIS_FUSED_GATED_TAIL": true,
+                "MATRIS_TRITON_ROW_GEMM": true,
+                "MATRIS_TRITON_WIDE_GEMM": true,
+                "MATRIS_TRITON_WIDE_GEMM_MIN_ROWS": 65536,
+                "MATRIS_FUSED_EDGE_FFN": true,
+                "MATRIS_FUSED_WEIGHTED_SEGMENT_EAGER": true,
+                "MATRIS_CSR_SEGMENT_SUM": true,
+                "MATRIS_FUSED_GATHER_CAT_EAGER": true,
+                "MATRIS_FUSED_DIRECTED_PAIR_AGGREGATE": true,
+                "MATRIS_FUSED_DIRECTED_PAIR_EXPAND": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_EAGER": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_MIN_ROWS": 0,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_REUSE_CSR": true,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_SORTED_TARGET_CSR": true,
+                "MATRIS_FUSED_LINE_ENVELOPE": true,
+                "MATRIS_FUSED_LINE_ENVELOPE_EAGER": true,
+                "MATRIS_FUSED_RESIDUAL_ADD": true,
+                "MATRIS_FUSED_RESIDUAL_ADD_MIN_ROWS": 0,
+                "MATRIS_MERGED_ATTENTION_PROJECTIONS": true,
+                "MATRIS_MERGED_REFINEMENT_PROJECTION": true,
+                "MATRIS_MERGED_PROJECTION_SINGLE_BWD": "auto",
+                "MATRIS_SKIP_DEAD_THREEBODY_TAIL": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR_EAGER": true,
+                "MATRIS_FUSED_THREEBODY_LINEAR_MIN_ROWS": 60000,
+                "MATRIS_FUSED_THREEBODY_BASIS": true,
+                "MATRIS_FUSED_THREEBODY_BASIS_EAGER": true,
+                "MATRIS_FUSED_THREEBODY_BASIS_MIN_ROWS": 60000,
+                "MATRIS_UNDIRECTED_EDGE_INIT": true,
+                "MATRIS_TRITON_DOT_PRECISION": "auto",
+                "MATRIS_SAVED_TENSOR_RECOMPUTE": "auto",
+                "MATRIS_COMPILED_LOWERINGS": false,
+                "MATRIS_COMPILED_LOWERINGS_MODE": "max-autotune-no-cudagraphs",
+                "MATRIS_WIDTH_ROW_TILES": true,
+                "MATRIS_DECOMPOSED_INDEXED_SILU_BM": null,
+                "MATRIS_DECOMPOSED_INDEXED_SILU_BWD_BM": 8,
+                "MATRIS_DECOMPOSED_INDEXED_SORTED_A_PAIR_BWD": true,
+                "MATRIS_DECOMPOSED_INDEXED_GEMM_BACKEND": "torch",
+                "MATRIS_DECOMPOSED_INDEXED_DEBUG_CHECKS": false,
+                "MATRIS_GATED_LN_2D": true,
+                "MATRIS_FUSED_RESIDUAL_ADD_BM": null,
+                "MATRIS_FUSED_RESIDUAL_ADD_BD": 128,
+                "MATRIS_THREEBODY_FOURIER_BM": 128,
+                "MATRIS_LINE_ENVELOPE_BM": null,
+                "MATRIS_LINE_ENVELOPE_BD": 128,
+                "MATRIS_DIRECTED_PAIR_AGG_BM": null,
+                "MATRIS_DIRECTED_PAIR_AGG_BD": 128,
+                "MATRIS_FUSED_SEGMENT_ATTENTION_NUM_WARPS": null,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BM": 8,
+                "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BD": 128,
+                "MATRIS_WHOLE_STEP_TIER_CACHE": false,
+                "MATRIS_WHOLE_STEP_MAX_TIERS": 3,
+                "MATRIS_TIER_HYSTERESIS_WINDOW": 2000,
+                "MATRIS_TIER_HYSTERESIS_SIGMA": 3.0,
+                "MATRIS_TIER_CHECK_INTERVAL": 256,
+                "MATRIS_TIER_DOWN_COOLDOWN": 4000,
+                "MATRIS_TIER_GROWTH_HEADROOM": 0.03125,
+                "MATRIS_TIER_MIN_FREE_GIB": 6.0,
+                "MATRIS_CAPACITY_THERMAL_FACTOR": 1.0,
+                "MATRIS_LINE_GRAPH_TRITON": true,
+                "MATRIS_LINE_GRAPH_TRITON_BLOCK": 256,
+                "MATRIS_PRESORTED_BUILD": true,
+                "MATRIS_NARROW_SORT_KEYS": true,
+                "MATRIS_TOPOLOGY_VERIFY": "builder",
+                "MATRIS_TOPOLOGY_REUSE_CHECK": 0,
+                "MATRIS_M3GNET_INDEXED_AFFINE": true,
+                "MATRIS_M3GNET_INDEXED_EDGE": true,
+                "MATRIS_M3GNET_INDEXED_NODE": true
+              },
+              "report": true,
+              "matmul_precision": "highest",
+              "saved_tensor_recompute": "auto",
+              "topology_reuse": "auto",
+              "triton_dot_precision": null
+            },
+            "fingerprint": "6d443aeca8809e54",
+            "kernel_policy": {
+              "fingerprint": "c56b3866d6e6b99b",
+              "strict_errors": false
+            },
+            "effective": {
+              "execution": "eager",
+              "checkpoint": null,
+              "isolated_atoms": "model",
+              "matmul_precision": {
+                "fp32_gemm": "ieee",
+                "float32_matmul_precision": "highest",
+                "cuda_matmul_allow_tf32": false,
+                "cudnn_allow_tf32": true,
+                "fp32_precision": null,
+                "environment": {
+                  "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": null,
+                  "NVIDIA_TF32_OVERRIDE": null,
+                  "CUBLAS_EMULATE_SINGLE_PRECISION": null,
+                  "CUBLAS_EMULATION_STRATEGY": null
+                }
+              },
+              "triton_dot_precision": {
+                "requested": "auto",
+                "row_gemm": "tf32x3",
+                "edge_ffn": "tf32x3",
+                "gated_tail": "tf32x3",
+                "act_linear": "tf32x3",
+                "wide_gemm": "tf32x3"
+              },
+              "merged_projections": {
+                "status": "observed",
+                "materialized_module_count": 0
+              },
+              "notes": [
+                "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+              ],
+              "topology_reuse": {
+                "requested": "auto",
+                "last_call": "off",
+                "reason": "auto: eager execution rebuilds per call",
+                "fallbacks": 0,
+                "runner": null
+              },
+              "auto_policy": "latency",
+              "memory_probes": {
+                "cache_hits": 0,
+                "measurements": 0,
+                "skipped": 0,
+                "last": "not_requested"
+              },
+              "capture_trials": {
+                "auto_policy": "latency",
+                "attempts": 0,
+                "successes": 0,
+                "failures": 0,
+                "budget_rejections": 0,
+                "total_seconds": 0.0,
+                "records": []
+              }
+            },
+            "relaxation": {
+              "execution": "ase",
+              "reason": "execution='eager' uses the ASE optimizer"
+            }
+          },
+          "validation": {
+            "ase_calculator_calls": 6,
+            "input_unchanged": true,
+            "shared_adapter": true,
+            "terminal_getters_cached": true
+          }
+        },
+        "whole_step": {
+          "initial_energy_eV": -15.495022714138031,
+          "final_energy_eV": -15.50711965560913,
+          "max_force_eV_per_A": 0.0689113118163269,
+          "max_filter_force_eV_per_A": 0.06880202805105314,
+          "steps": 5,
+          "converged": false,
+          "elapsed_seconds_including_capture": 2.5376611165702343,
+          "volume_A3": 279.0858363021049,
+          "stats": {
+            "requested": {
+              "execution": "whole_step"
+            },
+            "effective": {
+              "execution": "whole_step"
+            },
+            "relaxation": {
+              "execution": "whole_step",
+              "steps_per_launch": 5,
+              "runner": {
+                "launches": 2,
+                "candidate_refreshes": 1,
+                "fallback_windows": 0,
+                "recovery_replays": 0,
+                "unions": [
+                  1
+                ],
+                "steps_per_launch": 5,
+                "recaptures": 0,
+                "u_capacity": [
+                  128
+                ],
+                "max_edge_count": [
+                  168
+                ],
+                "capacity_fill": [
+                  0.65625
+                ],
+                "capture_seconds": [
+                  [
+                    1.826810197904706
+                  ]
+                ],
+                "slot_atoms": [
+                  [
+                    7
+                  ]
+                ],
+                "atoms": [
+                  [
+                    7
+                  ]
+                ],
+                "relaxation_windows": 2,
+                "structure_writes": 0,
+                "compactions": 0,
+                "drain_failures": [],
+                "turnover_seconds": 0.0010805604979395866,
+                "finished": {
+                  "converged": 0,
+                  "max_steps": 1,
+                  "failed": 0
+                },
+                "structures": 1
+              }
+            },
+            "calculator": {
+              "requested": {
+                "execution": "eager",
+                "optimization_profile": "topology",
+                "checkpoint": "off",
+                "isolated_atoms": "reference",
+                "capacity": {
+                  "u_step": 512,
+                  "t_step": 8192,
+                  "n_dummy": 64,
+                  "min_pad_u": 256,
+                  "min_pad_t": 4096,
+                  "warmup": 3,
+                  "candidate_skin": 2.0
+                },
+                "expert_overrides": {},
+                "matmul_precision": "highest",
+                "topology_reuse": "auto",
+                "triton_dot_precision": null
+              },
+              "configuration": {
+                "execution": "eager",
+                "optimization_profile": "topology",
+                "checkpoint": "off",
+                "isolated_atoms": "reference",
+                "capacity": {
+                  "u_step": 32,
+                  "t_step": 8192,
+                  "n_dummy": 64,
+                  "min_pad_u": 32,
+                  "min_pad_t": 4096,
+                  "warmup": 3,
+                  "candidate_skin": 2.0
+                },
+                "kernel_options": {
+                  "MATRIS_GATED_LN_FUSE_MIN_ROWS": 10000,
+                  "MATRIS_FUSED_GATED_LN_RESIDUAL": true,
+                  "MATRIS_FUSED_SEGMENT_SOFTMAX": true,
+                  "MATRIS_FUSED_INDEXED_CAT_LINEAR": true,
+                  "MATRIS_FUSED_INDEXED_CAT_LINEAR_BACKEND": "decomposed_indexed_silu",
+                  "MATRIS_INDEXED_CAT_LINEAR_MIN_ROWS": 20000,
+                  "MATRIS_MIXED_WIDTH_CAT": true,
+                  "MATRIS_GATED_LN_BIAS_FOLD": true,
+                  "MATRIS_FUSED_GATED_TAIL": true,
+                  "MATRIS_TRITON_ROW_GEMM": true,
+                  "MATRIS_TRITON_WIDE_GEMM": true,
+                  "MATRIS_TRITON_WIDE_GEMM_MIN_ROWS": 65536,
+                  "MATRIS_FUSED_EDGE_FFN": true,
+                  "MATRIS_FUSED_WEIGHTED_SEGMENT_EAGER": true,
+                  "MATRIS_CSR_SEGMENT_SUM": true,
+                  "MATRIS_FUSED_GATHER_CAT_EAGER": true,
+                  "MATRIS_FUSED_DIRECTED_PAIR_AGGREGATE": true,
+                  "MATRIS_FUSED_DIRECTED_PAIR_EXPAND": true,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION": true,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION_EAGER": true,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION_MIN_ROWS": 0,
+                  "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION": true,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION_REUSE_CSR": true,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION_SORTED_TARGET_CSR": true,
+                  "MATRIS_FUSED_LINE_ENVELOPE": true,
+                  "MATRIS_FUSED_LINE_ENVELOPE_EAGER": true,
+                  "MATRIS_FUSED_RESIDUAL_ADD": true,
+                  "MATRIS_FUSED_RESIDUAL_ADD_MIN_ROWS": 0,
+                  "MATRIS_MERGED_ATTENTION_PROJECTIONS": true,
+                  "MATRIS_MERGED_REFINEMENT_PROJECTION": true,
+                  "MATRIS_MERGED_PROJECTION_SINGLE_BWD": "auto",
+                  "MATRIS_SKIP_DEAD_THREEBODY_TAIL": true,
+                  "MATRIS_FUSED_THREEBODY_LINEAR": true,
+                  "MATRIS_FUSED_THREEBODY_LINEAR_EAGER": true,
+                  "MATRIS_FUSED_THREEBODY_LINEAR_MIN_ROWS": 60000,
+                  "MATRIS_FUSED_THREEBODY_BASIS": true,
+                  "MATRIS_FUSED_THREEBODY_BASIS_EAGER": true,
+                  "MATRIS_FUSED_THREEBODY_BASIS_MIN_ROWS": 60000,
+                  "MATRIS_UNDIRECTED_EDGE_INIT": true,
+                  "MATRIS_TRITON_DOT_PRECISION": "auto",
+                  "MATRIS_SAVED_TENSOR_RECOMPUTE": "auto",
+                  "MATRIS_COMPILED_LOWERINGS": false,
+                  "MATRIS_COMPILED_LOWERINGS_MODE": "max-autotune-no-cudagraphs",
+                  "MATRIS_WIDTH_ROW_TILES": true,
+                  "MATRIS_DECOMPOSED_INDEXED_SILU_BM": null,
+                  "MATRIS_DECOMPOSED_INDEXED_SILU_BWD_BM": 8,
+                  "MATRIS_DECOMPOSED_INDEXED_SORTED_A_PAIR_BWD": true,
+                  "MATRIS_DECOMPOSED_INDEXED_GEMM_BACKEND": "torch",
+                  "MATRIS_DECOMPOSED_INDEXED_DEBUG_CHECKS": false,
+                  "MATRIS_GATED_LN_2D": true,
+                  "MATRIS_FUSED_RESIDUAL_ADD_BM": null,
+                  "MATRIS_FUSED_RESIDUAL_ADD_BD": 128,
+                  "MATRIS_THREEBODY_FOURIER_BM": 128,
+                  "MATRIS_LINE_ENVELOPE_BM": null,
+                  "MATRIS_LINE_ENVELOPE_BD": 128,
+                  "MATRIS_DIRECTED_PAIR_AGG_BM": null,
+                  "MATRIS_DIRECTED_PAIR_AGG_BD": 128,
+                  "MATRIS_FUSED_SEGMENT_ATTENTION_NUM_WARPS": null,
+                  "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BM": 8,
+                  "MATRIS_FUSED_PAIRED_SEGMENT_ATTENTION_BWD_BD": 128,
+                  "MATRIS_WHOLE_STEP_TIER_CACHE": false,
+                  "MATRIS_WHOLE_STEP_MAX_TIERS": 3,
+                  "MATRIS_TIER_HYSTERESIS_WINDOW": 2000,
+                  "MATRIS_TIER_HYSTERESIS_SIGMA": 3.0,
+                  "MATRIS_TIER_CHECK_INTERVAL": 256,
+                  "MATRIS_TIER_DOWN_COOLDOWN": 4000,
+                  "MATRIS_TIER_GROWTH_HEADROOM": 0.03125,
+                  "MATRIS_TIER_MIN_FREE_GIB": 6.0,
+                  "MATRIS_CAPACITY_THERMAL_FACTOR": 1.0,
+                  "MATRIS_LINE_GRAPH_TRITON": true,
+                  "MATRIS_LINE_GRAPH_TRITON_BLOCK": 256,
+                  "MATRIS_PRESORTED_BUILD": true,
+                  "MATRIS_NARROW_SORT_KEYS": true,
+                  "MATRIS_TOPOLOGY_VERIFY": "builder",
+                  "MATRIS_TOPOLOGY_REUSE_CHECK": 0,
+                  "MATRIS_M3GNET_INDEXED_AFFINE": true,
+                  "MATRIS_M3GNET_INDEXED_EDGE": true,
+                  "MATRIS_M3GNET_INDEXED_NODE": true
+                },
+                "report": true,
+                "matmul_precision": "highest",
+                "saved_tensor_recompute": "auto",
+                "topology_reuse": "auto",
+                "triton_dot_precision": null
+              },
+              "fingerprint": "6d443aeca8809e54",
+              "kernel_policy": {
+                "fingerprint": "c56b3866d6e6b99b",
+                "strict_errors": false
+              },
+              "effective": {
+                "execution": "eager",
+                "checkpoint": null,
+                "isolated_atoms": "model",
+                "matmul_precision": {
+                  "fp32_gemm": "ieee",
+                  "float32_matmul_precision": "highest",
+                  "cuda_matmul_allow_tf32": false,
+                  "cudnn_allow_tf32": true,
+                  "fp32_precision": null,
+                  "environment": {
+                    "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": null,
+                    "NVIDIA_TF32_OVERRIDE": null,
+                    "CUBLAS_EMULATE_SINGLE_PRECISION": null,
+                    "CUBLAS_EMULATION_STRATEGY": null
+                  }
+                },
+                "triton_dot_precision": {
+                  "requested": "auto",
+                  "row_gemm": "tf32x3",
+                  "edge_ffn": "tf32x3",
+                  "gated_tail": "tf32x3",
+                  "act_linear": "tf32x3",
+                  "wide_gemm": "tf32x3"
+                },
+                "merged_projections": {
+                  "status": "pending first evaluation",
+                  "materialized_module_count": null
+                },
+                "notes": [
+                  "Merged projection caches indicate materialization, not per-call use; CUDA device, frozen weights, dtype, feature widths, and row thresholds still gate kernel selection."
+                ],
+                "topology_reuse": {
+                  "requested": "auto",
+                  "last_call": "off",
+                  "reason": null,
+                  "fallbacks": 0,
+                  "runner": null
+                },
+                "auto_policy": "latency",
+                "memory_probes": {
+                  "cache_hits": 0,
+                  "measurements": 0,
+                  "skipped": 0,
+                  "last": "not_requested"
+                },
+                "capture_trials": {
+                  "auto_policy": "latency",
+                  "attempts": 0,
+                  "successes": 0,
+                  "failures": 0,
+                  "budget_rejections": 0,
+                  "total_seconds": 0.0,
+                  "records": []
+                }
+              }
+            }
+          },
+          "validation": {
+            "ase_calculator_calls": 0,
+            "terminal_state_collections": 1,
+            "input_unchanged": true,
+            "shared_adapter": true,
+            "terminal_getters_cached": true
+          }
+        },
+        "differences": {
+          "initial_energy_abs_eV": 1.1920928955078125e-07,
+          "final_energy_abs_eV": 0.0,
+          "max_position_component_abs_A": 8.304924980954379e-08,
+          "max_cell_component_abs_A": 2.5548534843267134e-08,
+          "max_force_component_abs_eV_per_A": 1.2405216693878174e-06,
+          "max_stress_component_abs_eV_per_A3": 1.2514647096395493e-08,
+          "step_count_abs": 0,
+          "convergence_matches": true
+        },
+        "passed": true,
+        "failed_fields": [],
+        "atol": 0.0001,
+        "rtol": 1e-05
+      }
+    }
+  },
+  "model_dtype": "torch.float32",
+  "all_converged": true,
+  "validation_passed": true
+}

@@ -1,0 +1,35 @@
+{
+  "record_kind": "Observed results transcribed from tool output; not original raw stdout logs",
+  "cwd": "/share/home/husiyu/software/MD_framework/FastMD",
+  "baseline_commit": "4961fc018b37e58dc2edc4982614d92f555ab626",
+  "raw_log_paths": [],
+  "historical_model_tests": [
+    {
+      "command": "PYTHONPATH=. OMP_NUM_THREADS=2 MPLCONFIGDIR=/tmp/fastmd-relax-models-mpl ../records2610/environments/chgnet/bin/python -m unittest tests.test_relax_model_systems tests.test_isolated_atom_handling tests.adapters.test_chgnet_empty_angles.EmptyAngleTest.test_all_checkpoints_with_and_without_angles",
+      "observed_result": "Ran 14 tests in 5.268s; OK",
+      "tool_session_id": 30278,
+      "note": "At execution, test_relax_model_systems contained four tests; its CHGNetSystemShiftTest was added afterward and tested separately below. With the final file this command runs 15 tests."
+    },
+    {
+      "command": "PYTHONPATH=. OMP_NUM_THREADS=2 MPLCONFIGDIR=/tmp/fastmd-relax-models-mpl XDG_CACHE_HOME=/tmp/fastmd-relax-models-cache ../records2610/environments/chgnet/bin/python -m unittest tests.test_relax_model_systems.CHGNetSystemShiftTest",
+      "observed_result": "Ran 1 test in 1.728s; OK",
+      "tool_session_id": 1451
+    },
+    {
+      "command": "PYTHONPATH=. OMP_NUM_THREADS=2 MPLCONFIGDIR=/tmp/fastmd-relax-models-mpl ../records2610/environments/orb/bin/python -m unittest tests.adapters.test_orb_steady.ORBSteadyTests.test_adapter_api_default_fingerprint_forwarding_and_close tests.adapters.test_orb_steady.ORBSteadyTests.test_adapter_api_invalid_options_and_second_stage_failure_are_atomic tests.adapters.test_orb_steady.ORBSteadyTests.test_adapter_api_refuses_direct_and_prepare_then_allows_valid_retry",
+      "observed_result": "Ran 3 tests in 11.900s; OK",
+      "tool_session_id": 40281
+    }
+  ],
+  "matris_bitwise": {
+    "observed_tensor_comparisons": 26,
+    "observed_result": "All tensors bitwise equal (torch.equal)",
+    "cases": ["single", "list_batch", "padded_list_batch"],
+    "intensive_modes": [true, false],
+    "fields": ["e", "f", "s"],
+    "tool_session_ids": [16145, 43726],
+    "reproduction_script": "/tmp/fastmd-matris-head-bitwise.py",
+    "command": "PYTHONPATH=. OMP_NUM_THREADS=2 ../records2610/environments/chgnet/bin/python /tmp/fastmd-matris-head-bitwise.py",
+    "note": "Script assembled from the two successful commands; not rerun after assembly. Uses the same model weights for old/new forward, substitutes baseline process_graphs and _graph_sum, and compares returned energy, each force tensor and each stress tensor."
+  }
+}
