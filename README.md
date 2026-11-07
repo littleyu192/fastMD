@@ -341,6 +341,7 @@ The GPU path uses FIRE and whole-step CUDA Graphs. It requires CUDA, full period
 boundary conditions, unconstrained atoms, no activation checkpointing, and the
 default `FrechetCellFilter` for variable cells. Model support includes MatRIS,
 MACE's `ScaleShiftMACE`, SevenNet, ORB v3, and CHGNet, subject to adapter checks.
+MatRIS variable-cell relaxation requires a conservative model.
 Trajectory records must fit the GPU memory budget; unsupported workloads use ASE
 under `engine="auto"`.
 
@@ -369,6 +370,16 @@ Use `cell_filter=None` for fixed cells. The `topology` profile in this example
 requires the [cuEquivariance environment](#installation). Batched execution retains
 its model capability checks.
 
+For ORB multi-system relaxation, set `InferenceConfig(matmul_precision="highest")`
+for IEEE FP32 and keep `self_check=True`. Explicit `matmul_precision="high"`
+enables TF32; its rounding can depend on batch shape and fail the check against
+single-system results. Match precision settings when comparing with an official
+ORB baseline, whose `float32-high` default differs from IEEE FP32.
+
+Near MatRIS's hard triplet cutoff, small geometry differences can change neighbor
+membership and the relaxation trajectory. Check convergence when comparing
+relaxed structures across execution paths.
+
 </details>
 
 <details>
@@ -393,7 +404,7 @@ fastmd/
   graph/             Neighbor lists, atom/line graphs, fixed-capacity layouts, and topology
   ops/               Shared PyTorch, Triton, and CUDA operators
   integrations/      Experimental M3GNet topology integration
-  adapters/          Compatibility forwarding for legacy adapter imports
+  adapters/          Shared adapter helpers and compatibility imports
   applications/      Compatibility forwarding for legacy application imports
   config.py          Configuration compatibility entry point
   precision.py       Precision configuration and records
