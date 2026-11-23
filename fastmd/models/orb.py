@@ -9,9 +9,12 @@ readout's energy lines and the multi-GPU layer loop) carry their provenance
 and license. What the adapter declares and does:
 
 * **Topology**: directed edges within ORB's 6 Å radius, five message-passing
-  layers, no triplets (the builders run edges only). ORB keeps at most 120
-  neighbours per atom (``max_neighbors``); the engine builds the full radius
-  graph and flags on the device a build in which an atom has more.
+  layers, no triplets (the builders run edges only). ORB keeps the nearest
+  ``max_neighbors`` (120) neighbours of each centre, as upstream's graph does:
+  the engine builds the full radius graph (and flags on the device a build in
+  which an atom has more), and each call keeps the nearest ``max_neighbors``
+  edges of every centre on the device (``nearest_k_mask``; exact distance ties
+  broken by the edge, not its row); the others become far self-loops.
 * **Padding**: far self-loops. ORB gates every message by an envelope times
   ``r < 6`` and masks its ZBL pair repulsion by the covalent radii, so a loop
   at least twice the cutoff long adds exactly nothing; its length is never 0
@@ -409,8 +412,12 @@ class ORBAdapter:
         """Whether the backbone runs under torch.compile (capture-safe once warmed up: the contract)."""
         return self.kernel == "inductor"
 
+    # The calls keep the nearest max_neighbors edges of each centre themselves (_atom_graphs).
+    selects_nearest_neighbors = True
+
     def topology_spec(self) -> TopologySpec:
-        """Directed edges within ORB's radius, five layers, no triplets, at most 120 neighbours."""
+        """Directed edges within ORB's radius, five layers, no triplets, at most 120 neighbours (the calls keep
+        the nearest of the radius graph's edges)."""
         parameter = next(self.module.parameters())
         return TopologySpec(
             cutoff=self._cutoff,
@@ -484,8 +491,8 @@ class ORBAdapter:
 
     def _atom_graphs(self, inputs: ORBInput, positions: Tensor, cell: Tensor, edge_shifts: Tensor | None = None):
         """ORB's ``AtomGraphs`` of the engine's edges at ``positions`` and ``cell`` (or the per-edge shifts
-        ``edge_shifts``): the graph of every call (one GPU, one ORB graph per system of a batch of several, and a
-        rank's rows at P>1)."""
+        ``edge_shifts``): the graph of every call (one ORB graph per system of a batch of several). Each centre
+        keeps its nearest ``max_neighbors`` edges within the cutoff; the others become far self-loops."""
         from orb_models.forcefield.base import AtomGraphs
 
         batch = inputs.batch
@@ -519,6 +526,24 @@ class ORBAdapter:
         # ORB's own order of operations (x[receiver] - x[sender] + shift), not the engine's: the two round
         # differently on edges that cross the cell
         vectors = positions.index_select(0, receivers) - positions.index_select(0, senders) + shifts
+        # Upstream's kNN graph (orb-models 0.5.4 featurization_utilities.compute_supercell_neighbors: the nearest
+        # max_num_neighbors within the radius per centre) of the engine's radius graph, on the device with fixed
+        # shapes. A rejected row (and a padded one) becomes a far self-loop: no message, no ZBL term and no
+        # derivative, as an edge upstream's graph does not have. Distance ties at the cap (perfect crystals) are
+        # broken by the edge (neighbour, then image), not by row, so every builder's edge order keeps the same edges
+        # (upstream's own choice among tied neighbours is arbitrary).
+        from fastmd.models.orb_graph import nearest_k_mask
+
+        rows = torch.arange(senders.shape[0], device=senders.device)
+        keep = nearest_k_mask(senders, vectors, rows, positions.shape[0], self._max_neighbors, self._cutoff,
+                              receivers, image)
+        if batch.n_edges is not None:
+            keep = keep & (rows < batch.n_edges)
+        far = torch.zeros_like(vectors[:1])
+        far[:, 0] = 2 * self._cutoff
+        vectors = torch.where(keep[:, None], vectors, far)
+        receivers = torch.where(keep, receivers, senders)
+        image = torch.where(keep[:, None], image, 0.0)
         return AtomGraphs(
             senders=senders, receivers=receivers, n_node=n_node, n_edge=n_edge,
             node_features={"positions": positions, "atomic_numbers": numbers,

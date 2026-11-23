@@ -26,7 +26,7 @@ _PINS = {
     "ORBAdapter.prepare": "c842201abd5f987be402e27ced86d13527ee3d4c3720e75520bcf24775f7baf0",
     "ORBGraphAdapter._graph": "e224300a3a82ae447bbe4843170b982b153a3ed22acc13ea04a983e08ac015e6",
     "ORBConservativeGraphAdapter.system_energy": "84fa52e40482d60a7d30c93677ef26733e6625988eae57178c84f07b857c723b",
-    "nearest_k_mask": "d0a6e1c4fb1058bb032f05a53801bf1e1fcf3e25899243b2d2b08fb51debca5e",
+    "nearest_k_mask": "0fddb5819cb6802eb6899f26fdafeacdb3b8ccade24fcdee09a68fd7595271cd",
 }
 
 

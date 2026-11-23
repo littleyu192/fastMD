@@ -3,6 +3,12 @@
 The full-supercell path deliberately uses upstream candidate construction and
 neighbor selection. A generic radius list followed by stable nearest-K sorting
 differs at capped distance ties and at the upstream supercell boundary.
+
+No entry point builds this graph: every ORB call selects the nearest
+``max_neighbors`` of the engine's radius graph on the device
+(``fastmd.models.orb.ORBAdapter``), which keeps the same edges away from ties.
+This module is upstream's own graph for checks; its GPU KNN is an N x 27N FP64
+distance matrix (about 20 GiB at 10k atoms).
 """
 from __future__ import annotations
 

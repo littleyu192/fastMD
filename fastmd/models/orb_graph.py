@@ -47,14 +47,24 @@ class CappedORBInput:
         return self.base.batch
 
 
-def nearest_k_mask(senders, vectors, rows, n_atoms, max_neighbors, cutoff):
+def nearest_k_mask(senders, vectors, rows, n_atoms, max_neighbors, cutoff, receivers=None, images=None):
     """Stable nearest-K selection with fixed outputs, including empty lists.
 
     Selection is discrete; retained vectors still carry position/strain gradients.
     No boolean indexing, dynamic bincount, nonzero, or host reads are used.
+    Exact distance ties (perfect crystals) are broken by row, or with
+    ``receivers`` and ``images`` (integer image offsets, |offset| < 512) by the
+    edge itself: neighbour, then image. Every edge order then keeps the same
+    edges; upstream's own choice among tied neighbours is arbitrary.
     """
     distances = vectors.detach().square().sum(-1)
-    order = torch.argsort(distances, stable=True)
+    if receivers is None:
+        order = torch.argsort(distances, stable=True)
+    else:
+        offsets = images.detach().round().long() + 511
+        key = ((receivers.long() * 1023 + offsets[:, 0]) * 1023 + offsets[:, 1]) * 1023 + offsets[:, 2]
+        order = torch.argsort(key, stable=True)
+        order = order[torch.argsort(distances[order], stable=True)]
     order = order[torch.argsort(senders[order], stable=True)]
     sorted_senders = senders[order]
     starts = torch.full((n_atoms,), len(rows), dtype=torch.long, device=senders.device)

@@ -322,7 +322,8 @@ class MLIPCalculator(Calculator):
         if mode == "off":
             return "topology_reuse='off'"
         if self.adapter.name in {"orb_v3", "orb_graph"}:
-            return "ORB requires upstream capped KNN and minimal-supercell selection on every geometry; model_graph remains available"
+            return ("ORB keeps upstream capped KNN (its adapter selects on every geometry); topology reuse stays off "
+                    "in the calculator; model_graph remains available")
         if self._execution_auto and self.auto_policy == "latency_trial" and negotiated(self.adapter):
             return "latency_trial guards bucket captures only; topology reuse disabled"
         if self._cpu_graph:
@@ -350,18 +351,21 @@ class MLIPCalculator(Calculator):
     def neighbor_cap_summary(self) -> dict | None:
         """For a model that keeps at most ``max_neighbors`` neighbours per atom (its own graph drops the
         farthest ones): the cap, the largest number of neighbours within the cutoff one atom had in the
-        calls so far (read from the device) and whether it exceeded the cap, in which case the calculator
-        evaluated every pair (the model's intent, not its own truncated graph) and this warns once (each
-        call checks). None without a cap."""
+        calls so far (read from the device) and whether it exceeded the cap, in which case this warns once
+        (each call checks): the model kept the nearest ones if its adapter selects them
+        (``selects_nearest_neighbors``, ORB), else the calculator evaluated every pair (the model's intent,
+        not its own truncated graph). None without a cap."""
         if self._neighbor_count_max is None:
             return None
         topology = self.adapter.topology_spec()
         cap, largest = topology.max_neighbors, int(self._neighbor_count_max.item())
         if largest > cap and not self._neighbor_cap_warned:
             self._neighbor_cap_warned = True
+            kept = (f"the model kept the nearest {cap}" if getattr(self.adapter, "selects_nearest_neighbors", False)
+                    else "the calculator evaluated every pair")
             warnings.warn(f"model {self.adapter.name!r} keeps at most {cap} neighbours per atom in its own graph; "
-                          f"an atom had {largest} within the {topology.cutoff:g} A cutoff, and the calculator "
-                          "evaluated every pair", RuntimeWarning, stacklevel=2)
+                          f"an atom had {largest} within the {topology.cutoff:g} A cutoff, and {kept}",
+                          RuntimeWarning, stacklevel=2)
         return {"max_neighbors": cap, "largest": largest, "exceeded": largest > cap}
 
     def topology_reuse_summary(self) -> dict:
@@ -528,13 +532,7 @@ class MLIPCalculator(Calculator):
         that reads edges only a CPU or GPU ``GraphBatch`` built directly from ``atoms``."""
         check_isolated_atoms = not self.handle_isolated_atoms or self.adapter.isolated_atom_policy() == "error"
         if self._edges_only:
-            if self.adapter.name in {"orb_v3", "orb_graph"} and atoms.pbc.all():
-                from fastmd.graph.orb_graph import atoms_to_orb_graph
-                base = getattr(self.adapter, "_base", self.adapter)
-                batch = atoms_to_orb_graph(atoms, base._cutoff, base._max_neighbors, self.device,
-                                           positions_dtype=self._cpu_geometry_dtype(),
-                                           check_isolated_atoms=check_isolated_atoms)
-            elif self._cpu_graph:
+            if self._cpu_graph:
                 from fastmd.graph.cpu_graph_builder import atoms_to_edges_cpu
                 batch = atoms_to_edges_cpu(atoms, self.adapter.topology_spec().cutoff,
                                            check_isolated_atoms=check_isolated_atoms,

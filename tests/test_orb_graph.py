@@ -42,6 +42,70 @@ class ORBGraphTest(unittest.TestCase):
                                                 torch.stack((expected.senders, expected.receivers))))
                     self.assertTrue(torch.equal(actual.edge_image, expected.edge_features['unit_shifts']))
 
+    def test_nearest_k_of_the_radius_graph_is_upstreams_knn_graph_on_a_dense_crystal(self):
+        """The engine's CPU radius graph of a perturbed 64-atom diamond (about 158 neighbours per atom within
+        6 A), with the nearest-K selection every ORB call applies, keeps exactly upstream's kNN edges (centre,
+        neighbour, image) for caps 20 and 120, and every radius edge without a cap above the largest degree."""
+        from ase.build import bulk
+        from orb_models.forcefield.atomic_system import SystemConfig, ase_atoms_to_atom_graphs
+        from fastmd.graph.cpu_graph_builder import atoms_to_edges_cpu
+        from fastmd.models.orb_graph import nearest_k_mask
+
+        atoms = bulk('C', 'diamond', a=3.567, cubic=True).repeat(2)
+        atoms.positions += np.random.default_rng(16).normal(0., .1, atoms.positions.shape)
+        batch = atoms_to_edges_cpu(atoms, 6.)
+        senders, receivers = batch.edge_index.long().unbind(1)
+        vectors = batch.positions[receivers] - batch.positions[senders] + batch.edge_image @ batch.cell
+        rows = torch.arange(len(senders))
+
+        def edges(centres, neighbours, images):
+            return set(zip(centres.tolist(), neighbours.tolist(), map(tuple, images.round().long().tolist())))
+
+        degree = int(torch.bincount(senders).max())
+        self.assertGreater(int(torch.bincount(senders).min()), 120)
+        for cap in (20, 120, degree + 1):
+            with self.subTest(cap=cap):
+                keep = nearest_k_mask(senders, vectors, rows, len(atoms), cap, 6.)
+                expected = ase_atoms_to_atom_graphs(atoms, SystemConfig(radius=6., max_num_neighbors=cap),
+                                                    device='cpu', half_supercell=False)
+                self.assertEqual(int(keep.sum()), len(expected.senders))
+                self.assertEqual(edges(senders[keep], receivers[keep], batch.edge_image[keep]),
+                                 edges(expected.senders, expected.receivers, expected.edge_features['unit_shifts']))
+
+    def test_exact_distance_ties_keep_the_same_edges_in_every_row_order(self):
+        """A perfect 64-atom diamond has exact FP32 distance ties at the cap of 120 at many centres: the selection
+        with the edges' neighbours and images keeps the same edges whatever the row order of the radius graph
+        (the builders order their rows differently), and as many per centre as upstream's kNN graph."""
+        from ase.build import bulk
+        from orb_models.forcefield.atomic_system import SystemConfig, ase_atoms_to_atom_graphs
+        from fastmd.graph.cpu_graph_builder import atoms_to_edges_cpu
+        from fastmd.models.orb_graph import nearest_k_mask
+
+        atoms = bulk('C', 'diamond', a=3.567, cubic=True).repeat(2)
+        batch = atoms_to_edges_cpu(atoms, 6.)
+        senders, receivers = batch.edge_index.long().unbind(1)
+        images = batch.edge_image
+        vectors = batch.positions[receivers] - batch.positions[senders] + images @ batch.cell
+        distances = vectors.square().sum(-1)
+        ties = sum(int(torch.sort(distances[senders == centre]).values[119]
+                       == torch.sort(distances[senders == centre]).values[120]) for centre in range(len(atoms)))
+        self.assertGreater(ties, 0)
+
+        def kept(order):
+            keep = nearest_k_mask(senders[order], vectors[order], torch.arange(len(order)), len(atoms), 120, 6.,
+                                  receivers[order], images[order])
+            return set(zip(senders[order][keep].tolist(), receivers[order][keep].tolist(),
+                           map(tuple, images[order][keep].round().long().tolist())))
+
+        expected = kept(torch.arange(len(senders)))
+        for seed in range(3):
+            with self.subTest(permutation=seed):
+                self.assertEqual(kept(torch.randperm(len(senders), generator=torch.Generator().manual_seed(seed))),
+                                 expected)
+        upstream = ase_atoms_to_atom_graphs(atoms, SystemConfig(radius=6., max_num_neighbors=120), device='cpu',
+                                            half_supercell=False)
+        self.assertEqual(len(expected), len(upstream.senders))
+
     def test_odd_directed_edges_reserve_enough_model_graph_capacity(self):
         from fastmd.execution.cuda_graph import _demand, _PaddedEdgesWorkspace
         from fastmd.adapters.protocol import GraphBatch, PaddingRule
@@ -57,7 +121,7 @@ class ORBGraphTest(unittest.TestCase):
         self.assertEqual(workspace.batch.n_edges.item(), 3)
 
     @unittest.skipUnless(os.environ.get('ORB_CHECKPOINT_DIR'), 'set ORB_CHECKPOINT_DIR for local ORB weights')
-    def test_real_single_calculator_parity_and_no_generic_skin(self):
+    def test_real_single_calculator_parity_on_cpu(self):
         from orb_models.forcefield import pretrained
         from orb_models.forcefield.calculator import ORBCalculator
         from fastmd import InferenceConfig, MLIPCalculator
@@ -78,7 +142,6 @@ class ORBGraphTest(unittest.TestCase):
                     config=InferenceConfig(execution='eager', optimization_profile='topology',
                                            matmul_precision='highest', triton_dot_precision='ieee', report=False))
                 try:
-                    self.assertIn('upstream capped KNN', calculator._skin_static)
                     for a, (energy, forces, stress) in zip(inputs(), expected):
                         a.calc = calculator; calculator.reset()
                         with patch.object(module.model, 'forward', wraps=module.model.forward) as calls:

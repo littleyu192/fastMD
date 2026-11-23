@@ -1484,18 +1484,20 @@ class GPUResidentMolecularDynamics:
     def neighbor_cap_summary(self) -> dict | None:
         """For a model that keeps at most ``max_neighbors`` neighbours per atom (its own graph drops the
         farthest ones): the cap, the largest number of neighbours within the cutoff one atom had in the
-        builds so far (read from the device) and whether it exceeded the cap, in which case the engine
-        evaluated every pair (the model's intent, not its own truncated graph) and this warns once.
-        None without a cap."""
+        builds so far (read from the device) and whether it exceeded the cap, in which case this warns once:
+        the model kept the nearest ones if its adapter selects them (``selects_nearest_neighbors``, ORB), else
+        the engine evaluated every pair (the model's intent, not its own truncated graph). None without a cap."""
         if self._neighbor_count_max is None:
             return None
         cap = self.adapter.topology_spec().max_neighbors
         largest = int(self._neighbor_count_max.item())
         if largest > cap and not self._neighbor_cap_warned:
             self._neighbor_cap_warned = True
+            kept = (f"the model kept the nearest {cap}" if getattr(self.adapter, "selects_nearest_neighbors", False)
+                    else "the engine evaluated every pair")
             warnings.warn(f"model {self.adapter.name!r} keeps at most {cap} neighbours per atom in its own graph; "
-                          f"an atom had {largest} within the {self.atom_graph_cutoff:g} A cutoff, and the engine "
-                          "evaluated every pair", RuntimeWarning, stacklevel=2)
+                          f"an atom had {largest} within the {self.atom_graph_cutoff:g} A cutoff, and {kept}",
+                          RuntimeWarning, stacklevel=2)
         return {"max_neighbors": cap, "largest": largest, "exceeded": largest > cap}
 
     @scoped_call

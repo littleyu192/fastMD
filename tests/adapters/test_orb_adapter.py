@@ -33,8 +33,9 @@ unpatched upstream in a fresh process.
 Needs the optional ORB extra (orb-models), a CUDA device and the
 orb-v3-conservative-inf-mpa checkpoint: the file ``MATRIS_ORB_CHECKPOINT``
 names, else orb-models' download cache (cached-path) must hold it; the tests
-never download. They are skipped otherwise, except the checks that the extra
-is optional, which run everywhere.
+never download. GPU checks are skipped otherwise. The neighbour-cap CPU
+checks need only orb-models and that checkpoint; the optional-extra checks
+run everywhere.
 """
 from __future__ import annotations
 
@@ -446,9 +447,9 @@ class ORBAccuracyTest(ORBTestCase):
 
     def test_padding_adds_exactly_nothing(self):
         """The adapter's padding (far self-loops) on 40 atoms: a fixed-capacity build with 128 padded rows,
-        fresh and on its reused candidate list, equals the ragged batch (the mean of its K=5 repeats; energy
-        within 2 ulp or 1.5 times its K=5 floor, forces within max(1e-6, 1.5 nu), stress within max(1e-8,
-        1.5 nu_S)); a batch of padded rows only (two atoms farther apart than the cutoff) has the energy of
+        fresh and on its reused candidate list, equals the ragged batch (K=5 means on both sides; energy
+        within 2 ulp or 1.5 times the larger K=5 floor, forces within max(1e-6, 1.5 nu), stress within max(1e-8,
+        1.5 nu_S), with each floor measured on both sides); a batch of padded rows only has the energy of
         the batch without edges bit for bit, and forces and stress exactly zero."""
         adapter = self.orb()
         self.assertEqual(adapter.padding_rule().kind, "far_self_loops")
@@ -456,9 +457,6 @@ class ORBAccuracyTest(ORBTestCase):
         batch = ragged(atoms, adapter)
         repeats = [engine_efs(adapter, batch) for _ in range(REPEATS)]
         expected = mean_efs(repeats)
-        floor_e = max_pairwise([np.float64(run[0]) for run in repeats])
-        floor_f, floor_s = floors(repeats)
-        energy_bound = largest([2.0 * float(np.spacing(np.float32(abs(expected[0])))), 1.5 * floor_e])
         builder = fixed_capacity_builder(atoms, adapter, u_capacity=batch.edge_index.shape[0] // 2 + 64)
         positions = torch.tensor(atoms.positions, device="cuda")
         for reuse in (False, True):
@@ -468,7 +466,14 @@ class ORBAccuracyTest(ORBTestCase):
                 self.assertEqual(edges, batch.edge_index.shape[0])
                 self.assertEqual(builder.batch.edge_index.shape[0] - edges, 128)  # padded rows
                 self.assertTrue(torch.equal(builder.batch.edge_index[:edges], batch.edge_index))
-                energy, forces, stress = engine_efs(adapter, builder.batch, inputs)
+                self.assertTrue(torch.equal(builder.batch.edge_image[:edges], batch.edge_image))
+                # Padding changes the scatter shape: an identical ragged energy across five runs does not
+                # imply that padded evaluations have no noise. Measure each shape independently.
+                padded_runs = [engine_efs(adapter, builder.batch, inputs) for _ in range(REPEATS)]
+                energy, forces, stress = mean_efs(padded_runs)
+                floor_e = largest([max_pairwise([run[0] for run in runs]) for runs in (repeats, padded_runs)])
+                floor_f, floor_s = floors(repeats, padded_runs)
+                energy_bound = largest([2.0 * float(np.spacing(np.float32(abs(expected[0])))), 1.5 * floor_e])
                 self.assert_within(abs(energy - expected[0]), energy_bound, f"padded: |dE| (eV, floor {floor_e:.2e})")
                 self.assert_efs((None, forces, stress), expected, floor_f, floor_s, "padded")
         apart = Atoms("CsI", positions=[[2.0, 2.0, 2.0], [12.0, 12.0, 12.0]], cell=[20.0] * 3, pbc=True)
@@ -542,6 +547,174 @@ class ORBAccuracyTest(ORBTestCase):
                 forces[chosen] = md.evaluate(positions)[0].double().cpu().numpy()
             self.assertEqual(fp32_gemm_mode(), "ieee")
         self.assertGreater(max_difference(forces["tf32"], forces["ieee"]), 1e-5)
+
+
+def dense_diamond(seed: int = 16) -> Atoms:
+    """64 atoms of diamond (a = 3.567 A, 2x2x2 conventional cells), positions perturbed by 0.1 A: every atom has
+    about 158 neighbours within ORB's 6 A, more than its cap of 120, and no distance ties at the cap."""
+    from ase.build import bulk
+
+    atoms = bulk("C", "diamond", a=3.567, cubic=True).repeat(2)
+    atoms.positions += np.random.default_rng(seed).normal(0.0, 0.1, atoms.positions.shape)
+    return atoms
+
+
+class ORBNeighbourCapTest(ORBTestCase):
+    def test_dense_crystal_keeps_the_nearest_neighbours_on_every_path(self):
+        """Two perturbed 64-atom diamonds (more than 120 neighbours per atom within 6 A; the 120th and the 121st
+        nearest more than 1e-4 A apart) against orb-models' calculator (its capped kNN graph; the reference: the
+        mean of its K=5 repeats at the engine's positions): the engine-owned derivative of a fresh ragged build,
+        the calculator (eager and model_graph), GPU-resident MD's eager evaluate and logged first frame,
+        multi-system and replica MD's initial union states, and StructOptimizer's GPU path (the first frame of
+        both structures relaxed together) agree within FP32 noise
+        (energy 1e-5 eV/atom, forces max(2e-4, 3 nu), stress max(5e-6, 3 nu_S); about 5e-5 eV/A and 4e-7 eV/A^3
+        on GB200), far below what the cap changes here (the full radius graph's forces differ by more than 1e-3
+        eV/A); and the warnings that an atom exceeded the cap say that the model kept the nearest 120."""
+        from ase.neighborlist import neighbor_list
+        from fastmd import MultiSystemMolecularDynamics, ReplicaMolecularDynamics, StructOptimizer
+
+        adapter = self.orb()
+        reference = self.upstream_calculator()
+        cap = adapter.topology_spec().max_neighbors
+        structures = [at_engine_positions(dense_diamond(seed), adapter) for seed in (16, 22)]
+        expected, floors_of = [], []
+        for atoms in structures:
+            i, d = neighbor_list("id", atoms, 7.0)
+            nearest = [np.sort(d[i == centre]) for centre in range(len(atoms))]
+            self.assertGreater(min(len(row[row < 6.0]) for row in nearest), cap)
+            self.assertGreater(min(row[cap] - row[cap - 1] for row in nearest), 1e-4)
+            upstream = [orb_efs(reference, atoms) for _ in range(REPEATS)]
+            engine = [engine_efs(adapter, ragged(atoms, adapter)) for _ in range(REPEATS)]
+            expected.append(mean_efs(upstream))
+            floors_of.append(floors(upstream, engine))
+            with mock.patch.object(adapter, "_max_neighbors", 10 * cap):  # the full radius graph
+                uncapped = engine_efs(adapter, ragged(atoms, adapter))
+            self.assertGreater(max_difference(uncapped[1], expected[-1][1]), 1e-3)
+        results = [{} for _ in structures]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            for index, atoms in enumerate(structures):
+                results[index]["engine-owned derivative"] = engine_efs(adapter, ragged(atoms, adapter))
+                for execution in ("eager", "model_graph"):
+                    results[index][f"calculator {execution}"] = calculator_efs(adapter, atoms, execution)
+                with tempfile.TemporaryDirectory() as directory:
+                    path = os.path.join(directory, "md.traj")
+                    with gpu_md(atoms, adapter, "eager", trajectory=path, loginterval=1, log_stress=True) as md:
+                        forces, energy = md.evaluate(torch.tensor(atoms.positions, device="cuda"))
+                        results[index]["GPU MD evaluate"] = (float(energy), forces.double().cpu().numpy(), None)
+                        md.run(1)
+                    frame = read(path, index=0)
+                results[index]["GPU MD frame"] = (frame.get_potential_energy(), frame.get_forces(),
+                                                  frame.get_stress(voigt=False))
+            config = InferenceConfig(report=False, optimization_profile=profile_of(adapter), capacity=small_capacity())
+            union_config = dataclasses.replace(config, execution="whole_step")
+            union_options = dict(ensemble="nvt_nhc", temperature=500.0, timestep=1.0, tdamp=25.0,
+                                 steps_per_launch=1, config=union_config, self_check=False, device="cuda")
+            # The independent upstream comparison below checks the unions directly, without repeating the
+            # entry points' union-versus-single self-check. Both dense structures must share one union.
+            entries = (
+                ("multi-system MD", MultiSystemMolecularDynamics,
+                 dict(systems=[atoms.copy() for atoms in structures], union_rows=sum(map(len, structures)))),
+                ("replica MD", ReplicaMolecularDynamics,
+                 dict(atoms=structures[0].copy(), positions=np.stack([atoms.positions for atoms in structures]),
+                      union_size=len(structures))),
+            )
+            for name, entry, options in entries:
+                with entry(adapter, **options, **union_options) as md:
+                    self.assertEqual(md.stats()["unions"], [len(structures)])
+                    energies, forces = md.potential_energies().cpu().numpy(), md.get_forces()
+                    self.assertEqual(len(energies), len(structures))
+                    for index in range(len(structures)):
+                        results[index][name] = (float(energies[index]), forces[index], None)
+                    md.run(1)  # exercise the captured whole-step path after reading its initial E/F
+                    self.assertEqual(md.nsteps, 1)
+            with StructOptimizer(model=adapter, device="cuda", config=config, engine="gpu") as optimizer:
+                relaxed = optimizer.relax([atoms.copy() for atoms in structures], steps=1, relax_cell=True,
+                                          verbose=False)
+                self.assertEqual(optimizer.config_summary()["relaxation"]["last"]["path"], "gpu")
+            for index, result in enumerate(relaxed):
+                trajectory = result["trajectory"]
+                results[index]["StructOptimizer GPU path"] = (
+                    trajectory.energies[0], trajectory.forces[0],
+                    voigt_6_to_full_3x3_stress(np.asarray(trajectory.stresses[0])))
+        for index, (atoms, reference_efs, (floor_f, floor_s)) in enumerate(zip(structures, expected, floors_of)):
+            for name, (energy, forces, stress) in results[index].items():
+                what = f"structure {index}, {name}"
+                self.assert_within(abs(energy - reference_efs[0]) / len(atoms), 1e-5, f"{what}: |dE|/N (eV)")
+                self.assert_within(max_difference(forces, reference_efs[1]), largest([2e-4, 3 * floor_f]),
+                                   f"{what}: max|dF| (eV/A, floor {floor_f:.2e})")
+                if stress is not None:
+                    self.assert_within(max_difference(stress, reference_efs[2]), largest([5e-6, 3 * floor_s]),
+                                       f"{what}: max|dS| (eV/A^3, floor {floor_s:.2e})")
+        messages = [str(warning.message) for warning in caught if "neighbours per atom" in str(warning.message)]
+        self.assertTrue(messages)
+        self.assertTrue(all(f"kept the nearest {cap}" in message for message in messages), messages)
+
+
+@unittest.skipUnless(ORB, "the optional ORB extra (orb-models) is not installed")
+class ORBNeighbourCapCPUTest(unittest.TestCase):
+    """The adapter's nearest-K selection on the CPU (no GPU): the CPU calculator against orb-models' own CPU
+    calculator on a dense crystal, and a perfect crystal (exact distance ties at the cap) in two edge orders."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.checkpoint = orb_checkpoint()
+        cls.adapter = load_adapter(MODEL, model_path=cls.checkpoint, device="cpu", optimization_profile="generic")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.adapter.close()
+
+    def test_calculator_matches_the_orb_calculator_on_a_dense_crystal(self):
+        """A perturbed 64-atom diamond (more than 120 neighbours per atom within 6 A): the CPU calculator (ASE's
+        radius list, then the adapter's selection) against orb-models' CPU calculator (its kNN graph): energy
+        within 1e-5 eV/atom, forces within 1e-4 eV/A, stress within 5e-6 eV/A^3 (the radius graph misses by about
+        2e-4 eV/atom, 7e-3 eV/A and 4e-4 eV/A^3)."""
+        from orb_models.forcefield import pretrained
+        from orb_models.forcefield.calculator import ORBCalculator
+
+        default = torch.get_default_dtype()
+        try:
+            with restore_fp32_state(), warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                module = pretrained.orb_v3_conservative_inf_mpa(weights_path=self.checkpoint, device="cpu",
+                                                                precision="float32-highest", compile=False)
+        finally:
+            torch.set_default_dtype(default)
+        atoms = dense_diamond()
+        energy, forces, stress = orb_efs(ORBCalculator(module, device="cpu"), atoms)
+        probe = atoms.copy()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with MLIPCalculator(model=self.adapter, device="cpu", config=InferenceConfig(
+                    execution="eager", report=False, optimization_profile="generic")) as calculator:
+                probe.calc = calculator
+                actual = (probe.get_potential_energy(), probe.get_forces(), probe.get_stress(voigt=False))
+        self.assertLessEqual(abs(actual[0] - energy) / len(atoms), 1e-5)
+        self.assertLessEqual(max_difference(actual[1], forces), 1e-4)
+        self.assertLessEqual(max_difference(actual[2], stress), 5e-6)
+        self.assertTrue(any("kept the nearest 120" in str(warning.message) for warning in caught))
+
+    def test_perfect_crystal_keeps_the_same_edges_in_any_edge_order(self):
+        """A perfect 64-atom diamond (exact distance ties at the cap at many centres): the engine-owned derivative
+        of the CPU radius graph in the builder's row order and in two permuted orders agree within FP32 noise
+        (energy 1e-6 eV/atom, forces 2e-5 eV/A, stress 1e-6 eV/A^3); a row-ordered tie break moved the forces by
+        about 2e-3 eV/A."""
+        from ase.build import bulk
+        from fastmd.graph.cpu_graph_builder import atoms_to_edges_cpu
+
+        atoms = bulk("C", "diamond", a=3.567, cubic=True).repeat(2)
+        batch = atoms_to_edges_cpu(atoms, self.adapter.topology_spec().cutoff)
+        expected = engine_efs(self.adapter, batch)
+        for seed in (0, 1):
+            with self.subTest(permutation=seed):
+                order = torch.randperm(len(batch.edge_index), generator=torch.Generator().manual_seed(seed))
+                permuted = dataclasses.replace(batch, edge_index=batch.edge_index[order],
+                                               edge_image=batch.edge_image[order])
+                actual = engine_efs(self.adapter, permuted)
+                self.assertLessEqual(abs(actual[0] - expected[0]) / len(atoms), 1e-6)
+                self.assertLessEqual(max_difference(actual[1], expected[1]), 2e-5)
+                self.assertLessEqual(max_difference(actual[2], expected[2]), 1e-6)
 
 
 class ORBCompiledTest(ORBTestCase):
