@@ -66,9 +66,9 @@ class StructOptimizer:
         device: str = "cpu",
         enable_compile: bool = True,
         config: InferenceConfig | None = None,
+        engine: str = "auto",
         *,
         auto_policy: str = "latency",
-        engine: str = "auto",
     ) -> None:
         """
         Args:
@@ -80,11 +80,12 @@ class StructOptimizer:
             enable_compile (bool): Whether to compile interaction blocks.
             config: Unified inference settings forwarded to MLIPCalculator.
                 Defaults to automatic execution and checkpointing off.
-            auto_policy: Defaults to "latency" to skip uncached online memory probes.
-                Use "throughput" to permit calibration for longer tasks.
             engine (str): How :meth:`relax` relaxes: "auto" (default) on the GPU path wherever it computes
                 what ASE's optimizer would (see :meth:`relax`), else with ASE's optimizer; "ase" always with
-                ASE's optimizer; "gpu" on the GPU path or a ValueError naming why not.
+                ASE's optimizer; "gpu" on the GPU path or a ValueError naming why not. Positional after
+                ``config``, as in MD's signature.
+            auto_policy: Keyword-only. Defaults to "latency" to skip uncached online memory probes.
+                Use "throughput" to permit calibration for longer tasks.
         """
 
         if optimizer in OPTIMIZERS:
