@@ -607,10 +607,9 @@ def _md_state(md) -> dict:
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is unavailable")
 class NativeRestartTest(unittest.TestCase):
-    """P=1 native restart (eager, a history-free analytic force): a run saved at step k, resumed with
-    from_restart and continued is bitwise the uninterrupted run (ramp target and NHC chain included);
-    the file is engine "native" and also resumes through the from_evaluator driver, whose files resume
-    here (the decomposed chain's options are not compared across engines)."""
+    """Native restart (eager, a history-free analytic force): both FastMD and MD format names
+    resume bitwise through from_restart (ramp target and NHC chain included). Saving always writes
+    the FastMD format name; the compatible input's engine remains "native"."""
 
     def test_restart_continues_bitwise(self) -> None:
         from fastmd.execution.md_protocol import HeatingRamp
@@ -634,33 +633,66 @@ class NativeRestartTest(unittest.TestCase):
                             md.step()
                             md.write_outputs()
                         md.save_restart(path)
+                        saved_temperature = md.temperature_K
+                        expected = []
                         for _ in range(4):
                             md.step()
-                        expected = _md_state(md)
+                            expected.append((_md_state(md), md.nsteps, md.temperature_K))
                     finally:
                         md.close()
+                    with np.load(path) as archive:
+                        fields = dict(archive)
+                    self.assertEqual(str(fields["format"]), "fastmd.distributed.md/1")
                     data = read_restart(path)
                     self.assertEqual((data.engine, data.step), ("native", 5))
+                    self.assertEqual(data.temperature_K, saved_temperature)
                     np.testing.assert_array_equal(data.ids, np.arange(64))
                     thermo = (Path(tmp) / "out" / "md_thermo.txt").read_text().splitlines()
                     self.assertEqual([line.split()[0] for line in thermo[1:]], ["2", "4"])
-                    resumed = GPUResidentMolecularDynamics.from_restart(path, **options)
-                    try:
-                        self.assertEqual(resumed.nsteps, 5)
-                        for _ in range(4):
-                            resumed.step()
-                        actual = _md_state(resumed)
-                    finally:
-                        resumed.close()
-                    self.assertEqual(sorted(actual), sorted(expected))
-                    for key in expected:
-                        np.testing.assert_array_equal(actual[key], expected[key], err_msg=key)
-                    with self.assertRaisesRegex(ValueError, "differ from the restart file"):
-                        GPUResidentMolecularDynamics.from_restart(path, timestep=0.25, **options)
-                    if ramp is not None:  # the ramp continues from the saved target; temperature= is not used
-                        with GPUResidentMolecularDynamics.from_restart(path, temperature=123.0, **options) as other:
-                            self.assertEqual(other.thermostat_state()["temperature_K"], data.temperature_K)
+                    for restart_format in ("fastmd.distributed.md/1", "matris.distributed.md/1"):
+                        with self.subTest(restart_format=restart_format):
+                            # MD uses the same fields under its own format name.
+                            resume_path = path
+                            if restart_format == "matris.distributed.md/1":
+                                resume_path = Path(tmp) / "md-restart5.npz"
+                                np.savez(resume_path, **{**fields, "format": np.array(restart_format)})
+                            resumed = GPUResidentMolecularDynamics.from_restart(resume_path, **options)
+                            try:
+                                self.assertEqual(resumed.nsteps, 5)
+                                self.assertEqual(resumed.temperature_K, saved_temperature)
+                                self.assertEqual(resumed.ramp, ramp)
+                                for state, step, temperature in expected:
+                                    resumed.step()
+                                    self.assertEqual(resumed.nsteps, step)
+                                    self.assertEqual(resumed.temperature_K, temperature)
+                                    self.assertEqual(resumed.ramp, ramp)
+                                    actual = _md_state(resumed)
+                                    self.assertEqual(sorted(actual), sorted(state))
+                                    for key in state:
+                                        np.testing.assert_array_equal(actual[key], state[key],
+                                                                      err_msg=f"step {step}, {key}")
+                                saved_again = Path(tmp) / "resumed9.npz"
+                                resumed.save_restart(saved_again)
+                                with np.load(saved_again) as archive:
+                                    self.assertEqual(str(archive["format"]), "fastmd.distributed.md/1")
+                            finally:
+                                resumed.close()
+                            with self.assertRaisesRegex(ValueError, "differ from the restart file"):
+                                GPUResidentMolecularDynamics.from_restart(resume_path, timestep=0.25, **options)
+                            if ramp is not None:  # a ramp continues the saved target; temperature= is not used
+                                with GPUResidentMolecularDynamics.from_restart(
+                                        resume_path, temperature=123.0, **options) as other:
+                                    self.assertEqual(other.thermostat_state()["temperature_K"], data.temperature_K)
 
+    def test_unknown_restart_format_is_rejected_before_model_loading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "unknown.npz"
+            np.savez(path, format=np.array("other.distributed.md/1"))
+            with mock.patch("fastmd.interfaces.gpu_md.load_adapter",
+                            side_effect=AssertionError("unknown restart must not load a model")) as load:
+                with self.assertRaisesRegex(ValueError, "not a .*restart file"):
+                    GPUResidentMolecularDynamics.from_restart(path, model="matris_10m_oam")
+                load.assert_not_called()
 
     def test_multi_step_windows_follow_one_step_per_launch(self) -> None:
         # steps_per_launch=4: one whole-step replay integrates 4 steps; a ramp with a new target every

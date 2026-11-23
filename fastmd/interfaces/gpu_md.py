@@ -513,6 +513,9 @@ class GPUResidentMolecularDynamics:
                      model_path: str | None = None, **kwargs) -> "GPUResidentMolecularDynamics":
         """Resume a restart file (a compatible single-device simulation) on one GPU.
 
+        Both FastMD's ``fastmd.distributed.md/1`` and MD's
+        ``matris.distributed.md/1`` files are accepted. Supply the same model
+        and weights as the original run; they are not stored in the restart.
         The structure comes from the file (numbers, cell, pbc, masses,
         float64 positions and momenta); the MD options default to the file's
         ``parameters``, and an option given here must equal the file's except

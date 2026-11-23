@@ -78,6 +78,10 @@ and memory. Inspect the proposed plan with:
 fastmd-explain --structure input.extxyz --model chgnet_0_3_0 --device cuda --json
 ```
 
+`GPUResidentMolecularDynamics.from_restart(...)` also reads compatible MD restart files
+(`matris.distributed.md/1`). Supply the original model and weights; simulation parameters default to the
+saved values. FastMD continues to write its own format (`fastmd.distributed.md/1`).
+
 ## Structure relaxation
 
 `StructOptimizer` accepts an ASE `Atoms`, a pymatgen `Structure`, or a list of either.

@@ -32,7 +32,10 @@ THERMO_FILE, TRAJECTORY_FILE, RESTART_FILE = "md_thermo.txt", "md_trajectory.ext
 THERMO_HEADER = ("# Step\tTime(fs)\tTargetTemperature(K)\tTemperature(K)\t"
                  "PotentialEnergy(eV)\tKineticEnergy(eV)\tTotalEnergy(eV)\n")
 # The format name predates this module (fastmd.distributed.md); unchanged so older files load.
+# MD writes the same fields, dtypes and parameter keys as "matris.distributed.md/1".
+# Accept both names when reading; FastMD still writes its own name, which MD does not read.
 RESTART_FORMAT = "fastmd.distributed.md/1"
+RESTART_READ_FORMATS = (RESTART_FORMAT, "matris.distributed.md/1")
 _ERRORS = (TypeError, ValueError, RuntimeError, AttributeError, IndexError, KeyError)
 
 
@@ -155,10 +158,11 @@ def read_restart(path) -> RestartData:
     """Parse a :func:`write_restart` file (format check only; the caller checks cell and atoms).
 
     A file without the "engine" field (written before it existed) reads as "domain".
+    Any name in ``RESTART_READ_FORMATS`` is accepted, including files written by MD.
     """
     with np.load(path) as data:
-        if str(data["format"]) != RESTART_FORMAT:
-            raise ValueError(f"not a {RESTART_FORMAT} restart file")
+        if str(data["format"]) not in RESTART_READ_FORMATS:
+            raise ValueError(f"not a {' or '.join(RESTART_READ_FORMATS)} restart file")
         parameters = json.loads(str(data["parameters"]))
         temperature = float(data["temperature_K"])
         nhc = parameters["ensemble"] == "nvt_nhc"
