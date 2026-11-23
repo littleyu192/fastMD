@@ -19,5 +19,28 @@ SphericalExpansion in fastmd/models/matris/basis_function.py is adapted from
 MatterSim. Copyright (c) Microsoft Corporation.
 This portion is licensed under MIT; see licenses/mattersim-MIT.txt.
 
+Selected CHGNet routines in fastmd/models/chgnet.py are derived from
+chgnet 0.4.2: _bond_bases from BondEncoder.forward (chgnet/model/encoders.py),
+_fourier_forward from Fourier.forward (chgnet/model/basis.py) and _aggregate
+from aggregate (chgnet/model/functions.py). fastmd/interfaces/md.py,
+fastmd/interfaces/relax.py and fastmd/models/matris/reference_energy.py are
+modified from CHGNet, as in MD. fastmd/models/matris/legacy_graph.py (from
+chgnet/graph/graph.py), fastmd/models/matris/converter.py and
+fastmd/graph/radiusgraph.py (from chgnet/graph/converter.py and crystalgraph.py),
+and TrajectoryObserver and CrystalFeasObserver in fastmd/interfaces/calculator.py
+are adapted from CHGNet as well. Source comments mark most of these portions;
+_fourier_forward and _aggregate name their upstream routines in docstrings.
+Shared CHGNet-derived routines also include aggregate in
+fastmd/engine/kernels/segment.py (from chgnet/model/functions.py), and
+PolynomialEnvelope, FourierExpansion and BesselExpansion in
+fastmd/models/matris/basis_function.py (from CutoffPolynomial, Fourier and
+RadialBessel in chgnet/model/basis.py).
+Copyright (c) 2023, The Regents of the University of California, through
+Lawrence Berkeley National Laboratory (subject to receipt of any required
+approvals from the U.S. Dept. of Energy) and the University of California,
+Berkeley. All rights reserved. These portions are licensed under CHGNet's
+Modified BSD License;
+see licenses/chgnet-BSD-3-Clause-LBNL.txt.
+
 Optional model packages and pretrained weights are provided separately by
 their respective projects and retain their own licenses.

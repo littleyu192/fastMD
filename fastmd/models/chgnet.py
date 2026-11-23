@@ -3,8 +3,9 @@
 chgnet is optional: this module imports it only when a model is loaded
 (``pip install fastmd[chgnet]``), so ``fastmd`` imports without it. The adapter
 runs the upstream ``CHGNet`` module as loaded (``CHGNet.load``, the bundled
-0.3.0 weights); nothing of CHGNet's model is copied. What the adapter declares
-and does:
+0.3.0 weights); its model modules and weights are loaded from the upstream
+package. Some input and aggregation routines are adapted from chgnet (see NOTICE).
+What the adapter declares and does:
 
 * **Topology**: CHGNet's two graphs, the engine's line-graph topology: directed
   edges within the atom-graph cutoff (6 Å) with the undirected pair of each,
