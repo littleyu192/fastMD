@@ -1,6 +1,6 @@
 """64-bit Triton row offsets (K1): source lint and kernel parity.
 
-CPU: a source lint over the migrated MatRIS/shared-engine/graph Triton kernels and int64 CSR
+CPU: a source lint over every Triton kernel under ``fastmd`` and int64 CSR
 offsets. CUDA: small-shape parity of every converted kernel against ATen, using
 stride-128 views, int32 strided indices and int32 CSR offsets (the in-kernel
 widening paths); the atomic VJPs also on a padded tail indexing one private
@@ -29,20 +29,27 @@ class TritonOffsetSourceLintTest(unittest.TestCase):
         # "int32 block index" (a block index or tile loop start, widened before the row offset math: the
         # int64 index math measured up to 30% slower in the C4 row GEMMs); the kernel must widen then.
         pattern = re.compile(r"tl\.program_id\(\s*(?:axis\s*=\s*)?0\s*\)(?!\.to\(tl\.int64\))(?!.*# int32 block index$)")
-        kernels, offenders = 0, []
-        # Match the upstream port's coverage; FastMD-only adapters (eSEN/ORB)
-        # own different kernels and are covered by their adapter suites.
-        roots = (MATRIS / "models" / "matris", MATRIS / "engine", MATRIS / "graph")
-        for path in sorted(path for root in roots for path in root.rglob("*.py")):
+        # Other axis-0 row ids that may stay int32, (path, line): the reason.
+        exempt = {
+            ("fastmd/models/orb_ops/triton_orb_inference.py", "row=tl.program_id(0)*B+tl.arange(0,B)"):
+                "compact_topk raises from 2**31 candidate rows; the rows are stored in int32 bounds",
+        }
+        kernels, offenders, exempted = 0, [], set()
+        for path in sorted(MATRIS.rglob("*.py")):
             text = path.read_text()
             kernels += text.count("@triton.jit")
             for number, line in enumerate(text.splitlines(), 1):
                 if pattern.search(line):
-                    offenders.append(f"{path.relative_to(MATRIS.parent)}:{number}: {line.strip()}")
+                    key = (str(path.relative_to(MATRIS.parent)), line.strip())
+                    if key in exempt:
+                        exempted.add(key)
+                    else:
+                        offenders.append(f"{key[0]}:{number}: {key[1]}")
             if "# int32 block index" in text:
                 self.assertIn(".to(tl.int64) * BM", text, path)
         self.assertGreater(kernels, 40)
         self.assertEqual(offenders, [])
+        self.assertEqual(exempted, set(exempt))  # a stale exemption fails
 
     def test_csr_offsets_stay_int64(self):
         from fastmd.models.matris.op.triton_segment_attention import segment_attention_csr_metadata

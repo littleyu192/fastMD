@@ -25,17 +25,26 @@ communication, partitioning and distributed-evaluator cases are excluded. Shared
 test fixtures are extracted into `single_gpu_fixtures.py` rather than importing
 distributed test modules. Existing FastMD adapter tests remain unchanged.
 
-The static int64 source check covers the migrated MatRIS, shared engine and graph
-kernels. It is not a source audit of FastMD-specific ORB/eSEN kernels.
+The static int64 source check covers every Triton kernel under `fastmd`, including
+the execution, ORB and eSEN kernels. ORB's compact top-K candidate row ID has one
+documented int32 exemption; a stale exemption fails the check.
 
 Two upstream expectations need adaptation for the current code and PyTorch 2.8:
-the pre-refactor FP64 golden values remain unchanged, with an absolute tolerance
-of `1e-8` for their E/F comparison (the same upstream checkout differs by up to
-`8.23e-9` on this environment); independent stage/VJP and finite-difference
-checks remain separate. Projection-cache tests follow the current contract:
+the pre-refactor FP64 golden values remain unchanged and use the upstream
+absolute E/F tolerance of `2e-10`, except on PyTorch 2.8 releases and pre-releases,
+which use `1e-8`. The same upstream checkout differs by up to `8.23e-9` with
+PyTorch 2.8 on x86_64 and by about `1e-16` with PyTorch 2.12 on aarch64; whether
+the version or platform causes this difference is not confirmed. Independent
+stage/VJP and finite-difference checks remain separate. Projection-cache tests follow the current contract:
 Dynamo tracing does not retain Python cache holders, while eager capture retains
 them and replay rejects modified sources. These adaptations do not change model
 or runtime implementations.
+
+In `test_gpu_nhc`, only checks that use ASE's `NoseHooverChainNVT` are skipped
+when that interface is unavailable (ASE < 3.24). The skip reason explicitly
+states that `nvt_nhc` lacks independent oracle validation; the temperature-change
+check still runs. Agreement between FastMD's own NHC paths is not a substitute
+for the ASE comparison.
 
 ## CPU checks
 

@@ -47,6 +47,20 @@ _LEGACY_EF = {
 }
 
 
+# These fixed goldens keep MD's 2e-10 absolute tolerance except on PyTorch 2.8.
+# With 2.8 on x86_64, both MD and FastMD showed 7.48e-9..8.23e-9 energy drift
+# and 1.54e-9..4.87e-9 force drift; 2.12 on aarch64 reproduced them to ~1e-16.
+# Whether the version or platform causes the difference is not confirmed.
+# Training gradients and independent stage/VJP checks remain strict.
+def _legacy_ef_atol(version: str) -> float:
+    """Select by release major/minor, including pre-release and local builds."""
+    release = tuple(version.split("+", 1)[0].split(".")[:2])
+    return 1e-8 if release == ("2", "8") else 2e-10
+
+
+_LEGACY_EF_ATOL = _legacy_ef_atol(torch.__version__)
+
+
 class SharedForwardTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -67,13 +81,8 @@ class SharedForwardTest(unittest.TestCase):
                 expected_e = torch.tensor(energy, dtype=torch.float64)
                 expected_f = torch.tensor(forces, dtype=torch.float64)
                 single = model([graph], task="ef")
-                # The original goldens stay unchanged. PyTorch 2.8 produces
-                # 7.48e-9..8.23e-9 energy drift in BOTH MD and FastMD on this
-                # seeded fixture; its force drift is 1.54e-9..4.87e-9.
-                # Allow 1e-8 absolute drift only against these fixed goldens.
-                # Training VJPs and independent stage/VJP checks stay strict.
-                torch.testing.assert_close(single["e"][0], expected_e, atol=1e-8, rtol=2e-9)
-                torch.testing.assert_close(single["f"][0], expected_f, atol=1e-8, rtol=2e-9)
+                torch.testing.assert_close(single["e"][0], expected_e, atol=_LEGACY_EF_ATOL, rtol=2e-9)
+                torch.testing.assert_close(single["f"][0], expected_f, atol=_LEGACY_EF_ATOL, rtol=2e-9)
                 # Dead edge updates (MATRIS_SKIP_DEAD_THREEBODY_TAIL, default on): under the conservative
                 # head the last block's bond update, and without triplets every atom attention's bond
                 # update, are skipped; E/F/S are bitwise those of the full computation.
@@ -135,6 +144,16 @@ class SharedForwardTest(unittest.TestCase):
                                                            atol=2e-10, rtol=2e-9)
                                 seen += 1
                     self.assertGreater(seen, 20)
+
+    def test_golden_tolerance_follows_the_release_version(self):
+        for version in ("2.8.0", "2.8.0+cu128", "2.8.1", "2.8.0a0+5228986c39.nv25.06", "2.8.0rc1"):
+            with self.subTest(version=version):
+                self.assertEqual(_legacy_ef_atol(version), 1e-8)
+        for version in ("2.9.0a0+145a3a7bda.nv25.10", "2.9.0.dev20250801+cu128", "2.10.0",
+                        "2.12.0a0+git1234", "2.7.1", "2.80.0", "12.8.0"):
+            with self.subTest(version=version):
+                self.assertEqual(_legacy_ef_atol(version), 2e-10)
+        self.assertEqual(_LEGACY_EF_ATOL, _legacy_ef_atol(torch.__version__))
 
     def test_unsorted_directed_pair_rows_preserve_outputs_and_all_input_vjps(self):
         """Pair identity is a mapping, not the adjacency of two local rows."""

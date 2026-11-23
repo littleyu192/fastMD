@@ -58,7 +58,7 @@ from ase.optimize import FIRE
 from ase.filters import FrechetCellFilter
 try:
     from ase.md.nose_hoover_chain import NoseHooverChainNVT
-except ImportError:
+except ImportError:  # ASE < 3.24
     NoseHooverChainNVT = None
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
@@ -81,6 +81,13 @@ KEYS = ("q", "p", "eta", "p_eta")
 TESTS = Path(__file__).resolve().parent
 REPO = TESTS.parent
 REFERENCE_TREE = os.environ.get("MATRIS_TEST_REFERENCE_TREE", "")
+# ASE's NoseHooverChainNVT is the independent nvt_nhc oracle in items 1 and 4.
+# The other NHC checks compare FastMD execution paths. Reimplementing NHC in
+# this file could reproduce the same mistakes and would not replace that oracle.
+NO_ASE_NHC = (
+    f"nvt_nhc NOT validated against an independent oracle: ASE {ase.__version__} has no "
+    "NoseHooverChainNVT (ASE >= 3.24 needed)"
+)
 
 
 def _backends() -> list[tuple[str, str]]:
@@ -216,7 +223,6 @@ class MaxwellBoltzmannTest(unittest.TestCase):
         )
 
 
-@unittest.skipIf(NoseHooverChainNVT is None, "ASE NoseHooverChainNVT unavailable")
 class NHCIntegratorVersusASETest(unittest.TestCase):
     """The GPU integrator alone, driven by host calculators like ASE is."""
 
@@ -272,6 +278,7 @@ class NHCIntegratorVersusASETest(unittest.TestCase):
                         self.assertLess(deviation[key], tol, (key, deviation))
         return results
 
+    @unittest.skipIf(NoseHooverChainNVT is None, NO_ASE_NHC)
     def test_trajectories_match_ase(self) -> None:
         # 300 steps per case: a 1e-9 relative change of kT or of one
         # Suzuki-Yoshida delta already deviates by >= 1e-10, while round-off
@@ -1316,11 +1323,11 @@ class NVEBerendsenRegressionTest(unittest.TestCase):
                 np.testing.assert_array_equal(ours[key], reference[key])
 
 
+@unittest.skipIf(NoseHooverChainNVT is None, NO_ASE_NHC)
 @unittest.skipUnless(
     CUDA and op_available and _fixed_builder_available and real_model_assets_available(),
     "MatRIS-10M-OAM checkpoint / S01 frames unavailable",
 )
-@unittest.skipIf(NoseHooverChainNVT is None, "ASE NoseHooverChainNVT unavailable")
 class MatRISS01NoseHooverVersusASETest(unittest.TestCase):
     """Tier 2 (opt-in via the real-model assets). The Q3 validation: GPU forces
     replayed through ASE NoseHooverChainNVT."""
