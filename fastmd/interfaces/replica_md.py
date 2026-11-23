@@ -2,11 +2,13 @@
 
 :class:`ReplicaMolecularDynamics` runs N independent trajectories of one
 system (the same atoms and cell; each replica its own positions, momenta and
-thermostat) for a model the engine differentiates (an energy tap) that
-declares its systems may be evaluated as one disjoint union
-(:class:`~fastmd.adapters.protocol.SystemBatching`: ``"union"``, MACE's
+thermostat) for a model that declares its systems may be evaluated as one
+disjoint union (:class:`~fastmd.adapters.protocol.SystemBatching`): a model
+the engine differentiates (an energy tap; ``"union"``, MACE's
 ``ScaleShiftMACE``, SevenNet and CHGNet, whose union carries the line graph;
-``"segments"``, ORB v3, which pools over each system of the union). The
+``"segments"``, ORB v3, which pools over each system of the union), or MatRIS,
+which differentiates its own energy and evaluates the union one energy per
+replica (``"union"``, its line graph padded with sink atoms). The
 replicas form unions
 (:mod:`fastmd.execution.replica_batch`): one graph build, one model call
 and one backward pass per step for all replicas of a union, the integrator,
@@ -20,6 +22,7 @@ from dataclasses import replace
 import gc
 import math
 import time
+import warnings
 
 import numpy as np
 import torch
@@ -27,10 +30,13 @@ from ase import Atoms, units
 
 from fastmd.adapters import load_adapter
 from fastmd.adapters.memory import MeasuredMemoryModel
-from fastmd.adapters.negotiate import batch_systems, check_system_batching, negotiate, negotiated, size_unions
-from fastmd.adapters.protocol import NegotiationError
-from fastmd.config import InferenceConfig, resolve_config
-from fastmd.engine.entry_config import release_adapter, use_adapter
+from fastmd.adapters.negotiate import batch_systems, check_system_batching, dry_run, negotiate, negotiated, size_unions
+from fastmd.adapters.protocol import CapacityStep, NegotiationError
+from fastmd.config import ConfigurationWarning, InferenceConfig, resolve_config
+from fastmd.engine import saved_recompute
+from fastmd.engine.energy_derivative import engine_derivative
+from fastmd.engine.entry_config import apply_checkpoint, release_adapter, use_adapter
+from fastmd.engine.policy import fusion_scope
 from fastmd.execution.gpu_integrator import default_fix_com, kinetic_energy_fp64
 from fastmd.execution.gpu_nhc import maxwell_boltzmann_momenta
 from fastmd.execution.replica_batch import (
@@ -50,6 +56,7 @@ from fastmd.execution.replica_batch import (
     union_triplet_capacity,
 )
 from fastmd.execution.whole_step_cuda_graph import FixedCapacityOverflow
+from fastmd.precision import warn_implicit_tf32
 from fastmd.interfaces.calculator import require_finite_geometry
 
 ENSEMBLES = ("nvt_nhc", "nvt", "nve")
@@ -287,11 +294,11 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
     ----------
     model:
         An adapter, or a name or checkpoint path that :func:`~fastmd.adapters.load_adapter` loads
-        (``model_path``, ``model_dtype`` as there). MatRIS is not batched here (replicas of MatRIS:
-        :class:`~fastmd.execution.whole_step_cuda_graph.BatchedWholeStepGraphRunner`); a model that does not
-        declare ``"union"`` or ``"segments"`` (or declares ``"union"`` with a whole-system tap, or pads with sink
-        atoms, or a line graph otherwise than with far self-loops: ``check_system_batching``), or fails its check
-        on two copies of the system, raises :class:`~fastmd.adapters.protocol.NegotiationError`.
+        (``model_path``, ``model_dtype`` as there). MatRIS runs by its own rules (its kernel profiles, precision
+        and capacity tiers as in ``GPUResidentMolecularDynamics``; the plan is recorded, not negotiated); a model
+        that does not declare ``"union"`` or ``"segments"`` (or declares ``"union"`` with a whole-system tap, or
+        pads with sink atoms, or a line graph otherwise than with far self-loops: ``check_system_batching``), or
+        fails its check on two copies of the system, raises :class:`~fastmd.adapters.protocol.NegotiationError`.
     atoms:
         The system (periodic in all three directions).
     replicas:
@@ -312,17 +319,21 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
     union_size:
         Replicas per union; default: as many as fit ``DEFAULT_UNION_ROWS`` atom rows (past the union size where
         MACE-MPA-0's throughput on a 135-atom system stopped growing), fewer where the measured memory of the
-        unions requires. More replicas
+        unions requires; unions that run out of CUDA memory as they start are released and started again at
+        half the size (a union of one replica that does: :class:`~fastmd.adapters.protocol.NegotiationError`).
+        More replicas
         run as several unions of balanced sizes that share one CUDA graph memory pool, one after another.
     capacity_headroom, triplet_headroom:
         The relative pair (triplet) headroom a capacity growth adds over the overflowing demand; default: the
-        model's (``CapacityStep.u_union_headroom``, ``t_union_headroom``), else ``UNION_GROWTH_HEADROOM`` and
-        ``UNION_TRIPLET_GROWTH_HEADROOM`` (triplets: a model with a line graph). A union's first capture holds
+        model's (``CapacityStep.u_union_headroom``, ``t_union_headroom``; MatRIS: GPU-resident MD's growth
+        fraction plus each replica's minimum padding relative to its own counts), else ``UNION_GROWTH_HEADROOM``
+        and ``UNION_TRIPLET_GROWTH_HEADROOM`` (triplets: a model with a line graph). A union's first capture holds
         the model's own capacity tiers; when the pair or triplet count outgrows its capacity, the window is
         rolled back, that capacity grows and the union is captured again.
     config:
-        :class:`~fastmd.config.InferenceConfig`: precision (IEEE FP32 unless TF32 is asked for), profile,
-        capacity warmup. Execution is whole-step (``"auto"`` or ``"whole_step"``).
+        :class:`~fastmd.config.InferenceConfig`: precision (IEEE FP32 unless TF32 is asked for; MatRIS's as in
+        GPU-resident MD), profile, capacity warmup (MatRIS: its capacity steps too). Execution is whole-step
+        (``"auto"`` or ``"whole_step"``).
     trajectory, logfile, loginterval:
         ``trajectory``: a file name with ``{replica}`` (e.g. ``"md_{replica:04d}.traj"``): one ASE trajectory
         per replica, a frame (positions, momenta, energy, forces) every ``loginterval`` steps and at the
@@ -403,17 +414,25 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
         if resolved.execution not in ("auto", "whole_step"):
             raise ValueError(f"ReplicaMolecularDynamics runs whole-step CUDA graphs: execution must be 'auto' or "
                              f"'whole_step', got {resolved.execution!r}")
+        if resolved.checkpoint_enabled is not False:  # as GPU-resident MD's entry points
+            warnings.warn("Activation checkpointing inside CUDA Graph capture is not validated. Use checkpoint='off' "
+                          "for the validated graph path; 'auto' is a row-count threshold, not a capture-safety policy. "
+                          "The requested setting is unchanged.", ConfigurationWarning, stacklevel=2)
         self._adapter = load_adapter(model, model_path=model_path, device=str(self.device), model_dtype=model_dtype,
+                                     enable_checkpoint=resolved.checkpoint_enabled,
                                      optimization_profile=resolved.optimization_profile)
         use_adapter(self, model)  # an adapter loaded by name is closed with its last user (also on a failure below)
-        if self._adapter is model or self._adapter.module is model:  # supplied, not loaded
-            self._adapter.module.to(self.device)
         self._trajectories = False  # whether the replicas' trajectory files exist (the first logged step makes them)
         self._log = None
         try:
+            if self._adapter is model or self._adapter.module is model:  # supplied, not loaded
+                self._adapter.module.to(self.device)
+                apply_checkpoint(self._adapter.module, resolved.checkpoint_enabled)
             self._setup(atoms, momenta, positions, resolved, temperature=temperature, taut=taut, tdamp=tdamp,
                         tchain=tchain, tloop=tloop, fix_com=fix_com, seed=seed, union_size=union_size,
                         self_check=self_check)
+            with self._config.scope():  # at the precision the model calls run with (another model's: IEEE FP32)
+                warn_implicit_tf32(self._config.matmul_precision, "ReplicaMolecularDynamics")
             self._trajectory_name = trajectory
             if logfile is not None:
                 self._log = open(logfile, "w")
@@ -431,23 +450,34 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
                union_size, self_check) -> None:
         adapter = self._adapter
         check_system_batching(adapter)  # before anything is negotiated or measured
-        if not negotiated(adapter):
-            raise NegotiationError(f"model {adapter.name!r} is planned by the runtime's own rules, not batched here")
-        plan = negotiate(adapter, replace(resolved, execution="whole_step"), entry="gpu_md", device=self.device)
+        whole_step = replace(resolved, execution="whole_step")
+        if negotiated(adapter):
+            plan = negotiate(adapter, whole_step, entry="gpu_md", device=self.device)
+        else:  # MatRIS: the runtime's own rules, recorded as GPU-resident MD records them
+            plan = dry_run(adapter, whole_step, entry="gpu_md", device=self.device, atoms=atoms)
         execution = plan.decision("execution")
         if execution.chosen != "whole_step":
             raise NegotiationError(f"ReplicaMolecularDynamics needs a whole-step CUDA graph for model "
                                    f"{adapter.name!r}: {execution.reason}")
-        # The plan's precision applies to every model call from here on (IEEE FP32 unless TF32 is asked for).
-        self._config = replace(resolved, execution="whole_step", matmul_precision=plan.matmul_precision)
+        # The plan's precision applies to every model call from here on (IEEE FP32 unless TF32 is asked for;
+        # MatRIS's configuration as it is).
+        self._config = (replace(whole_step, matmul_precision=plan.matmul_precision) if negotiated(adapter)
+                        else whole_step)
+        # As GPU-resident MD: eval mode and frozen weights (forces are derivatives in the coordinates; MatRIS's
+        # inference kernels need weights without gradients), and the baseline of MatRIS's memory decisions.
+        module = adapter.module
+        module.eval()
+        saved_recompute.check_model(module, saved_recompute.explicit_mode(resolved.saved_tensor_recompute))
+        saved_recompute.note_entry_point(module)
+        for parameter in module.parameters():
+            parameter.requires_grad_(False)
         topology = adapter.topology_spec()
-        self._float64 = topology.model_dtype == "float64"
+        # float64 state: a float64 model the engine differentiates (MatRIS evaluates float32 graphs)
+        self._float64 = engine_derivative(adapter) is not None and topology.model_dtype == "float64"
         if self._float64 and self.ensemble != "nvt_nhc":
             raise ValueError("ReplicaMolecularDynamics: a float64 model needs ensemble='nvt_nhc' (the integrator with "
                              "a float64 state); nve and nvt keep a float32 state")
         self.candidate_skin = float(self._config.capacity.candidate_skin)
-        self._capacity_step = adapter.capacity_step() if callable(getattr(adapter, "capacity_step", None)) else None
-        self.capacity_headroom, self.triplet_headroom = union_headrooms(self._capacity_step, *self._headrooms)
         self._line_graph = topology.triplet_cutoff is not None  # the union's line graph: triplet capacities too
         n, N = self.n_atoms, self.replicas
         self.atoms_template = atoms.copy()
@@ -468,7 +498,12 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
         system = torch.as_tensor(atoms.get_positions(), dtype=torch.float32, device=self.device)
         geometry = dict(cell=self.cell, atomic_numbers=self.numbers, pbc=self.pbc, candidate_skin=self.candidate_skin,
                         device=self.device)
-        with self._config.scope():
+        # The model's capacity step; MatRIS's from the configuration and this system (another model declares its own).
+        self._capacity_step = (adapter.capacity_step() if callable(getattr(adapter, "capacity_step", None))
+                               else None if negotiated(adapter) else self._matris_capacity_step(system, geometry))
+        self.capacity_headroom, self.triplet_headroom = union_headrooms(self._capacity_step, *self._headrooms)
+        # The checks and memory probes in the runner's fusion scope (MatRIS's fused kernels; generic: none).
+        with self._config.scope(), fusion_scope(self._config.optimization_profile != "generic"):
             if self_check:
                 floor, energy_floor = (1e-10, 1e-12) if self._float64 else (1e-5, 1e-6)
                 plan = batch_systems(plan, adapter, systems=N, self_check=lambda: union_self_check(
@@ -489,22 +524,65 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
             union_size, plan = size_unions(plan, requested=union_size, memory=memory, union_edges=union_edges,
                                            device=self.device, replicas=N, persistent_per_replica=persistent,
                                            union_triplets=union_triplets if self._line_graph else None)
-            count = -(-N // union_size)
-            bounds = np.cumsum([0] + [N // count + (1 if k < N % count else 0) for k in range(count)])
-            self._unions = [_Union(start, stop) for start, stop in zip(bounds[:-1], bounds[1:])]
+            self._kinds = dict(ensemble=self.ensemble, temperature=float(temperature), taut=float(taut),
+                               tdamp=float(100.0 * self.timestep if tdamp is None else tdamp), tchain=int(tchain),
+                               tloop=int(tloop), fix_com=default_fix_com(self.ensemble) if fix_com is None
+                               else bool(fix_com))
+            while True:  # unions that run out of CUDA memory as they start: half the size, down to one replica
+                count = -(-N // union_size)
+                bounds = np.cumsum([0] + [N // count + (1 if k < N % count else 0) for k in range(count)])
+                self._unions = [_Union(start, stop) for start, stop in zip(bounds[:-1], bounds[1:])]
+                # One CUDA graph memory pool for every union's captures: they replay one after another.
+                self._graph_pool = torch.cuda.graph_pool_handle()
+                try:
+                    for union in self._unions:
+                        self._start_union(union, positions[union.start:union.stop], momenta[union.start:union.stop])
+                    break
+                except torch.OutOfMemoryError as error:
+                    why = str(error).split("\n", 1)[0][:160]
+                # The measured memory model bounds one union's capture and leaves unions too small to measure
+                # unbounded, while a union starts with its eager evaluation outside the pool that holds the
+                # unions before it. Release them, outside the except block (its traceback would pin the failed
+                # union's buffers). The loop variable also owns the failed union's integrator and any runner
+                # assigned before the failure; drop it before collecting the old pool.
+                del union
+                self._unions, self._graph_pool, self._pool_keeper = [], None, None
+                gc.collect()
+                torch.cuda.empty_cache()
+                if union_size == 1:
+                    raise NegotiationError(f"{N} replicas do not fit: a union of one replica ran out of CUDA memory "
+                                           f"as it started ({why})")
+                halved = max(1, union_size // 2)
+                plan.decisions = [replace(decision, chosen=str(halved), reason=(
+                    f"{decision.reason}; unions of {union_size} ran out of CUDA memory as they started ({why}): "
+                    f"{halved} per union"), evidence={**decision.evidence, "out_of_memory_at_start": [
+                        *decision.evidence.get("out_of_memory_at_start", []), union_size]})
+                                  if decision.id == "union_size" else decision for decision in plan.decisions]
+                union_size = halved
             # The decision records the balanced partition the replicas run in.
             plan.decisions = [replace(decision, evidence={**decision.evidence, "unions": [u.replicas for u in
                                                                                         self._unions]})
                               if decision.id == "union_size" else decision for decision in plan.decisions]
             self._plan = plan
-            # One CUDA graph memory pool for every union's captures: they replay one after another.
-            self._graph_pool = torch.cuda.graph_pool_handle()
-            self._kinds = dict(ensemble=self.ensemble, temperature=float(temperature), taut=float(taut),
-                               tdamp=float(100.0 * self.timestep if tdamp is None else tdamp), tchain=int(tchain),
-                               tloop=int(tloop), fix_com=default_fix_com(self.ensemble) if fix_com is None
-                               else bool(fix_com))
-            for union in self._unions:
-                self._start_union(union, positions[union.start:union.stop], momenta[union.start:union.stop])
+
+    def _matris_capacity_step(self, system, geometry: dict) -> CapacityStep:
+        """MatRIS's capacity tiers in a union: the configuration's pair and triplet steps and padding, and a
+        headroom (its first capture's and each growth's) of CapturePolicy's growth fraction (GPU-resident MD's
+        whole-step growth) plus the minimum padding of all replicas but one relative to their counts in
+        ``system`` (the union's own minimum padding is the last one's; at most the whole demand): a union pads as
+        its replicas would alone. A small system's counts drift by more than a large one's, and MatRIS's padded
+        rows run its networks (the padded triplets the whole line-graph network, on the padded pairs): 16
+        replicas of 1,344 RDX atoms hold about 1.2 % more pairs than they need, 16 of 135 CsSnI3 atoms about a
+        fifth."""
+        from fastmd.engine.capacity_policy import CapturePolicy
+        capacity = self._config.capacity
+        growth = CapturePolicy.from_config(capacity).growth_headroom
+        pairs, triplets = union_demand(self._adapter, system, replicas=1, **geometry)
+        share = 1.0 - 1.0 / self.replicas  # of one replica's padding, per replica
+        return CapacityStep(u_step=capacity.u_step, min_pad_u=capacity.min_pad_u, t_step=capacity.t_step,
+                            min_pad_t=capacity.min_pad_t,
+                            u_union_headroom=min(1.0, growth + share * capacity.min_pad_u / max(pairs, 1)),
+                            t_union_headroom=min(1.0, growth + share * capacity.min_pad_t / max(triplets, 1)))
 
     def _union_memory(self, adapter, system, union_size: int, geometry: dict):
         """The measured memory model of unions of this system up to ``union_size`` replicas (peak reserved
@@ -554,7 +632,13 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
         pairs, triplets = union_demand(self._adapter, state[0], replicas=k, cell=self.cell,
                                        atomic_numbers=self.numbers, pbc=self.pbc, candidate_skin=self.candidate_skin,
                                        device=self.device)
-        union.u_capacity = union_capacity(pairs, self._capacity_step, line_graph=self._line_graph)  # the model's tiers
+        # The model's tiers; MatRIS's union also holds its replicas' pair padding from the start (as each would
+        # alone): its padded triplets sit on its padded pairs, and one replica's pair padding piles them onto a few
+        # pairs, whose rows its segment kernels loop over one by one (464 triplets a pair against 42 alone, four
+        # MatRIS-10M-OAM replicas of 135 atoms). Its triplets keep the tiers: each padded triplet runs the
+        # line-graph network.
+        first = 0.0 if negotiated(self._adapter) else self.capacity_headroom
+        union.u_capacity = union_capacity(pairs, self._capacity_step, headroom=first, line_graph=self._line_graph)
         union.t_capacity = (union_triplet_capacity(triplets, self._capacity_step, replicas=k) if self._line_graph
                             else 0)
         self._capture(union, *state, forces=None)
@@ -567,7 +651,8 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
         self._keep_graph_pool_alive()
         builder = union_builder(self._adapter, replicas=union.replicas, cell=self.cell, atomic_numbers=self.numbers,
                                 pbc=self.pbc, u_capacity=union.u_capacity, t_capacity=union.t_capacity,
-                                candidate_skin=self.candidate_skin, device=self.device)
+                                candidate_skin=self.candidate_skin, device=self.device,
+                                n_dummy=self._config.capacity.n_dummy)
         union.runner = ReplicaWholeStepRunner(
             model=self._adapter, builder=builder, integrator=union.integrator, positions=positions, momenta=momenta,
             forces=forces, steps_per_launch=self.steps_per_launch, warmup=self._config.capacity.warmup,

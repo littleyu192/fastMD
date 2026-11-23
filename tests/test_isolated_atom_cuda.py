@@ -8,8 +8,10 @@ from unittest.mock import patch
 import torch
 from ase import Atoms
 
+from fastmd.adapters import as_adapter
 from fastmd.execution.cuda_graph import BucketedGraphRunner
 from fastmd.execution.gpu_integrator import GPUIntegrator
+from fastmd.execution.replica_batch import ReplicaVelocityVerlet, ReplicaWholeStepRunner, union_builder
 from fastmd.interfaces.gpu_md import GPUResidentMolecularDynamics
 from fastmd.config import InferenceConfig
 from fastmd.execution.whole_step_cuda_graph import (
@@ -59,6 +61,25 @@ def make_integrator() -> GPUIntegrator:
     # A zero timestep lets topology change independently of the MD state update.
     return GPUIntegrator(
         torch.ones(3, device="cuda"), dt_fs=0.0, ensemble="nve", fix_com=False
+    )
+
+
+def make_union_runner(model, positions: torch.Tensor, **kwargs) -> ReplicaWholeStepRunner:
+    """The union runner over replicas of the 3-atom system (``positions``: ``(N * 3, 3)``), each replica with
+    make_builder's capacities and candidate skin, at a zero timestep (NVE)."""
+    replicas = positions.shape[0] // 3
+    builder = union_builder(
+        as_adapter(model), replicas=replicas, cell=torch.eye(3, device="cuda") * 20,
+        atomic_numbers=torch.ones(3, dtype=torch.int32, device="cuda"),
+        pbc=torch.ones(3, dtype=torch.bool, device="cuda"), u_capacity=8 * replicas, t_capacity=32 * replicas,
+        candidate_skin=1.0, device="cuda",
+    )
+    integrator = ReplicaVelocityVerlet(
+        torch.ones(3, device="cuda"), 0.0, replicas=replicas, ensemble="nve", fix_com=False
+    )
+    return ReplicaWholeStepRunner(
+        model=model, builder=builder, integrator=integrator, positions=positions,
+        momenta=torch.zeros_like(positions), warmup=1, **kwargs,
     )
 
 
@@ -297,6 +318,44 @@ class IsolatedAtomCudaTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"non-finite MD state .*\(replica 1\)"):
             runner.replay(strict=True)
 
+    def test_union_whole_step_masks_and_stale_recovery(self) -> None:
+        # Replicas in one union (ReplicaMolecularDynamics's runner), each with its own isolation state: a
+        # replica without a real triplet skips the line-graph layers alone, as a system alone does.
+        positions = torch.cat(
+            [positions_of(make_atoms("partial")), positions_of(make_atoms("isolated"))]
+        )
+        runner = make_union_runner(self.model, positions)
+        captured_graph = runner.graph
+        for states in (
+            ("partial", "isolated"),
+            ("isolated", "connected"),
+            ("connected", "partial"),
+        ):
+            with self.subTest(states=states):
+                atoms = [make_atoms(state) for state in states]
+                runner.positions.copy_(
+                    torch.cat([positions_of(item) for item in atoms])
+                )
+                # Leave candidates stale after the first window to exercise
+                # the union's rollback/refilter path as isolation changes.
+                output = runner.replay(strict=True)
+                for replica, item in enumerate(atoms):
+                    expected = self.eager(item, task="ef")
+                    torch.testing.assert_close(
+                        output.potential_energy[replica],
+                        (expected["e"][0] * 3).double(),
+                        rtol=2e-4,
+                        atol=2e-5,
+                    )
+                    torch.testing.assert_close(
+                        output.forces.view(2, 3, 3)[replica], expected["f"][0], rtol=2e-4, atol=2e-5
+                    )
+                self.assertIs(runner.graph, captured_graph)
+        self.assertGreater(runner.fallback_windows, 0)
+        runner.positions[5, 1] = float("nan")
+        with self.assertRaisesRegex(ValueError, r"non-finite MD state in 1 replica\(s\) \[1\]"):
+            runner.replay(strict=True)
+
     def test_reference_free_gpu_md_remains_strict(self) -> None:
         for graph_mode in ("eager", "g1", "g2"):
             with self.subTest(graph_mode=graph_mode):
@@ -355,20 +414,23 @@ class IsolatedAtomCudaTest(unittest.TestCase):
         # Strict means validate_isolated_atoms=True or a reference-free model.
         # Isolation present at construction, or appearing after it with
         # refreshed or stale candidates (the stale-candidate recovery replay),
-        # must raise in single and batched runners.
+        # must raise in single, batched and union runners.
         reference_free = make_model(reference_energy=None).cuda()
         isolated = positions_of(make_atoms("isolated"))
         for has_reference in (True, False):
             model = self.model if has_reference else reference_free
             kwargs = {"validate_isolated_atoms": True} if has_reference else {}
-            for batched in (False, True):
+            for batched in (False, True, "union"):
                 for moment in ("construction", "refreshed", "stale"):
                     with self.subTest(
                         has_reference=has_reference, batched=batched, moment=moment
                     ):
                         start = "isolated" if moment == "construction" else "connected"
                         positions = positions_of(make_atoms(start))
-                        if batched:
+                        if batched == "union":
+                            positions = positions.repeat(2, 1)
+                            make_runner = lambda: make_union_runner(model, positions, **kwargs)
+                        elif batched:
                             positions = positions.unsqueeze(0).repeat(2, 1, 1)
                             make_runner = lambda: BatchedWholeStepGraphRunner(
                                 model=model,
@@ -398,7 +460,9 @@ class IsolatedAtomCudaTest(unittest.TestCase):
                         # Only the last replica of a batch becomes isolated.
                         replicas = runner.positions.reshape(-1, 3, 3)
                         replicas[-1].copy_(isolated)
-                        if moment == "refreshed":
+                        if moment == "refreshed" and batched == "union":
+                            runner.builder.refresh_candidates(runner.positions)
+                        elif moment == "refreshed":
                             builders = runner.builders if batched else [runner.builder]
                             for builder, replica in zip(builders, replicas):
                                 builder.refresh_candidates(replica)

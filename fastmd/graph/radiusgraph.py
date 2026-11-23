@@ -15,6 +15,11 @@ from .topology_contract import BuilderEvidence
 datatype = torch.float32
 
 class RadiusGraph:
+    # The systems of a graph that holds several as one disjoint union (``fastmd.adapters.protocol.SystemSegments``:
+    # replicas in one whole-step graph), which MatRIS's adapter sets on its view of a union builder's batch; None:
+    # one system.
+    systems = None
+
     def __init__(
         self,
         graph_id: str | None,

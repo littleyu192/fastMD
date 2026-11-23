@@ -101,6 +101,7 @@ class RelaxationLifetimeTest(unittest.TestCase):
                 engine.device, engine._graph_pool = 'cuda', (1, 2)
                 engine._adapter = engine.cell = engine.numbers = engine.pbc = None
                 engine._admit_cells, engine.candidate_skin = False, 1.0
+                engine._config = SimpleNamespace(capacity=CapacityConfig())  # the replica builder's sink rows
                 union = SimpleNamespace(replicas=1, layout=None, cells=None, numbers=None, atoms=[1],
                                         u_capacity=1, t_capacity=0,
                                         integrator=SimpleNamespace(cell_filter=False))

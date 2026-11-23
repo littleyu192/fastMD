@@ -36,12 +36,15 @@ from fastmd.interfaces import multi_system_relax
 from fastmd.interfaces.multi_system_relax import MultiSystemRelaxation
 from fastmd.interfaces.replica_md import ReplicaMolecularDynamics
 from fastmd.execution.gpu_nhc import maxwell_boltzmann_momenta
-from fastmd.execution.replica_batch import ReplicaHealthError
+from fastmd.execution.replica_batch import (ReplicaHealthError, graph_builder_options, union_builder,
+                                            union_capacity, union_demand, union_triplet_capacity)
 from fastmd.execution.whole_step_cuda_graph import FixedCapacityOverflow
 from fastmd.config import CapacityConfig, ConfigurationWarning, InferenceConfig, resolve_config
 from fastmd.engine import capacity_policy
 from fastmd.engine import memory_admission
-from fastmd.graph import atoms_to_graph_gpu
+from fastmd.adapters import load_adapter
+from fastmd.graph import FixedCapacityGraphBuilder, RadiusGraph, atoms_to_graph_gpu
+from fastmd.models.matris.model import MatRIS
 from fastmd.graph.fixed_capacity_builder import _fixed_builder_available
 from fastmd.graph.gpu_graph_builder import TensorGraphBuilder, op_available
 
@@ -1214,8 +1217,136 @@ class ReplicaMolecularDynamicsCudaTest(unittest.TestCase):
                                                            err_msg=f"replica {replica}: conserved energy")
                         self.assert_same_state([value[replica] for value in ours], theirs, f"replica {replica}")
 
+    @staticmethod
+    def matris(dtype: torch.dtype = torch.float32) -> MatRIS:
+        """A small MatRIS (random weights, 5 A and 3 A cutoffs, per-atom reference energies) for the crystal."""
+        torch.manual_seed(0)
+        model = MatRIS(num_layers=2, node_feat_dim=16, edge_feat_dim=16, three_body_feat_dim=16,
+                       mlp_hidden_dims=(16,), num_radial=4, num_angular=4, max_n=2, max_l=2, pairwise_cutoff=5.0,
+                       three_body_cutoff=3.0, reference_energy="demo", enable_compile=False, enable_checkpoint=False)
+        return model.to(device="cuda", dtype=dtype).eval().requires_grad_(False)
+
+    def test_matris_replicas_match_single_system_md(self):
+        """MatRIS on the union: it differentiates its own energy, and its evaluate of the union's graph gives
+        one energy per replica. Four replicas, nvt_nhc (each kernel profile), Berendsen nvt and nve: after 40
+        steps each replica's positions (within TOLERANCE A) and momenta (TOLERANCE of the largest) equal
+        single-system GPU-resident MD of that replica (whole_step), its potential energy within 5e-6 relative
+        and its forces within 1e-2 of the largest force: the union sums in other shapes than one system, so not
+        bit for bit, and this small random MatRIS's forces cancel to a small part of their terms (measured:
+        union vs single up to 3.8e-6 A, 3.1e-6 of the momenta, 1.2e-6 of the energy and 5.4e-3 of the forces; one
+        system against itself without deterministic scatters up to 2.9e-6 A, 2.1e-6 and 5.2e-3 of the forces). The
+        plan is MatRIS's recorded plan with the union of four after the self-check passed. Every model
+        forward uses explicitly requested IEEE cuBLAS and Triton dots, independent of process defaults."""
+        from fastmd import precision
+        atoms = self.crystal()
+        positions, momenta = self.start(atoms, 4)
+        model = self.matris()
+        observed_precision = set()
+
+        def record_precision(module, args):
+            observed_precision.add((precision.fp32_gemm_mode(), precision.triton_dot_precision()))
+
+        hook = model.register_forward_pre_hook(record_precision)
+        self.addCleanup(hook.remove)
+        cases = [("nvt_nhc", profile) for profile in ("topology", "legacy", "generic")]
+        cases += [("nvt", "topology"), ("nve", "topology")]
+        with deterministic_algorithms():
+            for ensemble, profile in cases:
+                with self.subTest(ensemble=ensemble, profile=profile):
+                    # Generic uses torch scatter_reduce(sum), whose deterministic CUDA implementation cannot
+                    # be captured on PyTorch 2.8 (also for single-system MD). Exercise its ordinary scatter
+                    # path without relaxing the trajectory tolerances; the outer context restores the flags.
+                    torch.use_deterministic_algorithms(profile != "generic", warn_only=True)
+                    config = dataclasses.replace(self.config(), optimization_profile=profile,
+                                                 matmul_precision="highest", triton_dot_precision="ieee")
+                    with self.replica_md(model, atoms, positions, momenta, ensemble, self_check=True,
+                                         config=config) as md:
+                        md.run(self.STEPS)
+                        ours, stats, plan = self.state(md), md.stats(), md.plan_record()
+                    self.assertGreater(stats["launches"], 0)
+                    self.assertEqual(stats["unions"], [4])
+                    self.assertEqual(plan.model, "matris")
+                    batching = plan.decision("system_batching")
+                    self.assertEqual(batching.chosen, "union")
+                    self.assertTrue(batching.evidence["self_check"]["passed"])
+                    for replica in range(4):
+                        probe = atoms.copy()
+                        probe.positions = positions[replica]
+                        probe.set_momenta(momenta[replica])
+                        with GPUResidentMolecularDynamics(probe, model=model, ensemble=ensemble, temperature=900.0,
+                                                          timestep=2.0, tdamp=40.0, taut=40.0, config=config,
+                                                          steps_per_launch=self.WINDOW) as single:
+                            single.run(self.STEPS)
+                            final = single.snapshot_atoms()
+                            theirs = (final.positions, final.get_momenta(), single.state.forces.cpu().numpy(),
+                                      float(single.state.potential_energy.reshape(-1)[0]))
+                        what = f"{profile} {ensemble} replica {replica}"
+                        for name, value, expected, tolerance in zip(
+                                ("positions", "momenta", "forces"), ours, theirs, (self.TOLERANCE, self.TOLERANCE,
+                                                                                   1e-2)):
+                            scale = 1.0 if name == "positions" else float(np.abs(expected).max())
+                            np.testing.assert_allclose(value[replica], expected, rtol=0, atol=tolerance * scale,
+                                                       err_msg=f"{what}: {name}")
+                        np.testing.assert_allclose(ours[3][replica], theirs[3], rtol=5e-6, atol=0,
+                                                   err_msg=f"{what}: energy")
+        self.assertEqual(observed_precision, {("ieee", "ieee")})
+
+    def test_matris_union_is_the_single_system_function_in_float64(self):
+        """MatRIS in float64 (generic profile): three differently moved replicas evaluated as one union give
+        each replica's energy and forces of the replica alone to float64 rounding (forces within 1e-10 eV/A,
+        energies within 1e-10 eV/atom): the union computes the same function, its float32 differences are
+        rounding."""
+        atoms = self.crystal()
+        positions, _ = self.start(atoms, 3)
+        model = self.matris(torch.float64)
+        adapter = load_adapter(model)
+        n = len(atoms)
+        device = torch.device("cuda")
+        cell = torch.as_tensor(atoms.cell.array, dtype=torch.float64, device=device)
+        geometry = dict(cell=cell, atomic_numbers=torch.as_tensor(atoms.numbers, dtype=torch.int32, device=device),
+                        pbc=torch.ones(3, dtype=torch.bool, device=device), candidate_skin=1.0, device=device)
+        coordinates = torch.as_tensor(positions.reshape(-1, 3), dtype=torch.float32, device=device)
+
+        def float64(graph):  # the builder's graph with float64 fractional coordinates and cell
+            exact = RadiusGraph(graph_id=None, mp_id=None, composition=graph.composition,
+                                atomic_number=graph.atomic_number, atom_frac_coord=graph.atom_frac_coord.double(),
+                                lattice=cell, neighbor_image=graph.neighbor_image, atom_graph=graph.atom_graph,
+                                atom_graph_cutoff=graph.atom_graph_cutoff, line_graph=graph.line_graph,
+                                line_graph_cutoff=graph.line_graph_cutoff,
+                                directed2undirected=graph.directed2undirected,
+                                undirected2directed=graph.undirected2directed, atom_target_sorted=True,
+                                line_atom_sorted=True, topology_evidence=graph.topology_evidence)
+            exact.systems = graph.systems
+            return exact
+
+        def evaluate(replicas, rows):
+            pairs, triplets = union_demand(adapter, rows, replicas=replicas, **geometry)
+            u_capacity = union_capacity(pairs, line_graph=True)
+            t_capacity = union_triplet_capacity(triplets, replicas=replicas)
+            if replicas > 1:
+                builder = union_builder(adapter, replicas=replicas, u_capacity=u_capacity, t_capacity=t_capacity,
+                                        **geometry)
+            else:  # alone: the single-system builder (a batch without systems)
+                builder = FixedCapacityGraphBuilder(
+                    cell=cell, atomic_numbers=geometry["atomic_numbers"], pbc=geometry["pbc"], u_capacity=u_capacity,
+                    atom_graph_cutoff=5.0, candidate_cutoff=6.0, device=device, padding=adapter.padding_rule(),
+                    prepare=adapter.prepare, **graph_builder_options(adapter, t_capacity))
+            builder.refresh_candidates(rows)
+            graph, _ = builder.build(rows, rebuild_candidates=False)
+            out = model([float64(graph)], task="ef", is_training=False, n_real=replicas * n)
+            return out["e"].reshape(-1) * n, out["f"][0][:replicas * n].reshape(replicas, n, 3)
+
+        with resolve_config(InferenceConfig(optimization_profile="generic", report=False)).scope():
+            energies, forces = evaluate(3, coordinates)
+            for replica in range(3):
+                alone = evaluate(1, coordinates[replica * n:(replica + 1) * n])
+                self.assertEqual(forces.dtype, torch.float64)
+                self.assertLess(float((forces[replica] - alone[1][0]).abs().max()), 1e-10)
+                self.assertLess(abs(float(energies[replica] - alone[0][0])) / n, 1e-10)
+
     def test_replica_md_rejects_models_and_arguments(self):
-        """NegotiationError for a model that differentiates its own energy (PairPotentialAdapter), one that does
+        """NegotiationError for a model that differentiates its own energy without declaring "union"
+        (PairPotentialAdapter; a MatRIS whose reference-energy table is not per atom), one that does
         not declare its systems' batching (per-atom or whole-system tap, with or without a line graph) or declares
         an unknown one, a whole-system tap that declares "union" (one energy for the whole union), or "segments"
         but returns one energy for the whole batch, sink-atom padding, a line graph padded otherwise than with far
@@ -1233,7 +1364,9 @@ class ReplicaMolecularDynamicsCudaTest(unittest.TestCase):
         sinks, exact_loops = UnionPairAdapter(module), UnionPairAdapter(module, triplet_cutoff=3.3, angle=0.5)
         sinks.padding_rule = lambda: PaddingRule("sink_atoms")
         exact_loops.padding_rule = lambda: PaddingRule("exact_rc_loops")
+        extensive = load_adapter(make_model(is_intensive=False, reference_energy="mptrj").cuda())  # its table's flag differs
         for model, keyword in ((PairPotentialAdapter(module), "differentiates its own energy"),
+                               (extensive, "differentiates its own energy and does not declare 'union'"),
                                (SystemTapPairAdapter(module), "does not declare"),
                                (SystemTapPairAdapter(module, declare="union"), "whole-system energy tap"),
                                (SystemTapPairAdapter(module, declare="segments", segments=False),
@@ -1321,22 +1454,177 @@ class ReplicaMolecularDynamicsCudaTest(unittest.TestCase):
     def test_replica_md_unions_share_one_graph_pool(self):
         """Five replicas in unions of at most two (sizes 2, 2 and 1, captured into one graph pool and replayed
         one after another) equal one union of five, replica by replica (state, energies and health in the
-        replicas' order)."""
+        replicas' order). Unions that run out of CUDA memory as they start are released and started again at
+        half the size (five: the same unions of 2, 2 and 1, the same trajectory); at one replica the
+        constructor raises NegotiationError."""
+        import fastmd.interfaces.replica_md as replica_md
         atoms = self.crystal()
         positions, momenta = self.start(atoms, 5)
         adapter = self.adapter()
+        runner = replica_md.ReplicaWholeStepRunner
+
+        def out_of_memory_above(replicas: int):
+            def start(*args, **kwargs):
+                if kwargs["builder"].replicas > replicas:
+                    raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB")
+                return runner(*args, **kwargs)
+            return mock.patch.object(replica_md, "ReplicaWholeStepRunner", start)
+
         runs = {}
         with deterministic_algorithms():
-            for union_size in (None, 2):
-                with self.replica_md(adapter, atoms, positions, momenta, union_size=union_size) as md:
+            for union_size, limit in ((None, None), (2, None), (None, 2)):
+                with (nullcontext() if limit is None else out_of_memory_above(limit)), self.replica_md(
+                        adapter, atoms, positions, momenta, union_size=union_size) as md:
                     md.run(self.STEPS)
-                    runs[union_size] = self.state(md), md.stats(), md.health(), md.plan_record()
-        (reference, one, _, _), (split, stats, health, plan) = runs[None], runs[2]
+                    runs[union_size, limit] = self.state(md), md.stats(), md.health(), md.plan_record()
+            with out_of_memory_above(0), self.assertRaisesRegex(
+                    NegotiationError, r"5 replicas do not fit: a union of one replica ran out of CUDA memory"):
+                self.replica_md(adapter, atoms, positions, momenta)
+        (reference, one, _, _), (split, stats, health, plan) = runs[None, None], runs[2, None]
         self.assertEqual((one["unions"], stats["unions"]), ([5], [2, 2, 1]))
         self.assertEqual(plan.decision("union_size").chosen, "2")
         self.assertGreater(stats["launches"], 0)
         np.testing.assert_array_equal(health, [True] * 5)
         self.assert_same_state(split, reference, "unions of at most two")
+        retried, retried_stats, retried_health, retried_plan = runs[None, 2]
+        decision = retried_plan.decision("union_size")
+        self.assertEqual((retried_stats["unions"], decision.chosen), ([2, 2, 1], "2"))
+        self.assertEqual(decision.evidence["out_of_memory_at_start"], [5])
+        self.assertIn("unions of 5 ran out of CUDA memory as they started", decision.reason)
+        np.testing.assert_array_equal(retried_health, [True] * 5)
+        for name, ours, theirs in zip(("positions", "momenta", "forces", "energy"), retried, split):
+            np.testing.assert_array_equal(ours, theirs, err_msg=f"started again at half the size: {name}")
+
+    def test_replica_md_start_up_halving_releases_a_captured_union(self):
+        """Four replicas in unions of two: the first union captures into the shared pool, the second runs out
+        of CUDA memory as it starts. The attempt is released (its captured runner and its pool keeper are
+        collected before the next union starts, including the failed union's integrator) and started again
+        as four unions of one, the decision
+        recording the failed size, the trajectory equal to unions of one bit for bit. Where a union of one
+        runs out too (the third, after two captured), the constructor raises NegotiationError with every
+        runner and keeper of the attempt already collected."""
+        import weakref
+        import fastmd.interfaces.replica_md as replica_md
+        atoms = self.crystal()
+        positions, momenta = self.start(atoms, 4)
+        adapter = self.adapter()
+        runner = replica_md.ReplicaWholeStepRunner
+        start_union = replica_md.ReplicaMolecularDynamics._start_union
+        keep = replica_md._UnionMolecularDynamics._keep_graph_pool_alive
+
+        def build(union_size, fail=None, *, after_capture=False):
+            """Inject OOM before the runner, or after it was assigned to the union; retain only weak refs."""
+            resources = {name: [] for name in ("union", "integrator", "builder", "runner", "keeper")}
+            pending, calls, retries = [], [0], [0]
+
+            def assert_released(refs, when):
+                for name, reference in refs:
+                    self.assertIsNone(reference(), f"{name} retained {when}")
+
+            def start_member(md, union, *args, **kwargs):
+                if pending:
+                    assert_released(pending, "before the retry allocates another integrator")
+                    pending.clear()
+                    retries[0] += 1
+                calls[0] += 1
+                resources["union"].append(weakref.ref(union))
+                try:
+                    start_union(md, union, *args, **kwargs)
+                    if after_capture and fail(union.replicas, calls[0]):
+                        # The failed union now owns a fully captured runner too.
+                        raise torch.OutOfMemoryError()
+                except torch.OutOfMemoryError:
+                    pending.extend((name, ref) for name, refs in resources.items() for ref in refs)
+                    raise
+
+            def start(*args, **kwargs):
+                for name in ("builder", "integrator"):
+                    resources[name].append(weakref.ref(kwargs[name]))
+                if fail is not None and not after_capture and fail(kwargs["builder"].replicas, calls[0]):
+                    raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 1.00 GiB")
+                made = runner(*args, **kwargs)
+                resources["runner"].append(weakref.ref(made))
+                return made
+
+            def keeper(md):
+                keep(md)
+                resources["keeper"].append(weakref.ref(md._pool_keeper[1]))
+
+            with mock.patch.object(replica_md, "ReplicaWholeStepRunner", start), \
+                    mock.patch.object(replica_md.ReplicaMolecularDynamics, "_start_union", start_member), \
+                    mock.patch.object(replica_md._UnionMolecularDynamics, "_keep_graph_pool_alive", keeper):
+                try:
+                    md = self.replica_md(adapter, atoms, positions, momenta, union_size=union_size)
+                except NegotiationError as error:
+                    assert_released(pending, "before the terminal error")
+                    return error, resources, retries[0]
+                return md, resources, retries[0]
+
+        with deterministic_algorithms():
+            with build(1)[0] as md:
+                md.run(self.STEPS)
+                reference = self.state(md)
+            md, resources, retries = build(2, fail=lambda replicas, call: replicas == 2 and call == 2)
+            with md:
+                self.assertEqual(retries, 1)
+                self.assertEqual(md.stats()["unions"], [1, 1, 1, 1])
+                decision = md.plan_record().decision("union_size")
+                self.assertEqual((decision.chosen, decision.evidence["out_of_memory_at_start"]), ("1", [2]))
+                self.assertIn("unions of 2 ran out of CUDA memory as they started", decision.reason)
+                md.run(self.STEPS)
+                for name, ours, theirs in zip(("positions", "momenta", "forces", "energy"), self.state(md),
+                                              reference):
+                    np.testing.assert_array_equal(ours, theirs, err_msg=f"started again at one replica: {name}")
+            error, resources, retries = build(2, fail=lambda replicas, call: replicas == 2 or call == 4)
+            self.assertIsInstance(error, NegotiationError)
+            self.assertIn("4 replicas do not fit: a union of one replica ran out of CUDA memory", str(error))
+            self.assertEqual(retries, 1)
+            self.assertEqual(len(resources["runner"]), 2)  # two singles captured before the third ran out
+            self.assertTrue(all(ref() is None for refs in resources.values() for ref in refs))
+            # OOM after assignment must also release the failed union's own captured runner. An empty
+            # CUDA OOM message remains a valid OOM and must not break diagnostic formatting.
+            md, resources, retries = build(2, fail=lambda replicas, call: replicas == 2 and call == 2,
+                                           after_capture=True)
+            with md:
+                self.assertEqual(retries, 1)
+                self.assertEqual(md.stats()["unions"], [1, 1, 1, 1])
+                self.assertIsNone(resources["runner"][1](), "failed union's assigned runner")
+
+    def test_replica_md_warns_of_checkpointing_and_implicit_tf32(self):
+        """As GPU-resident MD: activation checkpointing asked for warns that capture is not validated (the pair
+        potential then refuses it), and float32 GEMMs that run in TF32 without a requested precision warn once,
+        naming the entry point; with checkpoint off, IEEE GEMMs or TF32 asked for ('high') neither warns."""
+        import warnings
+        from fastmd import precision
+        atoms = self.crystal()
+        positions, momenta = self.start(atoms, 2)
+        adapter = self.adapter()
+
+        def caught(mode, **options):
+            config = dataclasses.replace(self.config(), **options)
+            with mock.patch.object(precision, "_WARNED", set()), \
+                    mock.patch.object(precision, "fp32_gemm_mode", return_value=mode), \
+                    warnings.catch_warnings(record=True) as record:
+                warnings.simplefilter("always")
+                if options.get("checkpoint") == "on":
+                    with self.assertRaisesRegex(ValueError, "activation checkpointing applies to MatRIS models only"):
+                        self.replica_md(adapter, atoms, positions, momenta, config=config)
+                else:
+                    # Repeated construction must still emit the implicit-TF32 warning only once.
+                    for _ in range(2):
+                        with self.replica_md(adapter, atoms, positions, momenta, config=config):
+                            pass
+            return [str(item.message) for item in record if issubclass(item.category, ConfigurationWarning)]
+
+        for mode, options in (("ieee", {}), ("tf32", {"matmul_precision": "high"})):
+            with self.subTest(mode=mode, **options):
+                self.assertEqual(caught(mode, **options), [])
+        messages = caught("tf32")
+        self.assertEqual(len(messages), 1, messages)
+        self.assertIn("ReplicaMolecularDynamics: float32 GEMMs run in TF32", messages[0])
+        messages = caught("ieee", checkpoint="on")
+        self.assertTrue(any("Activation checkpointing inside CUDA Graph capture is not validated" in message
+                            for message in messages), messages)
 
     def test_replica_md_fallback_windows_keep_the_trajectory(self):
         """Windows of 10 steps on a 0.1 A candidate skin, less than twice what the atoms move in a window: the

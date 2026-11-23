@@ -1403,7 +1403,8 @@ class TorchSimConfigTest(unittest.TestCase):
     def test_models_without_evaluate_rejected_up_front(self):
         """The torch-sim interface calls the model's own evaluate on MatRIS's graph: a model that reads edges
         only or whose energy the engine differentiates is rejected up front (one it loaded by name is closed
-        first); so does the batched replica runner, for every model without evaluate."""
+        first); so does the batched replica runner, for every model without evaluate, naming
+        ReplicaMolecularDynamics where the model declares its systems' batching."""
         from fastmd.execution.whole_step_cuda_graph import BatchedWholeStepGraphRunner
         tap = fake_adapter(tap=True, triplet_cutoff=3.0)
         with self.assertRaisesRegex(ValueError, "energy the engine differentiates"):
@@ -1416,9 +1417,19 @@ class TorchSimConfigTest(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "'by_name' reads edges only"):
             self.module.MLIPModel("by_name", device="cpu")
         loaded.close.assert_called_once()
-        with self.assertRaisesRegex(ValueError, "model-owned derivative"):
+        with self.assertRaisesRegex(ValueError, "model-owned derivative") as caught:
             BatchedWholeStepGraphRunner(model=tap, builders=[object()], integrator=object(), positions=None,
                                         momenta=None)
+        # The replica entry point for a model that declares its systems' batching; one by one otherwise.
+        self.assertIn("run each replica with GPUResidentMolecularDynamics", str(caught.exception))
+        self.assertNotIn("ReplicaMolecularDynamics", str(caught.exception))
+        for declared in ("union", "segments"):
+            batching = fake_adapter(tap=True, triplet_cutoff=3.0)
+            batching.system_batching = lambda declared=declared: declared
+            with self.subTest(system_batching=declared), \
+                    self.assertRaisesRegex(ValueError, "run the replicas with ReplicaMolecularDynamics"):
+                BatchedWholeStepGraphRunner(model=batching, builders=[object()], integrator=object(), positions=None,
+                                            momenta=None)
 
     def test_unsupported_graph_mode_rejected_before_load(self):
         with patch.object(MatRIS, "load") as load:

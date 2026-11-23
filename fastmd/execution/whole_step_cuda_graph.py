@@ -14,6 +14,7 @@ from fastmd.graph.fixed_capacity_builder import fixed_capacity_exceeded
 from fastmd.graph.validation import raise_if_isolated_atoms
 from fastmd.engine.policy import fusion_scope
 from fastmd.adapters import as_adapter
+from fastmd.adapters.protocol import SystemBatching
 from fastmd.engine.energy_derivative import engine_derivative
 from fastmd.engine.energy_derivative import geometry_dtype
 from fastmd.execution.gpu_integrator import GPUIntegrator
@@ -744,6 +745,12 @@ class BatchedWholeStepGraphRunner:
     thermostat, and state. The model sees one graph batch so large sparse
     motifs and GEMMs amortize launch latency across replicas.
     Isolated-atom validation follows :class:`WholeStepGraphRunner`.
+
+    A low-level runner for MatRIS (NVE and Berendsen NVT only). The replica
+    entry point is :class:`~fastmd.interfaces.replica_md.ReplicaMolecularDynamics`
+    (every model that declares its systems' batching, MatRIS's included, and
+    the Nose-Hoover chain too), which runs on
+    :class:`~fastmd.execution.replica_batch.ReplicaWholeStepRunner`.
     """
 
     @scoped_init
@@ -777,9 +784,12 @@ class BatchedWholeStepGraphRunner:
             raise ValueError("a whole-step runner integrates one single-GPU system (integrator comm=None)")
         self.adapter = as_adapter(model)
         if engine_derivative(self.adapter) is not None:
+            # ReplicaMolecularDynamics takes a model that declares its systems' batching; another runs one by one.
+            declared = self.adapter.system_batching() if isinstance(self.adapter, SystemBatching) else None
+            hint = ("run the replicas with ReplicaMolecularDynamics" if declared in ("union", "segments") else
+                    "run each replica with GPUResidentMolecularDynamics (or WholeStepGraphRunner)")
             raise ValueError(f"BatchedWholeStepGraphRunner calls the model's own evaluate (a model-owned derivative); "
-                             f"model {self.adapter.name!r} has an energy the engine differentiates: run each replica "
-                             "with GPUResidentMolecularDynamics (or WholeStepGraphRunner)")
+                             f"model {self.adapter.name!r} has an energy the engine differentiates: {hint}")
         self.model = self.adapter.module
         self.builders = list(builders)
         self.integrator = integrator
