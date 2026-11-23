@@ -15,7 +15,8 @@
    CUDA-graph capture keep it correct.
 5. K5: row counts are runtime arguments, so new row counts never compile
    (a JIT recompile count, i.e. a structural perf guard: opt-in perf tier,
-   ``MATRIS_RUN_PERF_TIER=1``).
+   ``MATRIS_RUN_PERF_TIER=1``); so are the fixed-capacity graph builder's
+   rows, edge capacity and sink rows.
 6. Checkpoint wrappers pass ``preserve_rng_state=self.training``, and a
    captured checkpointed eval block replays like eager.
 """
@@ -1206,13 +1207,13 @@ class RowGemmTest(_MatmulHighest):
 @perf_tier  # JIT recompile counts: a structural perf guard
 @unittest.skipUnless(_CUDA, "CUDA is required")
 class RuntimeRowCountTest(_MatmulHighest):
-    """After warming two row counts, new row counts must not compile."""
+    """After warming a specialization, new sizes in its class must not compile."""
 
-    def _assert_no_new_compiles(self, kernels, run):
-        for rows in _WARM_ROWS:
+    def _assert_no_new_compiles(self, kernels, run, warm_rows=_WARM_ROWS, new_rows=_NEW_ROWS):
+        for rows in warm_rows:
             run(rows)
         torch.cuda.synchronize()
-        for rows in _NEW_ROWS:
+        for rows in new_rows:
             with _TritonCompileCounter(kernels) as counter:
                 outputs = run(rows)
                 torch.cuda.synchronize()
@@ -1523,6 +1524,168 @@ class RuntimeRowCountTest(_MatmulHighest):
             return [(name, *pair, 1e-10) for name, pair in zip(("q", "p", "chain"), zip(*outputs))]
 
         self._assert_no_new_compiles(kernels, run)
+
+    def test_fixed_capacity_builder_sizes(self):
+        from fastmd.adapters.protocol import PaddingRule
+        from fastmd.execution.system_batch import SlotLayout, SlotUnionGraphBuilder
+        from fastmd.graph import fixed_capacity_builder as fcb
+
+        if not fcb._fixed_builder_available:
+            self.skipTest("fixed-capacity graph builder is unavailable")
+        # A builder's rows, edge capacity, sink rows and owned rows are runtime arguments and the edge count's
+        # alignment is never specialized on: a union drained or split, or a structure of another size, builds with
+        # the kernels of the first. Only the rows' power of two (block, search depth) still selects a
+        # specialization; the new sizes keep it and take odd rows and a multiple of 16.
+        grids = {72: (3, 4, 6), 75: (3, 5, 5), 96: (4, 4, 6), 126: (3, 6, 7)}
+        # Exercise ordinary values and Triton's special runtime-int classes (1 and multiples of 16).
+        dummy_rows = {72: 6, 75: 1, 96: 16, 126: 5}
+        # Two systems per slot union, (members, slot ceilings): 151, 176, 226 and 201 rows.
+        unions = {72: ((72, 75), (74, 77)), 75: ((75, 96), (77, 99)), 96: ((96, 126), (98, 128)),
+                  126: ((72, 126), (74, 127))}
+        cutoff, line_cutoff, candidate_cutoff = 3.0, 2.2, 3.5
+        kernels = {name: getattr(fcb, f"_{name}_kernel") for name in (
+            "count_neighbors", "materialize_neighbors", "pad_edges", "pad_self_loops", "pad_system_self_loops",
+            "pad_loop_pairs", "pad_system_loop_pairs", "window_flags", "float64_prologue",
+            "materialize_unsorted_edges", "finish_unsorted_edges", "line_graph")}
+
+        def crystal(rows):
+            grid = torch.tensor(grids[rows], dtype=torch.float64)
+            cell = torch.diag(grid * 2.0)
+            cell[1, 0], cell[2, 0], cell[2, 1] = 0.15, 0.1, -0.12
+            points = torch.cartesian_prod(*(torch.arange(int(k)) for k in grid)).double()
+            jitter = (torch.rand(points.shape, generator=_generator(rows), dtype=torch.float64) - 0.5) * 0.12
+            return cell, (points + 0.5 + jitter) / grid @ cell
+
+        def dense_edges(cell, positions):
+            # Independent FP64 all-pairs/image oracle, without any builder output as an input. The cells'
+            # shortest height exceeds the cutoff; [-2, 2] therefore covers every possible periodic image.
+            images = torch.cartesian_prod(*(torch.arange(-2, 3, dtype=torch.float64),) * 3)
+            vectors = positions[None, None, :] + (images @ cell)[:, None, None] - positions[None, :, None]
+            distances = vectors.norm(dim=-1)
+            edges, short = [], []
+            for image_index, centre, neighbour in (distances < cutoff).nonzero().tolist():
+                image = tuple(map(int, images[image_index].tolist()))
+                if centre == neighbour and image == (0, 0, 0):
+                    continue
+                key = (centre, neighbour, *image)
+                edges.append(key)
+                if distances[image_index, centre, neighbour] < line_cutoff:
+                    short.append(key)
+            return edges, short
+
+        def triplets(short):
+            by_centre = {}
+            for edge in short:
+                by_centre.setdefault(edge[0], []).append(edge)
+            return {(centre, *first[1:], *second[1:]) for centre, edges in by_centre.items()
+                    for first in edges for second in edges if first != second}
+
+        fixtures = {rows: crystal(rows) for rows in grids}
+        references = {rows: dense_edges(*fixture) for rows, fixture in fixtures.items()}
+
+        def check_graph(name, builder, status, expected):
+            # Exact identities catch an omitted edge balanced by a duplicate, wrong images, wrong slot
+            # offsets, and stale row counts; a count-only comparison would miss those regressions.
+            edges, short = expected
+            with self.subTest(mode=name, rows=builder.n_real):
+                self.assertFalse(bool(status.overflow.item()))
+                self.assertEqual(int(status.edge_count.item()), len(edges))
+                batch = builder.batch
+                rows = torch.cat((batch.edge_index[:len(edges)].long(),
+                                  batch.edge_image[:len(edges)].round().long()), dim=1).cpu().tolist()
+                actual = [tuple(row) for row in rows]
+                self.assertCountEqual(actual, edges)
+                if not builder.edges_only:
+                    expected_triplets = triplets(short)
+                    count = int(status.triplet_count.item())
+                    self.assertEqual(count, len(expected_triplets))
+                    line_graph = builder.line_graph[:count].cpu().long()
+                    self.assertTrue(bool(((line_graph[:, (2, 4)] >= 0)
+                                          & (line_graph[:, (2, 4)] < len(edges))).all()))
+                    actual_triplets = [(centre, *actual[first][1:], *actual[second][1:])
+                                       for centre, _, first, _, second in line_graph.tolist()]
+                    self.assertCountEqual(actual_triplets, expected_triplets)
+                    d2u = builder.directed2undirected.cpu().long()
+                    self.assertTrue(torch.equal(line_graph[:, 1], d2u[line_graph[:, 2]]))
+                    self.assertTrue(torch.equal(line_graph[:, 3], d2u[line_graph[:, 4]]))
+                else:
+                    self.assertEqual(int(status.triplet_count.item()), 0)
+                if builder.padding.kind == "sink_atoms":
+                    padding = batch.edge_index[len(edges):].cpu()
+                    self.assertGreater(len(padding), 0)
+                    self.assertTrue(bool(((padding >= builder.n_real)
+                                          & (padding < builder.n_real + builder.n_dummy)).all()))
+
+        def run(rows):
+            cell, positions = fixtures[rows]
+            expected = references[rows]
+            u_capacity, t_capacity = 12 * rows + rows % 7, 48 * rows + rows % 11
+            single = dict(cell=cell.float(), atomic_numbers=torch.full((rows,), 14, dtype=torch.int32),
+                          u_capacity=u_capacity, atom_graph_cutoff=cutoff, candidate_cutoff=candidate_cutoff,
+                          device="cuda")
+            # MatRIS's topology: a line graph padded with sink rows (their number varies too).
+            builder = fcb.FixedCapacityGraphBuilder(**single, t_capacity=t_capacity, line_graph_cutoff=line_cutoff,
+                                                    n_dummy=dummy_rows[rows])
+            check_graph("line graph, sink rows", builder, builder.build(positions.float().cuda())[1], expected)
+            # A line graph padded with far self-loops (padded pairs of two opposite loops).
+            builder = fcb.FixedCapacityGraphBuilder(**single, t_capacity=t_capacity, line_graph_cutoff=line_cutoff,
+                                                    padding=PaddingRule(kind="far_self_loops"))
+            check_graph("line graph, far loops", builder, builder.build(positions.float().cuda())[1], expected)
+            # Edges only, float64, unsorted far self-loops (one-program prologue) on a reused candidate list.
+            builder = fcb.FixedCapacityGraphBuilder(**{**single, "cell": cell}, t_capacity=0, line_graph_cutoff=None,
+                                                    padding=PaddingRule(kind="far_self_loops"),
+                                                    positions_dtype=torch.float64, sorted_edges=False)
+            builder.refresh_candidates(positions.cuda())
+            check_graph("float64 unsorted far loops", builder,
+                        builder.build(positions.cuda(), rebuild_candidates=False)[1], expected)
+            # Edges only, exact-cutoff loops, folded into a whole-step window's flags.
+            builder = fcb.FixedCapacityGraphBuilder(**single, t_capacity=0, line_graph_cutoff=None,
+                                                    padding=PaddingRule(kind="exact_rc_loops"))
+            status = builder.build(positions.float().cuda())[1]
+            flags = [torch.zeros(1, dtype=dtype, device="cuda") for dtype in (torch.bool, torch.bool, torch.int64,
+                                                                              torch.int64)]
+            builder.accumulate_window(status, window_overflow=flags[0], window_capacity_overflow=flags[1],
+                                      window_max_edges=flags[2], window_max_isolated=flags[3], check_isolated=True)
+            check_graph("exact loops", builder, status, expected)
+            self.assertEqual([int(flag.item()) for flag in flags], [0, 0, len(expected[0]), 0])
+            # Slot unions of two systems (cells of their own), with and without a line graph.
+            members, ceilings = [fixtures[n] for n in unions[rows][0]], unions[rows][1]
+            layout = SlotLayout(ceilings)
+            union = torch.cat([torch.cat((p, p[:1].expand(c - len(p), 3)))
+                               for (_, p), c in zip(members, ceilings)]).float().cuda()
+            expected = tuple([((centre + start), (neighbour + start), *image)
+                              for n, start in zip(unions[rows][0], layout.starts)
+                              for centre, neighbour, *image in references[n][kind]] for kind in (0, 1))
+            for line in (None, line_cutoff):
+                builder = SlotUnionGraphBuilder(
+                    layout=layout, cells=torch.stack([c for c, _ in members]), atoms=[len(p) for _, p in members],
+                    atomic_numbers=torch.full((layout.rows,), 14, dtype=torch.int32), atom_graph_cutoff=cutoff,
+                    candidate_cutoff=candidate_cutoff, device="cuda", padding=PaddingRule(kind="far_self_loops"),
+                    u_capacity=2 * u_capacity + 1, t_capacity=0 if line is None else 2 * t_capacity,
+                    line_graph_cutoff=line)
+                builder.refresh_candidates(union)
+                check_graph(f"slots, line graph {line}", builder,
+                            builder.build(union, rebuild_candidates=False)[1], expected)
+            return []  # check_graph performs exact comparisons, including during the warm-up.
+
+        launched = set()
+
+        class RecordLaunch:
+            def __init__(self, name, kernel):
+                self.name, self.kernel = name, kernel
+
+            def __getitem__(self, grid):
+                def launch(*args, **kwargs):
+                    launched.add(self.name)
+                    return self.kernel[grid](*args, **kwargs)
+                return launch
+
+        # Observe this test's launches even when earlier tests have already populated the kernel caches.
+        with contextlib.ExitStack() as stack:
+            for name, kernel in kernels.items():
+                stack.enter_context(mock.patch.object(fcb, f"_{name}_kernel", RecordLaunch(name, kernel)))
+            self._assert_no_new_compiles(kernels, run, warm_rows=(72,), new_rows=(75, 96, 126))
+        self.assertEqual(launched, set(kernels), f"builder kernels not exercised: {set(kernels) - launched}")
 
 
 # 6. Checkpoint RNG state -----------------------------------------------------

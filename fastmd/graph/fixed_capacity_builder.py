@@ -60,6 +60,16 @@ _FIXED_BUILDER_EVIDENCE = matris_builder_evidence(
 )
 
 
+# A builder's sizes (its rows, edge capacity, sink rows and owned rows) are runtime arguments that the kernels
+# never specialize on, nor on the alignment of the edge count (a view of the last of the rows + 1 edge offsets,
+# 16-byte aligned for an even number of rows only): a union of another size (one drained or split, a structure of
+# another size) runs the kernels compiled for the first instead of compiling its own (0.3-1 s per size: ORB v3
+# with TF32, a relaxation's drains); the kernels whose block or search depth follows the rows still compile once
+# per power of two of them.
+_SIZES = ("N", "N_DUMMY", "E_CAP", "n_owned_slots")
+_ALIGNMENT = (*_SIZES, "total_edges", "edge_total", "edge_count")
+
+
 if _fixed_builder_available:
 
     @triton.jit
@@ -94,7 +104,7 @@ if _fixed_builder_available:
         return edge_valid
 
 
-    @triton.jit
+    @triton.jit(do_not_specialize=_SIZES, do_not_specialize_on_alignment=_ALIGNMENT)
     def _count_neighbors_kernel(
         positions,
         cell,
@@ -110,7 +120,7 @@ if _fixed_builder_available:
         edge_mask,
         short_mask,
         system_of_row,
-        N: tl.constexpr,
+        N,
         BMAX: tl.constexpr,
         BLOCK: tl.constexpr,
         EDGE_CUTOFF2: tl.constexpr,
@@ -185,7 +195,7 @@ if _fixed_builder_available:
             tl.atomic_add(isolated_atom_count, 1, mask=edge_count == 0)
 
 
-    @triton.jit
+    @triton.jit(do_not_specialize=_SIZES, do_not_specialize_on_alignment=_ALIGNMENT)
     def _materialize_neighbors_kernel(
         positions,
         cell,
@@ -204,9 +214,9 @@ if _fixed_builder_available:
         edge_mask,
         short_mask,
         system_of_row,
-        N: tl.constexpr,
+        N,
         BMAX: tl.constexpr,
-        E_CAP: tl.constexpr,
+        E_CAP,
         BLOCK: tl.constexpr,
         EDGE_CUTOFF2: tl.constexpr,
         LINE_CUTOFF2: tl.constexpr,
@@ -288,7 +298,7 @@ if _fixed_builder_available:
             )
 
 
-    @triton.jit
+    @triton.jit(do_not_specialize=_SIZES, do_not_specialize_on_alignment=_ALIGNMENT)
     def _pad_edges_kernel(
         total_edges,
         center,
@@ -296,9 +306,9 @@ if _fixed_builder_available:
         images,
         distances,
         short_flags,
-        N: tl.constexpr,
-        N_DUMMY: tl.constexpr,
-        E_CAP: tl.constexpr,
+        N,
+        N_DUMMY,
+        E_CAP,
         BLOCK: tl.constexpr,
         HAS_SHORT: tl.constexpr = True,
     ):
@@ -320,7 +330,7 @@ if _fixed_builder_available:
             tl.store(short_flags + rows, 0, mask=mask)
 
 
-    @triton.jit(do_not_specialize=["image_x", "image_y", "image_z"])
+    @triton.jit(do_not_specialize=["image_x", "image_y", "image_z", *_SIZES], do_not_specialize_on_alignment=_ALIGNMENT)
     def _pad_self_loops_kernel(
         total_edges,
         center,
@@ -334,8 +344,8 @@ if _fixed_builder_available:
         pad_y,
         pad_z,
         owned_count,
-        N: tl.constexpr,
-        E_CAP: tl.constexpr,
+        N,
+        E_CAP,
         BLOCK: tl.constexpr,
         HAS_OVERRIDE: tl.constexpr,
         OWNED_LOOPS: tl.constexpr = False,
@@ -366,7 +376,7 @@ if _fixed_builder_available:
             tl.store(vec_override + rows * 3 + 2, tl.where(pad, pad_z, 0.0), mask=in_range)
 
 
-    @triton.jit
+    @triton.jit(do_not_specialize=_SIZES, do_not_specialize_on_alignment=_ALIGNMENT)
     def _pad_system_self_loops_kernel(
         total_edges,
         center,
@@ -374,8 +384,8 @@ if _fixed_builder_available:
         images,
         system_of_row,
         loop_images,
-        N: tl.constexpr,
-        E_CAP: tl.constexpr,
+        N,
+        E_CAP,
         BLOCK: tl.constexpr,
     ):
         """``_pad_self_loops_kernel`` (far self-loops) for systems with cells of their own: padded row k is
@@ -393,7 +403,8 @@ if _fixed_builder_available:
         tl.store(images + rows * 3 + 2, tl.load(loop_images + system * 3 + 2, mask=mask, other=0), mask=mask)
 
 
-    @triton.jit(do_not_specialize=["image_x", "image_y", "image_z", "length"])
+    @triton.jit(do_not_specialize=["image_x", "image_y", "image_z", "length", *_SIZES],
+                do_not_specialize_on_alignment=_ALIGNMENT)
     def _pad_loop_pairs_kernel(
         total_edges,
         center,
@@ -405,8 +416,8 @@ if _fixed_builder_available:
         image_y,
         image_z,
         length,
-        N: tl.constexpr,
-        E_CAP: tl.constexpr,
+        N,
+        E_CAP,
         BLOCK: tl.constexpr,
     ):
         """Far self-loop padding with a line graph: padded pair p (rows 2p, 2p + 1 past the real
@@ -427,7 +438,7 @@ if _fixed_builder_available:
         tl.store(short_flags + rows, 0, mask=mask)
 
 
-    @triton.jit
+    @triton.jit(do_not_specialize=_SIZES, do_not_specialize_on_alignment=_ALIGNMENT)
     def _pad_system_loop_pairs_kernel(
         total_edges,
         center,
@@ -438,8 +449,8 @@ if _fixed_builder_available:
         system_of_row,
         loop_images,
         loop_lengths,
-        N: tl.constexpr,
-        E_CAP: tl.constexpr,
+        N,
+        E_CAP,
         BLOCK: tl.constexpr,
     ):
         """``_pad_loop_pairs_kernel`` for systems with cells of their own: padded pair p is the two opposite
@@ -462,7 +473,7 @@ if _fixed_builder_available:
 
 
 
-    @triton.jit
+    @triton.jit(do_not_specialize=_SIZES, do_not_specialize_on_alignment=_ALIGNMENT)
     def _window_flags_kernel(
         edge_count,
         invalid_pairs,
@@ -472,7 +483,7 @@ if _fixed_builder_available:
         window_capacity_overflow,
         window_max_edges,
         window_max_isolated,
-        E_CAP: tl.constexpr,
+        E_CAP,
         CHECK_ISOLATED: tl.constexpr,
     ):
         """One edges-only build's contribution to a whole-step window's device flags, in one program:
@@ -495,7 +506,7 @@ if _fixed_builder_available:
         return tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
 
 
-    @triton.jit(do_not_specialize=["skin_limit"])
+    @triton.jit(do_not_specialize=["skin_limit", *_SIZES], do_not_specialize_on_alignment=_ALIGNMENT)
     def _float64_prologue_kernel(
         positions,
         inv_cell,
@@ -512,7 +523,7 @@ if _fixed_builder_available:
         candidate_valid,
         isolated_atom_count,
         skin_limit,
-        N: tl.constexpr,
+        N,
         BLOCK: tl.constexpr,
     ):
         """One program over all N atoms: what a candidate-reusing build computes before its edges,
@@ -570,7 +581,7 @@ if _fixed_builder_available:
         tl.store(isolated_atom_count, 0)  # the count kernel that follows adds the atoms without edges
 
 
-    @triton.jit
+    @triton.jit(do_not_specialize=_SIZES, do_not_specialize_on_alignment=_ALIGNMENT)
     def _materialize_unsorted_edges_kernel(
         positions,
         cell,
@@ -586,9 +597,9 @@ if _fixed_builder_available:
         distance_out,
         edge_index_out,
         edge_image_out,
-        N: tl.constexpr,
+        N,
         BMAX: tl.constexpr,
-        E_CAP: tl.constexpr,
+        E_CAP,
         BLOCK: tl.constexpr,
         BLOCK_N: tl.constexpr,
         EDGE_CUTOFF2: tl.constexpr,
@@ -658,7 +669,7 @@ if _fixed_builder_available:
         tl.store(edge_image_out + edge_index * 3 + 2, sz, mask=edge_store)
 
 
-    @triton.jit(do_not_specialize=["image_x", "image_y", "image_z"])
+    @triton.jit(do_not_specialize=["image_x", "image_y", "image_z", *_SIZES], do_not_specialize_on_alignment=_ALIGNMENT)
     def _finish_unsorted_edges_kernel(
         edge_offsets,
         center,
@@ -671,8 +682,8 @@ if _fixed_builder_available:
         image_x,
         image_y,
         image_z,
-        N: tl.constexpr,
-        E_CAP: tl.constexpr,
+        N,
+        E_CAP,
         BLOCK: tl.constexpr,
     ):
         """After ``_materialize_unsorted_edges_kernel``: the self-loop padding rows of
@@ -712,7 +723,8 @@ _CANDIDATE_STATE = (
 
 if _fixed_builder_available:
 
-    @triton.jit(do_not_specialize=["e_capacity", "u_capacity", "t_capacity"])
+    @triton.jit(do_not_specialize=["e_capacity", "u_capacity", "t_capacity", *_SIZES],
+                do_not_specialize_on_alignment=_ALIGNMENT)
     def _line_graph_kernel(
         pair_offsets,
         short_counts,
@@ -725,9 +737,9 @@ if _fixed_builder_available:
         e_capacity,
         u_capacity,
         t_capacity,
-        N: tl.constexpr,
+        N,
         BMAX: tl.constexpr,
-        N_DUMMY: tl.constexpr,
+        N_DUMMY,
         SEARCH_STEPS: tl.constexpr,
         BLOCK: tl.constexpr,
         LOOP_PADDING: tl.constexpr = False,
