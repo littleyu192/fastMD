@@ -155,6 +155,8 @@ The runtime uses spatial ownership, ghost exchanges and reverse gradient sums, r
 epochs, and collective CUDA Graph capture. Model weights are replicated; atom ownership and model work
 are partitioned. MatRIS uses boundary-bond partial exchanges, CHGNet uses line-graph partial exchanges,
 and MACE, SevenNet, and ORB use their declared node-halo exchanges.
+MACE exchanges expanded interaction features and trims declared per-atom work to owned
+slots; the shared runtime validates those declarations when ghost rows first appear.
 
 `GPUResidentMolecularDynamics.from_evaluator(evaluator, atoms=...)` uses the domain driver at any rank
 count, supporting NVE, Berendsen NVT (`nvt`), and Nose–Hoover chain NVT (`nvt_nhc`), with restart continuation.
@@ -164,8 +166,10 @@ derivative. This is separate from the MD driver choice.
 
 `--md-engine domain` keeps the domain integrator even at one rank. CLI `auto` selects the native MD driver
 for eligible one-rank MatRIS runs and the domain driver for the other four models. Domain MD advances one
-step per launch. Only MatRIS currently captures the distributed integrator together with the model;
-the other models capture energy and forces and run integration outside that graph.
+step per launch. With multiple ranks and `model_graph`, all five models can capture the distributed
+integrator together with the model. Topology refreshes occur at committed positions, and rejected
+steps restore the integrator before retrying or temporarily using integration outside the graph.
+The Python option `integrator_in_graph=False` keeps integration outside the captured model step.
 
 </details>
 

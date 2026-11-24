@@ -53,11 +53,12 @@ EPOCH_MARGIN = 1e-3
 CUTOFF_TIE = 1e-4
 
 
-def effective_skin(lengths, cutoff: float, skin: float, *, explicit: bool) -> float:
+def effective_skin(lengths, cutoff: float, skin: float, *, explicit: bool, skew: bool = False) -> float:
     """The skin a P>4 epoch runs with: more than 4 ranks keep one periodic image per axis.
 
-    ``lengths`` are the reciprocal-plane spacings (lattice lengths for an
-    orthogonal cell). ``skin`` if the halo ``cutoff + skin`` fits every spacing (the rule of
+    ``lengths`` are the cell's face spacings (``DomainPartition.face_spacings``:
+    the box lengths of an orthogonal cell, the heights of a ``skew`` one).
+    ``skin`` if the halo ``cutoff + skin`` fits every one (the rule of
     ``DomainPartition.check_halo``). Otherwise ``topology_engine="auto"``
     (``explicit`` False) clamps it to ``min(lengths) - cutoff - EPOCH_MARGIN``
     while that is positive (the halo of the epoch's shard adds the margin);
@@ -74,11 +75,12 @@ def effective_skin(lengths, cutoff: float, skin: float, *, explicit: bool) -> fl
     if not explicit and clamped > 0:
         return clamped
     axis = next(axis for axis, length in enumerate(lengths) if halo > length)
+    where, what = ((f"cell height {lengths[axis]:g} A across lattice vector {'abc'[axis]}", "height") if skew
+                   else (f"box length {lengths[axis]:g} A along axis {'xyz'[axis]}", "length"))
     raise ValueError(
-        f"halo width {halo:g} A (cutoff + skin) exceeds the box face spacing {lengths[axis]:g} A along axis "
-        f"{'xyz'[axis]}: the distributed engine allows one periodic image per axis; use a supercell with "
-        f"every face spacing >= {halo:g} A" + (f" or a topology skin of at most {clamped:g} A (--topology-skin)"
-                                          if clamped > 0 else ""))
+        f"halo width {halo:g} A (cutoff + skin) exceeds the {where}: the distributed engine allows one periodic "
+        f"image per axis; use a supercell with every {what} >= {halo:g} A"
+        + (f" or a topology skin of at most {clamped:g} A (--topology-skin)" if clamped > 0 else ""))
 
 
 def step_verdict(tail, world_size) -> tuple[bool, list]:

@@ -78,7 +78,9 @@ class ParallelConfig:
     # ``topology_skin`` (Angstrom) and filters it exactly on the device every
     # step with the single-GPU fixed-capacity builder (CUDA only). "auto"
     # (default): the epoch on CUDA, above 4 ranks with the skin clamped to
-    # the box (one periodic image per axis: min(L) - cutoff - 1e-3 A;
+    # the cell's face spacings (one periodic image per axis:
+    # min(h) - cutoff - 1e-3 A, h the lengths of an orthogonal cell or the
+    # heights across a skew cell's lattice vectors;
     # epoch.effective_skin); CPU runs use an internal
     # reference topology rebuilt every evaluation. "rebuild" (the CUDA
     # rollback) was removed in step 4.2 and is rejected for one version.

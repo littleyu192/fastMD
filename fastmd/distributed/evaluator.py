@@ -262,20 +262,24 @@ class DistributedMatRISEvaluator:
             if self.context.world_size > 4:
                 # More than 4 ranks keep one periodic image per axis (design
                 # §6.3 ghost slices). The halo is the atom-graph cutoff plus
-                # the epoch's skin, which "auto" clamps to what the box holds
+                # the epoch's skin, which "auto" clamps to what the cell's face spacings hold
                 # (the CPU reference is rebuilt every evaluation: no skin).
                 # Up to 4 ranks accept smaller cells, as before.
                 halo = float(model.config["pairwise_cutoff"])
                 if self.topology_engine == "epoch":
                     from .epoch import effective_skin
                     self._topology_skin = effective_skin(
-                        self.partition.face_distances.tolist(), halo, self._topology_skin,
-                        explicit=self.parallel.topology_engine == "epoch")
+                        self.partition.face_spacings.tolist(), halo, self._topology_skin,
+                        explicit=self.parallel.topology_engine == "epoch", skew=not self.partition.orthogonal)
                     halo += self._topology_skin
                 self.partition.check_halo(halo)
                 every_peer_neighbor = all(
                     len(self.partition.neighbor_ranks(rank, halo)) == self.context.world_size - 1
                     for rank in range(self.context.world_size))
+            if self.context.world_size > 1:
+                from .epoch import EPOCH_MARGIN
+                self.partition.check_image_reach(float(model.config["pairwise_cutoff"]) + (
+                    self._topology_skin + EPOCH_MARGIN if self.topology_engine == "epoch" else 0.0))
             # "auto" from the agreed geometry (cell, grid, cutoff): identical on every rank.
             self._payload_transport = resolve_payload_transport(
                 self.parallel.payload_transport, self.context.world_size,
@@ -299,6 +303,8 @@ class DistributedMatRISEvaluator:
             "adapter": self.adapter.name, "strategy": self.strategy.contract(model),
             "model": self.fingerprint, "cell": self.partition.cell.tolist(),
             "grid": self.parallel.domain_grid, "dtype": str(self.dtype),
+            # Check the geometry-derived choices as well as the requested options.
+            "domain_grid": list(self.partition.domain_grid), "resolved_payload_transport": self._payload_transport,
             "isolated_atoms": self.config.isolated_atoms,
             "execution": self.config.execution or "eager", "profile": self.config.optimization_profile,
             "backend": self._local_backend,

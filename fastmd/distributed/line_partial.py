@@ -45,7 +45,7 @@ from .device_keys import canonicalize_edges, lexsort_rows
 from .line_slots import LINE_SLOT_MARGIN, NO_PAIR, asymmetric_peers, find_line_slots, pair_hit_entries, \
     symmetry_error
 from .node_halo import (
-    _ACTIVE, ExchangeHooks, HaloLayout, NodeHaloReferenceTopology, _prepared, halo_copy, summed_stress,
+    _ACTIVE, ExchangeHooks, HaloLayout, NodeHaloReferenceTopology, _prepared, halo_copy, md_step_flags, summed_stress,
 )
 from .node_halo_memory import NodeHaloMemoryPredictor
 from .node_halo_topology import TIER_ALIGN, TIER_HEADROOM, NodeHaloTopology, _tier
@@ -458,9 +458,10 @@ class LineHaloTopology(NodeHaloTopology):
             self.builders += 1
         return self.builder
 
-    def _install(self, numbers, atom_ids, active, owned) -> int:
+    def _install(self, numbers, atom_ids, active, owned, floor=None) -> int:
         """The rows in the builder, its candidates, and capacities that hold the refresh positions' edges, pairs and
-        triplets on every rank (MAX over the ranks; a new builder until they fit). Returns the agreed edge count."""
+        triplets on every rank (MAX over the ranks; a new builder until they fit), and at least this rank's
+        ``floor`` (``demand``). Returns the agreed edge count."""
         while True:
             builder = self.builder
             builder.set_atoms(numbers, atom_ids, active, owned)
@@ -470,6 +471,10 @@ class LineHaloTopology(NodeHaloTopology):
             flags = torch.cat((status.edge_count.long().reshape(1), status.triplet_count.long().reshape(1),
                                (~status.candidate_capacity_valid).long().reshape(1),
                                status.invalid_pairs.long().reshape(1)))
+            if floor:
+                flags[:2] = torch.maximum(flags[:2], torch.tensor(
+                    [int(floor.get("edges", 0)), int(floor.get("triplets", 0))], dtype=flags.dtype,
+                    device=flags.device))
             if self.context.world_size > 1:
                 dist.all_reduce(flags, op=dist.ReduceOp.MAX, group=self.context.group)
             edges, triplets, truncated, unpaired = flags.tolist()
@@ -486,10 +491,19 @@ class LineHaloTopology(NodeHaloTopology):
             self._builder_for(self._rows.device)
 
     @torch.no_grad()
-    def refresh(self, state: AtomState) -> AtomState:
-        state = super().refresh(state)
+    def refresh(self, state: AtomState, floor: dict | None = None) -> AtomState:
+        state = super().refresh(state, floor)
         self._slots()
         return state
+
+    def demand(self) -> dict:
+        """This rank's edges and triplets of the last build, untruncated (``refresh``'s ``floor``; host reads)."""
+        builder = self.builder
+        return {"edges": int(builder.edge_offsets[-1]), "triplets": int(builder.pair_offsets[-1])}
+
+    def capacities(self) -> tuple:
+        """The agreed capacities a step can outgrow (the edges and the triplets)."""
+        return (int(self.builder.e_capacity), int(self.builder.t_capacity))
 
     def _slots(self) -> None:
         """The line slots of the refresh (collective): detection at the refresh build, the agreement of both ends,
@@ -618,7 +632,8 @@ class LinePartialStrategy:
     ``set_positions``, ``step``, ``count``, ``extents``, ``key``, ``close``). ``step``'s first four flags are the
     node halo's, the slots' folded into the stale one (a refresh and a redo); the fifth is the slots' own (a short
     boundary bond that is not a resolved slot, a slot without its bond, or a rank pair whose ends resolved different
-    counts), which the evaluator counts."""
+    counts), which the evaluator counts. ``step(stress, md)`` and ``refresh(state, floor)``: the in-graph MD step and
+    the capacity floor, as the node halo's (the MD step's four flags after the fifth)."""
 
     def __init__(self, adapter, spec, partition, context, *, skin: float, device):
         topology = adapter.topology_spec()
@@ -631,9 +646,9 @@ class LinePartialStrategy:
         self.n_owned = 0
         self.new_state = torch.zeros(1, dtype=torch.long, device=device)
 
-    def refresh(self, state: AtomState) -> AtomState:
+    def refresh(self, state: AtomState, floor: dict | None = None) -> AtomState:
         topology = self.topology
-        state = topology.refresh(state)
+        state = topology.refresh(state, floor)
         self.layout = topology.line_layout()
         self.inputs, error = _prepared(self.adapter, topology.builder.batch)
         self.context.collective_check(error)
@@ -643,10 +658,13 @@ class LinePartialStrategy:
     def set_positions(self, positions: Tensor) -> None:
         self.topology.set_positions(positions)
 
-    def step(self, stress: bool = False):
+    def step(self, stress: bool = False, md=None):
         topology = self.topology
         builder = topology.builder
         with torch.no_grad():
+            if md is not None:
+                positions = md.pre(topology.n_cap)
+                topology.load_owned_slots(positions)
             _, status = topology.build_rows()
             slot_flag, hits = topology.resolve_slots()
         batch = builder.batch
@@ -657,15 +675,19 @@ class LinePartialStrategy:
                            self.new_state, slot_flag.long(), hits))
         group = self.context.group
         dist.all_reduce(totals, op=dist.ReduceOp.SUM, group=group)
+        if md is not None:
+            flags = torch.cat((flags, md_step_flags(md, totals, forces, status, positions)))
         dist.all_reduce(flags, op=dist.ReduceOp.MAX, group=group)
         slots = flags[4:5]
         if hits.numel():
             # A rank pair whose ends resolved different slot counts: the slots do not cover the step either.
-            agreed = flags[5:].reshape(-1, 2)
+            agreed = flags[5:5 + hits.numel()].reshape(-1, 2)
             asymmetric = ((agreed[:, 0] != -agreed[:, 1]) & (agreed[:, 0] != NO_PAIR)).any()
             slots = slots | asymmetric.long().reshape(1)
-        # The node halo's four flags, the slots' folded into the stale one (a refresh and a redo), then the slots'.
-        flags = torch.cat((flags[:1], flags[1:2] | slots, flags[2:4], slots))
+        # The node halo's four flags, the slots' folded into the stale one (a refresh and a redo), then the slots'
+        # (and the in-graph MD step's four).
+        md_flags = () if md is None else (flags[5 + hits.numel():],)
+        flags = torch.cat((flags[:1], flags[1:2] | slots, flags[2:4], slots, *md_flags))
         return totals[:1], forces, flags, summed_stress(totals, batch.cell, forces.dtype)
 
     def count(self):

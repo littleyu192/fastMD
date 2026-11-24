@@ -114,13 +114,17 @@ class NodeHaloTopology:
     # --- refresh (collective, outside any CUDA graph) ------------------------
 
     @torch.no_grad()
-    def refresh(self, state: AtomState) -> AtomState:
+    def refresh(self, state: AtomState, floor: dict | None = None) -> AtomState:
         """Migrate ``state``, select and exchange the ghost rows, refresh the candidates. Collective.
 
         Returns the migrated state (owned atoms in ID order, the order of the
         owned rows and of ``step``'s positions). The input check is collective;
         a failure on one rank after it (an allocation, say) leaves its peers in
         a collective, as in the topology epoch's refresh: fatal for the group.
+        ``floor`` (this rank's :meth:`demand` of a step that overflowed, or
+        None): the agreed capacities hold at least these counts as well as the
+        refresh positions' (the in-graph MD step refreshes at the positions
+        before a step whose own positions outgrew the capacities).
         """
         started = time.perf_counter()
         context, partition = self.context, self.partition
@@ -211,14 +215,14 @@ class NodeHaloTopology:
         self.ghost_slots = ghost_slots
         self._rows.zero_()
         self._rows[:n].copy_(positions)
-        edges = self._install(numbers, atom_ids, active, n)
+        edges = self._install(numbers, atom_ids, active, n, floor)
         if edges > self.builder.e_capacity:
             # More edges than rows (the first refresh, or growth): a builder with the agreed capacity.
             self.u_capacity = (_tier(-(-edges // 2), self.u_capacity, self.headroom, self.align)
                                if self.capacity_step is None else
                                edge_tier(-(-edges // 2), self.u_capacity, self.capacity_step))
             self._builder_for(device)
-            edges = self._install(numbers, atom_ids, active, n)
+            edges = self._install(numbers, atom_ids, active, n, floor)
         finished = time.perf_counter()
         self.refreshes += 1
         self.stats = {
@@ -248,14 +252,17 @@ class NodeHaloTopology:
             self.builders += 1
         return self.builder
 
-    def _install(self, numbers, atom_ids, active, owned) -> int:
-        """The epoch's rows in the builder, its candidates, and the agreed edge count at the refresh positions."""
+    def _install(self, numbers, atom_ids, active, owned, floor=None) -> int:
+        """The epoch's rows in the builder, its candidates, and the agreed edge count at the refresh positions (at
+        least ``floor["edges"]`` on this rank)."""
         builder = self.builder
         builder.set_atoms(numbers, atom_ids, active, owned)
         self._copy_ghosts()
         builder.refresh_candidates(self._rows)
         _, status = builder.build(self._rows, rebuild_candidates=False)
         count = status.edge_count.clone()
+        if floor:
+            count.clamp_(min=int(floor.get("edges", 0)))
         bad = (~status.candidate_capacity_valid).long().reshape(1)
         flags = torch.cat((count, bad))
         if self.context.world_size > 1:
@@ -302,6 +309,19 @@ class NodeHaloTopology:
                 or positions.device != self._rows.device:
             raise ValueError("node-halo topology: the positions do not match the refreshed owned atoms")
         self._rows[:self.n_owned].copy_(positions)
+
+    def load_owned_slots(self, positions: torch.Tensor) -> None:
+        """Write ``positions`` (``[n_cap, 3]`` float32: the owned atoms in the refreshed order, then zero rows, as
+        the in-graph MD step's integrator holds them) into the owned slots. Device only, fixed shapes."""
+        self._rows[:self.n_cap].copy_(positions)
+
+    def demand(self) -> dict:
+        """This rank's counts of the last build, untruncated (``refresh``'s ``floor``; host reads)."""
+        return {"edges": int(self.builder.edge_offsets[-1])}
+
+    def capacities(self) -> tuple:
+        """The agreed capacities a step can outgrow (the edges)."""
+        return (int(self.builder.e_capacity),)
 
     def build_rows(self):
         """The graph at the owned rows as written (``set_positions``): the ghost COPY and the builder's

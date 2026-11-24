@@ -69,10 +69,8 @@ _FAR_SELF_LOOPS = PaddingRule("far_self_loops")
 # Measured capacity tiers (GPU-resident MD, whole step, GB200; see capacity_step).
 _CAPACITY_STEP = CapacityStep(u_step=32, min_pad_u=32, u_thermal_factor=1.02)
 _ELEMENTS = 118  # columns of the reference-energy row (Z - 1)
-# The upstream code the multi-GPU node-halo hooks rely on (``MACEAdapter.shard_spec``): the model's forward, which
-# calls each interaction block with the node features as a keyword, and the interaction blocks of the pretrained
-# checkpoints, which sum their messages at the receiver and read the senders' node features per edge. Pinned to
-# mace-torch 0.3.16 (sha256 of inspect.getsource); another version or source refuses P>1 with the reason.
+# The upstream P>1 path is pinned to mace-torch 0.3.16 (sha256 of inspect.getsource).
+# Another version or source refuses P>1 with the affected pin's reason.
 _SHARD_PIN_VERSIONS = ("0.3.16",)
 
 
@@ -265,6 +263,61 @@ _SHARD_PINS = {
 }
 
 
+# The upstream multi-GPU setup, ghost truncation and exchange autograd used only at P>1.
+_GHOST_PATH_PINS = (
+    ("prepare_graph", "mace.modules.utils.prepare_graph",
+     "a369db1b449ebb4f4105cf7e42ad4cebea28950cd9d51a07f7b6cc8ec425c557"),
+    ("edge_vectors", "mace.modules.utils.get_edge_vectors_and_lengths",
+     "66c1b3a673cc95439b5e1d77d62bb8274adebf599db02d2000a3f3289a90a9b4"),
+    ("handle_lammps", "mace.modules.blocks.InteractionBlock.handle_lammps",
+     "22ac9fafac84cc5e0084c640366a56612da1b8b3bd9c5dc990ec158209ec9977"),
+    ("truncate_ghosts", "mace.modules.blocks.InteractionBlock.truncate_ghosts",
+     "66bcdc7125099695589a008c3e89e048565c1884c9d87563c426c969dc7d03e5"),
+    ("exchange_function", "mace.tools.utils.LAMMPS_MP",
+     "d80c725f7d715c84304db3b4cc14ffe2171e9d1de1edbab21520e60734e732a6"),
+)
+
+_SHARD_PINS.update({target: digest for _, target, digest in _GHOST_PATH_PINS})
+
+def _exchange_points(module) -> tuple[ExchangePoint, ...]:
+    """The P>1 exchanges of ``module``: in every interaction block but the first, the ghost rows of its
+    ``linear_up``'s output (called by the adapter's P>1 forward, in this order)."""
+    return tuple(ExchangePoint(name=f"interactions.{index}.linear_up", module=None,
+                               width=int(block.linear_up.irreps_out.dim))
+                 for index, block in enumerate(module.interactions) if index > 0)
+
+def _owned_skip_connections(module) -> tuple[str, ...]:
+    """The blocks' ``skip_tp`` (``ShardSpec.owned_slot_inputs``: the runtime's ghost-row trimming cuts their inputs
+    to the owned slots at P>1). A residual block computes its skip connection before upstream's multi-GPU path
+    truncates it to them (``truncate_ghosts``), so a residual first block's (MACE-MP-0's), computed on every row,
+    need not run on the ghost rows; a later block's inputs hold the owned slots only already, and a block that applies
+    it after the message sum (MACE-MPA-0's first) gets truncated inputs. The rest of the per-atom work after a
+    block's message sum runs on the owned slots through upstream's own path, which truncates inside the block."""
+    return tuple(f"interactions.{index}.skip_tp" for index, block in enumerate(module.interactions)
+                 if hasattr(block, "skip_tp"))
+
+class _GhostExchange:
+    """The exchange object of upstream's multi-GPU path over the runtime's COPY of one P>1 forward (``ctx``, a
+    ``ShardContext``): upstream's exchange function (``mace.tools.utils.LAMMPS_MP``, an autograd function) calls
+    ``forward_exchange(feats, out, width)`` in its forward, here the n-th call the n-th exchange point (``out`` is
+    ``feats`` with its ghost rows replaced by their owners' rows), and ``reverse_exchange(grad, gout, width)`` in its
+    backward (``gout``: the adjoint, the ghost rows' gradients summed into their owners')."""
+
+    def __init__(self, ctx, points: tuple[ExchangePoint, ...]):
+        self.ctx, self.points, self.calls = ctx, points, 0
+
+    def forward_exchange(self, feats: Tensor, out: Tensor, width: int) -> None:
+        if self.calls >= len(self.points):
+            raise RuntimeError(f"MACE's multi-GPU forward exchanged more often than its {len(self.points)} "
+                               "exchange points")
+        point = self.points[self.calls]
+        self.calls += 1
+        out.copy_(self.ctx.exchange(point, feats))
+
+    def reverse_exchange(self, grad: Tensor, gout: Tensor, width: int) -> None:
+        gout.copy_(self.ctx.reverse_sum(grad))
+
+
 class MACEAdapter:
     """An upstream MACE module (``ScaleShiftMACE``) as a :class:`~fastmd.adapters.protocol.ModelAdapter`
     with an :class:`~fastmd.adapters.protocol.EnergyTap` (see the module docstring).
@@ -372,6 +425,14 @@ class MACEAdapter:
         """MACE's ``node_energy`` ([rows] float64: E0 + scaled interaction energy per atom) at
         ``positions`` and ``cell`` (or each edge's shift ``edge_shifts`` in its own system's cell), with MACE's
         own derivatives off."""
+        data = self._data(inputs, positions, cell, edge_shifts)
+        out = self.module(data, training=False, compute_force=False, compute_virials=False,
+                          compute_stress=False, compute_displacement=False)
+        return out["node_energy"]
+
+    def _data(self, inputs: MACEInput, positions: Tensor, cell: Tensor,
+              edge_shifts: Tensor | None = None) -> dict:
+        """Shared single-rank and sharded inputs, preserving geometry precision before the model cast."""
         batch = inputs.batch
         dtype = positions.dtype
         # one_hot[z_index[species]] in one lookup, and -edge_image in the model's dtype in one kernel
@@ -385,7 +446,7 @@ class MACEAdapter:
         else:
             # row by row: no TF32 GEMM for FP32
             shifts = unit_shifts[:, 0:1] * cell[0] + unit_shifts[:, 1:2] * cell[1] + unit_shifts[:, 2:3] * cell[2]
-        data = {
+        return {
             "positions": positions,
             "node_attrs": node_attrs,
             # (sender, receiver) = (neighbour, centre), int64
@@ -397,9 +458,6 @@ class MACEAdapter:
             "ptr": inputs.ptr,
             "head": inputs.head,
         }
-        out = self.module(data, training=False, compute_force=False, compute_virials=False,
-                          compute_stress=False, compute_displacement=False)
-        return out["node_energy"]
 
     # --- capability negotiation ---------------------------------------------
 
@@ -492,19 +550,24 @@ class MACEAdapter:
 
     def shard_spec(self) -> ShardSpec:
         """MACE at P>1: each interaction block sums its messages at the receiver (the edge's centre) and reads
-        the senders' node features, so before every block but the first (whose features come from the
-        species) the ghost rows of its input ``node_feats`` take their owners' rows (one COPY of
-        ``node_feats_irreps`` values per ghost atom and layer; upstream's LAMMPS ML-IAP path exchanges the output
-        of the block's ``linear_up``, the same values one per-atom linear map later). Unused atom slots get the
-        first element of the model's table. Pins: the forward of ``ScaleShiftMACE``, of the interaction block
-        classes in the module and of its pair repulsion if any; a class without a pin (or a model of another
-        class) gives a pin that cannot match, so P>1 is refused with the reason."""
+        the senders' node features through its ``linear_up``, and every other per-atom computation reads its own
+        atom's row, so the P>1 forward (:meth:`sharded_energy`, upstream's own multi-GPU path) runs the per-atom
+        work on the owned slots only after the first block's ``linear_up``, and in every block but the first
+        (whose features come from the species, on every row) the ghost rows of ``linear_up``'s output take their
+        owners' rows: one COPY of ``linear_up``'s output width per ghost atom and layer (512 values for
+        MACE-MP-0, the same values one per-atom linear map later than the block's input, as upstream's LAMMPS
+        ML-IAP path exchanges). Upstream's path truncates to the owned slots inside each block, after its message
+        sum; the skip connections a residual block computes before that are declared to the runtime's ghost-row
+        trimming (``owned_slot_inputs``: :func:`_owned_skip_connections`). Unused atom slots get the first element
+        of the model's table. Pins: the forward
+        of ``ScaleShiftMACE``, of the interaction block classes in the module and of its pair repulsion if any,
+        and upstream's multi-GPU path (``_GHOST_PATH_PINS``); a class without a pin (or a model of another class)
+        gives a pin that cannot match, so P>1 is refused with the reason. TF32 on request
+        (``matmul_precision="high"``) runs at P>1: MACE-MP-0's TF32 P=2 and P=4 forces, energy and stress stay
+        within TF32 P=1's own run-to-run noise."""
         from ..adapters.patches import PatchRecord
 
         interactions = list(self.module.interactions)
-        points = tuple(ExchangePoint(name=f"interactions.{index}.node_feats", module=f"interactions.{index}",
-                                     width=int(block.node_feats_irreps.dim), hook="input", arg="node_feats")
-                       for index, block in enumerate(interactions) if index > 0)
         classes = [type(self.module)] + [type(block) for block in interactions]
         if hasattr(self.module, "pair_repulsion_fn"):
             classes.append(type(self.module.pair_repulsion_fn))
@@ -512,8 +575,44 @@ class MACEAdapter:
         pins = tuple(PatchRecord(name=f"mace.shard.{target.rsplit('.', 2)[-2]}", target=target,
                                  distribution="mace-torch", versions=_SHARD_PIN_VERSIONS,
                                  source_sha256=_SHARD_PINS.get(target, "0" * 64),
-                                 reason="the multi-GPU node-halo hooks rely on this forward unchanged")
+                                 reason="the multi-GPU forward relies on this forward unchanged")
                      for target in targets)
-        return ShardSpec(exchange_points=points, pad_species=int(self.module.atomic_numbers[0]), source_pins=pins)
+        pins += tuple(PatchRecord(name=f"mace.shard.{name}", target=target, distribution="mace-torch",
+                                  versions=_SHARD_PIN_VERSIONS, source_sha256=_SHARD_PINS[target],
+                                  reason="the multi-GPU forward runs upstream's multi-GPU path")
+                      for name, target, _ in _GHOST_PATH_PINS)
+        return ShardSpec(exchange_points=_exchange_points(self.module), pad_species=int(self.module.atomic_numbers[0]),
+                         source_pins=pins, allow_tf32=True, owned_slot_inputs=_owned_skip_connections(self.module))
 
+    def sharded_energy(self, inputs: MACEInput, positions: Tensor, cell: Tensor, ctx) -> Tensor:
+        """This rank's share of MACE's energy at P>1 (``fastmd.adapters.protocol.ShardedTap``): the FP64 sum of
+        the owned real slots' node energies of upstream's own multi-GPU forward (``ScaleShiftMACE.forward`` with
+        ``lammps_mliap=True``) over the rank's rows (owned slots, then ghost rows).
 
+        That forward reads the edge vectors (upstream's ``get_edge_vectors_and_lengths`` of the rank's positions and
+        edge shifts, the function and inputs of :meth:`node_energy`), embeds every row and runs the first block's
+        ``linear_up`` on every row (a ghost row's own species). Each block sums its messages at the receivers (all
+        owned; the sum's buffer spans every row) and truncates to the owned slots (``truncate_ghosts``): the
+        block's linear, the skip connections, the products and the readouts run on the owned slots only. In every
+        block but the first, ``linear_up`` runs on the owned slots and its output's ghost rows are filled with their
+        owners' (``handle_lammps``: upstream's exchange function calls :class:`_GhostExchange`, which calls
+        ``ctx.exchange`` and, in the backward, ``ctx.reverse_sum``). A residual first block's skip connection
+        (MACE-MP-0's), which upstream computes on every row and then truncates, runs on the owned slots only (the
+        runtime's ghost-row trimming, which registers its hook on the blocks' ``skip_tp`` around this call:
+        :func:`_owned_skip_connections`). Besides the
+        embedding and the first ``linear_up``, only the per-row lookups and sums that upstream sizes by every row
+        (the E0s, the pair repulsion, each block's message sum, the first block's density sum) cover the ghost
+        rows."""
+        from mace.modules.utils import get_edge_vectors_and_lengths
+
+        data = self._data(inputs, positions, cell)
+        owned = ctx.owned_rows
+        vectors, _ = get_edge_vectors_and_lengths(positions=positions, edge_index=data["edge_index"],
+                                                  shifts=data["shifts"])
+        data.update(vectors=vectors, natoms=(owned, ctx.ghost_rows), batch=inputs.graph_index[:owned],
+                    lammps_class=_GhostExchange(ctx, _exchange_points(self.module)))
+        out = self.module(data, training=False, compute_force=False, compute_virials=False, compute_stress=False,
+                          compute_displacement=False, lammps_mliap=True)
+        energies = out["node_energy"]
+        # A select, not a product: an unused slot's energy may be anything.
+        return torch.where(ctx.owned[:owned], energies, energies.new_zeros(())).sum()

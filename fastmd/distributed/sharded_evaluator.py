@@ -12,10 +12,14 @@ adapter's ``ShardSpec``:
   device when the skin is used up), the declared exchanges as hooks (or called
   by the adapter's own layer loop, ``ShardedTap``), the sharded derivative.
   ``execution="model_graph"`` captures the evaluation step per layout in one
-  CUDA graph (the MD integrator stays outside): the ghost coordinates' COPY,
-  the builder's exact filter, the model with its exchanges, the backward with
-  their reverse SUMs, the energy's sum over the ranks and the step flags (NCCL
-  inside the graph); ``"eager"`` runs the same step uncaptured.
+  CUDA graph: the ghost coordinates' COPY, the builder's exact filter, the
+  model with its exchanges, the backward with their reverse SUMs, the
+  energy's sum over the ranks and the step flags (NCCL inside the graph);
+  ``"eager"`` runs the same step uncaptured. Under model_graph the MD driver
+  (``from_evaluator``) runs each step through ``md_step``: the integrator's
+  halves inside the same captured step, the refresh at the committed
+  positions before it, a discarded step rolled back (as
+  ``DistributedMatRISEvaluator.md_step``).
 * One CUDA rank: the single-GPU engine's parts, unchanged (a single-system
   fixed-capacity builder and the engine-owned ``EnergyDerivative``, captured
   likewise for ``"model_graph"``); no hook is installed.
@@ -45,6 +49,7 @@ import dataclasses
 import gc
 import hashlib
 import json
+import struct
 import time
 import traceback
 import warnings
@@ -141,6 +146,8 @@ def dry_run_record(adapter, config, *, atoms, world_size: int, device=None, para
     cutoff = adapter.topology_spec().cutoff
     partition = DomainPartition(torch.tensor(atoms.cell.array, dtype=torch.float64), world_size,
                                 parallel.domain_grid, pbc)
+    if world_size > 1:
+        partition.check_image_reach(cutoff + skin)
     positions = torch.tensor(atoms.positions, dtype=torch.float64)
     owner = partition.owner_of(partition.wrap_positions(positions))
     matrix = []  # matrix[sender][receiver]: the sender's atoms within the receiver's halo
@@ -421,6 +428,19 @@ class ShardedEvaluator:
     distribute_restart = DistributedMatRISEvaluator.distribute_restart
     gather = DistributedMatRISEvaluator.gather
 
+    _md_graph = None  # (set in __init__; a class default for a close() after a failed construction)
+    # Refreshes one in-graph MD step may take (a look-ahead or first one, then redos), as DistributedMatRISEvaluator's.
+    _MD_STEP_REFRESHES = 4
+    # The in-graph MD step's look-ahead: refresh before the step whose largest displacement since the refresh,
+    # extrapolated by this many times the last step's increase, would exceed half the skin (a violation is still
+    # caught after the step and redone). One step: an epoch then ends one step before the out-of-graph path's, which
+    # refreshes at the step that leaves the skin (EpochTopology's three steps made the epochs about a quarter as long
+    # at 1,500 K).
+    _MD_LOOKAHEAD_STEPS = 1
+    # After a step that stays stale right after its refresh (its own drift exceeds half the skin) and runs outside the
+    # graph, this many more steps run outside before the in-graph step is tried again (its refresh and capture).
+    _MD_FALLBACK_STEPS = 16
+
     def __init__(self, model, cell, *, pbc=(True, True, True), config=None, parallel: ParallelConfig | None = None,
                  context: ExchangeContext | None = None):
         from fastmd.adapters import as_adapter
@@ -459,6 +479,8 @@ class ShardedEvaluator:
                                              self.parallel.domain_grid, pbc)
             self.skin = float(self.parallel.topology_skin)
             self.cutoff = float(adapter.topology_spec().cutoff)
+            if world > 1:
+                self.partition.check_image_reach(self.cutoff + self.skin)
             self._config, self._pbc = config, tuple(bool(axis) for axis in pbc)
             from fastmd.engine import memory_admission
             self._admission_on = self.device.type == "cuda" and memory_admission.enabled()
@@ -500,11 +522,17 @@ class ShardedEvaluator:
         self.rank_contract_sha256 = hashlib.sha256(json.dumps(contract, sort_keys=True, default=str)
                                                    .encode()).hexdigest()
         error = None
+        self.derivative = None  # one CUDA rank: the single-GPU engine's own (_SingleSystem)
         try:
             hooked = tuple(point for point in self.spec.exchange_points if point.module is not None)
             if not self.single and hooked:
                 hooks = LineExchangeHooks if self._line else ExchangeHooks
                 self.hooks = hooks.acquire(self.model, hooked)
+            if not self.single:
+                # The CPU reference's (a node-halo derivative resolves the declared ghost-row trimming's modules: a
+                # name that matches none refuses the evaluator on every rank, as does the CUDA strategy's own).
+                self.derivative = (LinePartialDerivative(self.adapter, self.spec.exchange_points) if self._line
+                                   else ShardedEnergyDerivative(self.adapter, self.spec))
             if self.single:
                 self._engine = _SingleSystem(self.adapter, self.partition.cell, skin=self.skin, device=self.device,
                                              capacity_step=self.spec.capacity_step)
@@ -530,8 +558,6 @@ class ShardedEvaluator:
                 self.hooks.release()
                 self.hooks = None
             raise
-        self.derivative = (LinePartialDerivative(self.adapter, self.spec.exchange_points) if self._line
-                           else ShardedEnergyDerivative(self.adapter, self.spec))
         self.epoch = 0
         self.refreshes = 0
         self.line_slot_refreshes = 0  # refreshes a line-graph shard's slot flag asked for (none within the skin)
@@ -540,6 +566,13 @@ class ShardedEvaluator:
         self.reference_energy = None
         self._key = None
         self._graphs = {}  # stress (bool) -> (the captured step of the current layout, its outputs): one at most
+        # The in-graph MD step (md_step): (its key, graph, outputs) or None; the captured graphs are one at most in
+        # all (this or one of _graphs). The MD driver's hook it serves, the refresh count at the hook's install, the
+        # stress once asked for, the last agreed displacement since the refresh and the look-ahead's verdict.
+        self._md_graph = self._md = self._md_refreshes = self._md_displacement = None
+        self._md_stress = self._md_ahead = False
+        self._md_outside = 0  # steps still to run outside after a fallback (_MD_FALLBACK_STEPS)
+        self.md_steps = self.md_redos = self.md_overflows = 0  # in-graph MD steps, their redos, the overflows'
         self._pool = None
         self._agreed_exchanges = self.single
         self.natoms = 0
@@ -608,10 +641,11 @@ class ShardedEvaluator:
                 return self._evaluate_reference(state, stress)
             return self._evaluate_cuda(state, stress)
 
-    def _refresh(self, state: AtomState) -> AtomState:
+    def _refresh(self, state: AtomState, floor: dict | None = None) -> AtomState:
         started = time.perf_counter()
         engine = self._engine
-        state = engine.refresh(state)
+        # (floor: the in-graph MD step's capacity floor, P>1 on CUDA only.)
+        state = engine.refresh(state) if floor is None else engine.refresh(state, floor)
         self.refreshes += 1
         self._totals(state)
         if engine.key != self._key:
@@ -625,12 +659,24 @@ class ShardedEvaluator:
             # Before the first forward that exchanges (collective).
             if self._line:
                 engine.agree(*_counted(engine.count))
+                self._agreed_exchanges = True
             else:
                 agree_exchanges(self.context, self.spec, *_counted(engine.count), engine.layout.rows)
-            self._agreed_exchanges = True
+                self._agreed_exchanges = self._trimming_checked(engine.layout.ghost_rows)
         self._ids, self._numbers = state.ids, state.numbers
         self.last_stats["refresh_ms"] = (time.perf_counter() - started) * 1000
         return state
+
+    def _trimming_checked(self, ghost_rows: int) -> bool:
+        """Whether the counting forward that just ran (and was agreed) checked the declared ghost-row trimming
+        (collective where trimming is declared): always without one; with one, once a rank had ghost rows (a rank
+        without them trims nothing, so until then the counting forward runs again at each refresh, before a step in
+        which a wrong declaration would raise on the ranks with ghost rows only)."""
+        if not (self.spec.owned_slot_inputs or self.spec.zero_ghost_outputs):
+            return True
+        if self.context.world_size == 1:
+            return ghost_rows > 0
+        return any(self.context.all_gather_object(ghost_rows > 0))
 
     def _admit(self) -> None:
         """The memory admission of a new layout (collective; CUDA). This rank's predicted peaks of the candidate
@@ -819,6 +865,8 @@ class ShardedEvaluator:
 
         engine = self._engine
         started = time.perf_counter()
+        if self._md_graph is not None:
+            self._release_graph()  # one captured graph in all: the in-graph MD step's goes
         torch.cuda.empty_cache()
         stream = self._side_stream()
         stream.wait_stream(torch.cuda.current_stream(self.device))
@@ -847,11 +895,225 @@ class ShardedEvaluator:
         self.last_stats["capture_ms"] = (time.perf_counter() - started) * 1000
 
     def _release_graph(self) -> None:
-        if self._graphs:
+        if self._graphs or self._md_graph is not None:
             # A queued replay may still read the graph's private allocations.
             torch.cuda.synchronize(self.device)
             self._graphs = {}
+            self._md_graph = None
             gc.collect()
+
+    # --- the in-graph MD step ----------------------------------------------------------------------------------
+
+    def md_step(self, md, *, stress: bool = False) -> DistributedPrediction | None:
+        """One MD step with the integrator inside the captured step (collective; P>1 on CUDA, model_graph).
+
+        ``md`` is the evaluator-driven MD driver's hook
+        (``GPUResidentMolecularDynamics.from_evaluator``, the hook of
+        ``DistributedMatRISEvaluator.md_step``): ``refresh_state()`` (the
+        committed state q_n, its payload also carrying the cached forces
+        F(q_n)), ``install(state, rows)``, ``capture_key()``, the captured
+        halves ``pre(rows)`` / ``post(forces, energy, rows)`` / ``flags(rows)``
+        on the topology's owned slots, and ``restore()`` / ``state()``.
+
+        A step is one replay of a graph that runs the integrator's pre-force
+        half into the owned slots, the evaluation step of ``evaluate`` (ghost
+        COPY, exact filter, the model with its exchanges, the backward, the
+        energy's sum) and the post-force half, then the step flags' MAX (NCCL
+        inside the graph), and one download of the flags. A refresh runs
+        BEFORE the step, at the committed positions q_n (the first step, a
+        refresh by ``evaluate`` since, the look-ahead: the agreed displacement
+        since the refresh, extrapolated, would exceed half the skin): the
+        migration with the cached forces, the topology, the memory admission
+        of a new layout, the integrator's reorder into slots of the owned
+        capacity, then a capture where the key (the layout, the hook's
+        integrator buffers, the stress) changed. A step that must be discarded
+        (a capacity overflow, candidates the skin no longer covers, line slots
+        that do not cover it) restores the integrator to q_n (the backup the
+        graph took) and is redone after a refresh there; an overflow grows the
+        capacities to at least the discarded step's own counts (the capacity
+        floor), retried while that agreed capacity grows. Non-finite step
+        positions, energy, forces or integrator state, and (with several
+        ranks) an atom with more neighbours than the model's cap in the step's
+        build (the captured step counts from zero), restore the integrator,
+        then raise on every rank.
+
+        Returns None where this evaluator does not run the captured P>1 step
+        (one CUDA rank, the CPU reference, eager; also after execution="auto"
+        chose eager at this step's refresh) and when the step leaves its
+        candidates stale right after a refresh at q_n (its own drift exceeds
+        half the skin; the integrator is restored): the driver then runs the
+        step with the integrator outside, around ``evaluate`` (which refreshes
+        at q_{n+1}), and the next ``_MD_FALLBACK_STEPS`` steps too. ``stress``
+        (the same on every rank): the prediction carries the stress; from then
+        on the captured step computes it.
+        """
+        if self.closed:
+            raise RuntimeError("ShardedEvaluator: md_step after close() (its hooks are removed)")
+        if not isinstance(stress, bool):
+            raise TypeError("ShardedEvaluator.md_step: stress must be a bool")
+        if self.single or self.device.type != "cuda" or self.execution != "model_graph":
+            return None
+        if stress and not all(self._pbc):
+            raise ValueError("ShardedEvaluator.md_step: the stress needs a cell periodic in all three directions")
+        if self._md_outside:  # after a step that ran outside (agreed: the same count on every rank)
+            self._md_outside -= 1
+            return None
+        with matmul_precision_scope(self.matmul_precision):
+            return self._md_step(md, stress)
+
+    def _md_step(self, md, stress: bool) -> DistributedPrediction | None:
+        entered = time.perf_counter()
+        self.last_stats = {}
+        engine = self._engine
+        floor = overflowed = None
+        attempts = refreshes = 0
+        refresh_ms = capture_ms = 0.0
+        while True:
+            attempts += 1
+            refreshed = (attempts > 1 or md is not self._md or self._md_ahead or self.refreshes != self._md_refreshes)
+            if refreshed:
+                refreshes += 1
+                if refreshes > self._MD_STEP_REFRESHES:
+                    raise RuntimeError(f"ShardedEvaluator: the in-graph MD step was discarded after "
+                                       f"{self._MD_STEP_REFRESHES} refreshes")
+                self._md_refresh(md, floor)
+                refresh_ms += self.last_stats.get("refresh_ms", 0.0)
+                if overflowed is not None and not any(
+                        grown > before for grown, before in zip(engine.topology.capacities(), overflowed)):
+                    # (The capacities are the tiers of the MAX demand over the ranks: the same verdict on every rank.)
+                    raise RuntimeError("ShardedEvaluator: the in-graph MD step still overflows after a capacity "
+                                       "refresh")
+                if self.execution != "model_graph":  # execution="auto" chose eager at this refresh
+                    return None
+            # The stress once asked for (the same on every rank), then on every later capture.
+            restressed = stress and not self._md_stress
+            self._md_stress = self._md_stress or stress
+            key = (engine.key, md.capture_key(), self._md_stress)
+            current = self._md_graph is not None and self._md_graph[0] == key
+            if refreshed or restressed or self._md_graph is None:
+                # Agreed events (a refresh, the stress, a released graph): every rank captures if any rank's key
+                # changed (its own integrator buffers may have grown), the warm-up and capture being collective.
+                capture = any(self.context._collective(not current, "sharded.md_capture")
+                              if self.context.world_size > 1 else [not current])
+                if capture:
+                    self._capture_md(md, key)
+                    capture_ms += self.last_stats.get("capture_ms", 0.0)
+            elif not current:
+                raise RuntimeError("ShardedEvaluator: the in-graph MD step's buffers changed outside a refresh")
+            _, graph, (energy, forces, flags, virial) = self._md_graph
+            graph.replay()
+            verdict = self._md_verdict(flags)
+            capacity, bits, bad_input, md_nonfinite = verdict[-4:]
+            if bad_input:
+                md.restore()
+                raise ValueError("distributed evaluation: non-finite MD positions (on some rank)")
+            if capacity or verdict[_OVERFLOW] or verdict[_STALE]:
+                # Discarded: the state before the step, and a refresh at it (every rank: the flags are agreed). The
+                # step's outputs live in its graph's pool and the refresh may replace the graph: drop them (and the
+                # graph) first, so that its release frees the pool before the memory admission and the capture.
+                del graph, energy, forces, flags, virial
+                md.restore()
+                self.md_redos += 1
+                self.line_slot_refreshes += int(self._line and bool(verdict[_SLOTS]))
+                if capacity:
+                    # This rank's counts of the discarded step: a floor for the refresh at q_n.
+                    self.md_overflows += 1
+                    floor, overflowed = engine.topology.demand(), engine.topology.capacities()
+                    continue
+                if refreshed:
+                    # Stale right after a refresh at q_n: the step's own drift exceeds half the skin, which another
+                    # refresh at q_n cannot help. The driver runs this step outside (evaluate refreshes at q_{n+1}),
+                    # and the next _MD_FALLBACK_STEPS steps too (each return here costs two captures).
+                    self._md_outside = self._MD_FALLBACK_STEPS
+                    # (The steps outside move the atoms unobserved: unless a refresh comes first, as it does when
+                    # evaluate refreshes them, the next in-graph step extrapolates no growth.)
+                    self._md_displacement = None
+                    self.last_stats.update({"in_graph": False, "attempts": attempts, "md_redos": self.md_redos})
+                    return None
+                floor = overflowed = None
+                continue
+            if verdict[_NONFINITE] or md_nonfinite:
+                md.restore()
+                raise ValueError("distributed evaluation: non-finite energy, forces, MD positions or momenta (on some "
+                                 "rank)")
+            break
+        if self.max_neighbors is not None:
+            largest = int(verdict[_NEIGHBORS])  # this step's builds (the captured step zeroes the count first)
+            self._neighbor_count = max(self._neighbor_count, largest)
+            try:
+                self._refuse_neighbor_cap(largest)  # on every rank, from the same flags
+            except RuntimeError:
+                md.restore()  # the state before the refused step, as for the other refusals
+                raise
+            self.neighbor_cap_summary()  # warns once when an atom exceeds the model's neighbour cap
+        displacement = struct.unpack("<f", struct.pack("<i", int(bits)))[0]
+        previous = self._md_displacement
+        growth = 0.0 if previous is None else max(displacement - previous, 0.0)
+        self._md_displacement = displacement
+        self._md_ahead = 2.0 * (displacement + self._MD_LOOKAHEAD_STEPS * growth) > self.skin
+        n = engine.n_owned
+        energy = energy.detach().reshape(()).clone()
+        forces = forces[:n].detach().clone()
+        virial = virial.detach().clone() if stress else None
+        self.epoch += 1
+        self.md_steps += 1
+        self.last_stats.update({
+            "evaluate_ms": (time.perf_counter() - entered) * 1000, "refreshed": refreshes > 0,
+            "refreshes": self.refreshes, "captured": True, "in_graph": True, "attempts": attempts,
+            "md_redos": self.md_redos, "md_overflows": self.md_overflows, "max_displacement": displacement,
+            "refresh_ms": refresh_ms,
+            "capture_ms": capture_ms,
+            "communication": dict(self.context.comm.stats) if hasattr(self.context.comm, "stats") else {}})
+        return self._prediction(md.state(), forces, energy, virial)
+
+    @staticmethod
+    def _md_verdict(flags: Tensor) -> list:
+        """The agreed flags of an in-graph MD step on the host (its one synchronization)."""
+        return flags.cpu().tolist()
+
+    def _md_refresh(self, md, floor) -> None:
+        """The in-graph MD step's refresh at the committed state q_n (collective): the migration of the atoms with
+        their cached forces, the topology (``floor``: this rank's counts of a step that overflowed), the admission of
+        a new layout, and the integrator's rows reordered into slots of the topology's owned capacity."""
+        state = self._refresh(md.refresh_state(), floor)
+        engine = self._engine
+        engine.new_state.fill_(0)
+        md.install(state, engine.topology.n_cap)
+        self._md, self._md_refreshes = md, self.refreshes
+        self._md_displacement, self._md_ahead = 0.0, False
+
+    def _capture_md(self, md, key) -> None:
+        """Capture the in-graph MD step (``key``: the layout, the hook's integrator buffers, the stress) on the side
+        stream after a warm-up there, which the integrator's restore then undoes (both collective). The plain
+        step's graph goes first (one captured graph in all). A capture that fails on one rank fails on every rank."""
+        from fastmd.engine._graph_capture import capture_graph
+
+        engine, stress = self._engine, key[2]
+        started = time.perf_counter()
+        self._release_graph()
+        torch.cuda.empty_cache()
+        stream = self._side_stream()
+        stream.wait_stream(torch.cuda.current_stream(self.device))
+        with torch.cuda.stream(stream):
+            for _ in range(_CAPTURE_WARMUPS):
+                engine.step(stress, md=md)  # agreed count, as for the plain step's capture
+                md.restore()  # every warm-up starts at the same committed state
+        torch.cuda.current_stream(self.device).wait_stream(stream)
+        torch.cuda.synchronize(self.device)
+        torch.cuda.empty_cache()
+        if self._pool is None:
+            self._pool = torch.cuda.graph_pool_handle()
+        gc.collect()
+        graph, outputs, error = torch.cuda.CUDAGraph(), None, None
+        try:
+            # On the warm-up's (this evaluator's own) stream, as the plain step's capture (see _capture).
+            with capture_graph(graph, pool=self._pool, stream=stream, check_replay=False):
+                outputs = engine.step(stress, md=md)
+        except (RuntimeError, torch.cuda.OutOfMemoryError) as exc:
+            error = f"capture failed: {type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+        self.context.collective_check(error)
+        self._md_graph = (key, graph, outputs)
+        self.last_stats["capture_ms"] = (time.perf_counter() - started) * 1000
 
     def _evaluate_reference(self, state: AtomState, stress: bool) -> DistributedPrediction:
         """CPU: migrate, rebuild the exact rows and edges, one eager forward and backward (collective)."""
@@ -887,7 +1149,7 @@ class ShardedEvaluator:
                 fired, shapes = _counted(lambda: count_exchanges(self.derivative, inputs, batch.positions, batch.cell,
                                                                  topology.layout, topology.owned_mask, n_total, first))
                 agree_exchanges(self.context, self.spec, fired, shapes, topology.layout.rows)
-            self._agreed_exchanges = True
+            self._agreed_exchanges = self._line or self._trimming_checked(topology.layout.ghost_rows)
         totals, forces = self.derivative(inputs, batch.positions, batch.cell, topology.owned_mask, topology.layout,
                                          stress=stress, n_total=n_total, first=first)
         if self.context.world_size > 1:
@@ -989,7 +1251,7 @@ class ShardedEvaluator:
             # Forward bytes of this rank's ghost rows (and line slots) per evaluation (the backward moves those of the
             # differentiable COPYs and the slots again).
             "exchange_bytes_per_step": (ghost_rows * widths + slot_values) * torch.finfo(self.dtype).bits // 8,
-            "refreshes": self.refreshes, "captured": bool(self._graphs),
+            "refreshes": self.refreshes, "captured": bool(self._graphs) or self._md_graph is not None,
             "plan_fingerprint": self.plan.fingerprint, "execution_auto": self.execution_auto,
             "kernels": {d.id: d.chosen for d in self.plan.decisions if d.id.startswith("kernels.")},
             "predicted_peak_bytes": self.predicted_peak,
@@ -997,12 +1259,21 @@ class ShardedEvaluator:
             "rank_contract_sha256": self.rank_contract_sha256,
             **({"global_reductions": [(point.name, point.width) for point in self.spec.global_reductions]}
                if self.spec.global_reductions else {}),
+            # the modules the declared ghost-row trimming resolved to (a class: each submodule of it), where declared
+            **({"ghost_row_trimming": self._trim_paths()} if self.spec.owned_slot_inputs or self.spec.zero_ghost_outputs
+               else {}),
             **({"neighbor_cap": self.neighbor_cap_summary()} if self.max_neighbors is not None
                and self.device.type == "cuda" else {}),
             **({"line_slots": getattr(getattr(self._engine, "topology", self._engine), "stats", {}).get("line_slots", 0),
                 "slot_capacity": getattr(layout, "slots", 0), "line_slot_cutoff": self.spec.line_slot_cutoff,
                 "line_slot_refreshes": self.line_slot_refreshes} if self._line else {}),
         }
+
+    def _trim_paths(self) -> dict | None:
+        """The declared ghost-row trimming's module paths, or None where it is not installed (one CUDA rank)."""
+        derivative = getattr(self._engine, "derivative", None) if self.device.type == "cuda" else self.derivative
+        trim = getattr(derivative, "trim", None)
+        return None if trim is None else trim.paths
 
     def neighbor_cap_summary(self) -> dict | None:
         """For a model that keeps at most ``max_neighbors`` neighbours per atom in its own graph

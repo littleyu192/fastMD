@@ -50,10 +50,12 @@ from torch import Tensor
 
 from fastmd.engine.energy_derivative import _times, cell_volume
 from . import shutdown_registry
-from .partition import AtomState, DomainPartition, migrate_atoms
+from .partition import AtomState, DomainPartition, face_spacings, migrate_atoms
 
 # The exchanges of the running P>1 forward (an _Exchanges), or None: every declared hook passes through.
 _ACTIVE: contextvars.ContextVar = contextvars.ContextVar("matris_node_halo_exchanges", default=None)
+# Only the forward that installs trimming may activate its hooks.
+_TRIMMING: contextvars.ContextVar = contextvars.ContextVar("fastmd_node_halo_trimming", default=None)
 # ShardSpec.message_flow -> the topologies' edge rule: the edges of the owned centres, or every edge with an owned end
 # (an edge between two domains on both ranks).
 EDGE_RULES = {"receiver": "receiver", "both_ends": "either", "line_graph": "either"}  # (line_graph: line_partial)
@@ -181,12 +183,23 @@ def global_sum(values: Tensor, layout: HaloLayout) -> Tensor:
 
 
 class _Exchanges:
-    """The exchanges of one P>1 forward, which the declared hooks call (``count_only``: count, change nothing)."""
+    """The exchanges of one P>1 forward, which the declared hooks call (``count_only``: count, change nothing but
+    the zero ghost rows of a tensor that holds the owned slots only)."""
 
     def __init__(self, layout: HaloLayout | None, *, count_only: bool = False):
         self.layout, self.count_only = layout, count_only
         self.fired: dict[str, int] = {}
         self.shapes: dict[str, tuple] = {}
+
+    @property
+    def owned_rows(self) -> int:
+        """The owned slots (the rows before the ghost rows; without a layout: none known, 0)."""
+        return 0 if self.layout is None else self.layout.n_cap
+
+    @property
+    def ghost_rows(self) -> int:
+        """The ghost rows, after the owned slots (without a layout: none)."""
+        return 0 if self.layout is None else self.layout.ghost_rows
 
     def exchange(self, point, tensor):
         self.fired[point.name] = self.fired.get(point.name, 0) + 1
@@ -196,13 +209,20 @@ class _Exchanges:
                 return tensor
             raise TypeError(f"exchange point {point.name!r}: the hooked value is a {type(tensor).__name__}, "
                             "not a tensor")
-        self.shapes[point.name] = ((int(tensor.shape[0]), math.prod(tensor.shape[1:])) if tensor.ndim else (-1, -1))
-        if self.count_only:
-            return tensor
         layout = self.layout
-        if tensor.ndim == 0 or tensor.shape[0] != layout.rows:
+        # The owned slots only (the modules before it ran on them only, ShardSpec.owned_slot_inputs): the COPY
+        # appends the ghost rows (zeros in the counting forward), the same rows as from every row.
+        owned_only = (layout is not None and layout.ghost_rows > 0 and tensor.ndim > 0
+                      and tensor.shape[0] == layout.n_cap)
+        self.shapes[point.name] = (((layout.rows if owned_only else int(tensor.shape[0])), math.prod(tensor.shape[1:]))
+                                   if tensor.ndim else (-1, -1))
+        if self.count_only:
+            if owned_only:
+                return torch.cat((tensor, tensor.new_zeros((layout.ghost_rows, *tensor.shape[1:]))))
+            return tensor
+        if not owned_only and (tensor.ndim == 0 or tensor.shape[0] != layout.rows):
             raise ValueError(f"exchange point {point.name!r}: {tuple(tensor.shape)} rows, the layout has {layout.rows}")
-        owned = tensor[: layout.n_cap]
+        owned = tensor if owned_only else tensor[: layout.n_cap]
         return torch.cat((owned, halo_copy(owned, layout)))
 
 
@@ -219,10 +239,20 @@ class ShardContext(_Exchanges):
     pooled readout). ``owned``: ``[rows]`` bool, the owned real rows;
     ``n_total``: the atoms of the whole system (FP64 scalar tensor);
     ``first``: ``[]`` bool, this rank is rank 0 (device tensors, read by a
-    captured step). ``world_size``: the Python rank count, or None for a memory
-    probe without a layout (which must preserve the P>1 forward).
+    captured step). ``owned_rows`` and ``ghost_rows``: the layout's owned
+    slots (the rows before the ghost rows) and ghost rows, host ints, for a
+    layer loop that runs its per-atom work on the owned slots only.
+    ``world_size``: the Python rank count, or None for a memory probe without
+    a layout (which must preserve the P>1 forward).
+    ``reverse_sum(x)``: the adjoint of ``exchange`` (one collective), for an
+    upstream exchange that is an autograd function of its own, whose forward
+    calls ``exchange`` (outside autograd) and whose backward calls this.
     ``count_only``: the counting forward (and the memory probe): every call
-    is counted and returns its input (no collective).
+    is counted and returns its input (no collective), except an ``exchange``
+    of a tensor that holds the owned slots only (a layout with ghost rows),
+    which returns it with zero ghost rows appended. ``exchange(point, x)`` may
+    get the owned slots only (a trimmed module's output, ``ShardSpec.
+    owned_slot_inputs``): the COPY appends the ghost rows.
     """
 
     def __init__(self, layout: HaloLayout | None, *, owned: Tensor, n_total: Tensor, first: Tensor,
@@ -230,6 +260,24 @@ class ShardContext(_Exchanges):
         super().__init__(layout, count_only=count_only)
         self.owned, self.n_total, self.first = owned, n_total, first
         self.world_size = None if layout is None else layout.world_size
+
+    @property
+    def owned_rows(self) -> int:
+        """The owned slots (the atoms, then the unused slots): the rows before the ghost rows (without a layout, the
+        memory probe's context, every row)."""
+        return int(self.owned.shape[0]) if self.layout is None else self.layout.n_cap
+
+    def reverse_sum(self, grad: Tensor) -> Tensor:
+        """The adjoint of :meth:`exchange` (``[rows, ...]``, a new tensor): ``grad``'s owned rows plus the sum of its
+        ghost rows' values into their owners' rows, zeros on the ghost rows (the COPY's reverse SUM, one
+        collective)."""
+        if self.count_only:
+            return grad
+        layout = self.layout
+        if grad.ndim == 0 or grad.shape[0] != layout.rows:
+            raise ValueError(f"reverse sum: {tuple(grad.shape)} rows, the layout has {layout.rows}")
+        owned = grad[: layout.n_cap] + layout.reverse_sum(grad[layout.n_cap:])
+        return torch.cat((owned, grad.new_zeros((layout.ghost_rows, *grad.shape[1:]))))
 
     def global_sum(self, point, values: Tensor) -> Tensor:
         self.fired[point.name] = self.fired.get(point.name, 0) + 1
@@ -380,6 +428,148 @@ class ExchangeHooks:
             _ACTIVE.reset(token)
 
 
+def qualified_name(cls) -> str:
+    """``"package.module.Class"`` of ``cls``: how a trimming declaration names a class."""
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+def declared_modules(module, names) -> list:
+    """The submodules of ``module`` that ``names`` declare, in order and each once: a dotted path in ``module``
+    (``"layers.0.gate"``), else a class (``"package.module.Class"``: every submodule of exactly that class). A name
+    that matches no module, or a TorchScript module (which takes no hooks), raises ``ValueError``."""
+    found: list = []
+    for name in names:
+        try:
+            matches = [module.get_submodule(name)]
+        except AttributeError:
+            matches = [submodule for submodule in module.modules() if qualified_name(type(submodule)) == name]
+        if not matches:
+            raise ValueError(f"ShardSpec ghost-row trimming: {name!r} is neither a module path in the model nor the "
+                             "class of one of its modules")
+        if any(isinstance(match, torch.jit.ScriptModule) for match in matches):
+            raise ValueError(f"ShardSpec ghost-row trimming: {name!r} is a TorchScript module, which takes no hooks")
+        found += [match for match in matches if not any(match is other for other in found)]
+    return found
+
+def _trimmed_rows(module, target: int, owner: int):
+    """(owned slots, every row) of the running P>1 forward for a trimming hook of the module with id ``target``
+    registered by the trimming with id ``owner``, or None: outside that forward (another thread's call, a forward
+    whose trimming did not register it, one CUDA rank, the memory probe), on a copy of the module, or a rank without
+    ghost rows."""
+    exchanges, trimming = _ACTIVE.get(), _TRIMMING.get()
+    if exchanges is None or trimming is None or id(trimming) != owner or id(module) != target:
+        return None
+    ghost = exchanges.ghost_rows
+    if not ghost:
+        return None
+    owned = exchanges.owned_rows
+    return owned, owned + ghost
+
+class _OwnedSlotsHook:
+    """Forward pre-hook (with kwargs) of a module of ``ShardSpec.owned_slot_inputs``: inside a P>1 forward, each
+    tensor argument (positional or keyword) with the rank's rows (owned slots, then ghost rows) keeps the owned slots
+    only; every other argument passes as it is. Holds the ids of its module and its trimming only (a deep copy's
+    hook passes). Called
+    without kwargs (another thread's call while the forward that registered it removes it: torch then calls it as a
+    plain pre-hook), it returns the arguments only."""
+
+    __slots__ = ("target", "owner")
+
+    def __init__(self, target, owner):
+        self.target, self.owner = id(target), id(owner)
+
+    def __call__(self, module, args, kwargs=None):
+        rows = _trimmed_rows(module, self.target, self.owner)
+        if rows is None:
+            return None
+        owned, every = rows
+
+        def cut(value):
+            return value[:owned] if isinstance(value, Tensor) and value.ndim > 0 and value.shape[0] == every else value
+
+        args = tuple(cut(arg) for arg in args)
+        return args if kwargs is None else (args, {name: cut(value) for name, value in kwargs.items()})
+
+class _ZeroGhostHook:
+    """Forward hook of a module of ``ShardSpec.zero_ghost_outputs``: inside a P>1 forward, its output (a tensor, or
+    each tensor of a tuple or list) holding the owned slots' rows gets zero ghost rows appended, for a consumer that
+    reads every row (the ghost rows' values are never used). Holds the ids of its module and its trimming only."""
+
+    __slots__ = ("target", "owner")
+
+    def __init__(self, target, owner):
+        self.target, self.owner = id(target), id(owner)
+
+    def __call__(self, module, args, output):
+        rows = _trimmed_rows(module, self.target, self.owner)
+        if rows is None:
+            return None
+        owned, every = rows
+
+        def pad(value):
+            if isinstance(value, Tensor) and value.ndim > 0 and value.shape[0] == owned:
+                return torch.cat((value, value.new_zeros((every - owned, *value.shape[1:]))))
+            return value
+
+        if isinstance(output, Tensor):
+            return pad(output)
+        if isinstance(output, (tuple, list)):
+            values = [pad(value) for value in output]
+            return type(output)(*values) if hasattr(output, "_fields") else type(output)(values)
+        return None
+
+class OwnedSlotHooks:
+    """The ghost-row trimming of a ``ShardSpec`` (``owned_slot_inputs``, ``zero_ghost_outputs``) on one module.
+
+    The declared modules are resolved once (:func:`declared_modules`: a name
+    that matches no module raises ``ValueError``, as does a module whose inputs
+    are an input exchange point's; ``paths`` lists them). :meth:`installed` registers
+    the hooks for one P>1 forward and removes them after it, also when the
+    forward raises; they act only in the context of that forward (a context
+    variable it sets, with the running exchanges', ``ExchangeHooks.exchanging``)
+    and where its layout holds ghost rows, so another thread's call of a module
+    while they are registered passes (also another evaluator's P>1 forward of
+    the same module, trimmed or not), and any hook registered before them (e.g.
+    a test's recorder) sees the rows a module computes before its output is
+    padded. The owned slots and ghost
+    rows are the layout's host ints (a new layout is a new captured step).
+    """
+
+    def __init__(self, module, spec):
+        self.cut = declared_modules(module, spec.owned_slot_inputs)
+        self.pad = declared_modules(module, spec.zero_ghost_outputs)
+        # An input exchange point's module reads the owners' rows in its ghost rows: its inputs are never cut (the
+        # exchange's hook runs first, the cut would then drop the COPY).
+        for point in spec.exchange_points:
+            if point.module is None or point.hook != "input":
+                continue
+            try:
+                exchanged = module.get_submodule(point.module)
+            except AttributeError:
+                continue  # (refused by the exchange hooks with the reason)
+            if any(exchanged is target for target in self.cut):
+                raise ValueError(f"ShardSpec ghost-row trimming: {point.module!r} is the input exchange point "
+                                 f"{point.name!r}; its inputs cannot also be cut to the owned slots")
+        paths = {id(submodule): name for name, submodule in module.named_modules()}
+        # The declared modules' paths (a class declares every submodule of it): what config_summary reports.
+        self.paths = {"owned_slot_inputs": [paths[id(target)] for target in self.cut],
+                      "zero_ghost_outputs": [paths[id(target)] for target in self.pad]}
+
+    @contextlib.contextmanager
+    def installed(self):
+        handles = []
+        token = _TRIMMING.set(self)
+        try:
+            for target in self.cut:
+                handles.append(target.register_forward_pre_hook(_OwnedSlotsHook(target, self), with_kwargs=True))
+            for target in self.pad:
+                handles.append(target.register_forward_hook(_ZeroGhostHook(target, self)))
+            yield self
+        finally:
+            for handle in handles:
+                handle.remove()
+            _TRIMMING.reset(token)
+
+
 class ShardedEnergyDerivative:
     """The engine-owned derivative at P>1 over a node-halo layout: forces, the rank's energy and its virial.
 
@@ -404,19 +594,31 @@ class ShardedEnergyDerivative:
     (every collective issued by the calling thread, the capturing one in a
     CUDA graph capture).
 
-    A pooled readout (``spec.readout == "pooled"``: the adapter's own layer
-    loop, ``ShardedTap.sharded_energy``) returns the rank's share of the
-    energy itself, through a :class:`ShardContext` (``n_total``, ``first``:
-    its device scalars): its owned rows' pooled sums go through the global
-    sums, the head of the summed values is counted on rank 0 only, and the
-    global sums' backward sums every rank's gradient of them, so each rank's
-    backward gives the whole system's gradient on its rows.
+    An adapter's own layer loop (``spec.adapter_called``:
+    ``ShardedTap.sharded_energy``) returns the rank's share of the energy
+    itself, through a :class:`ShardContext`: a per-atom readout the FP64 sum
+    of its owned real rows' energies; a pooled readout (``spec.readout ==
+    "pooled"``; ``n_total``, ``first``: its device scalars) its owned rows'
+    pooled sums through the global sums, the head of the summed values
+    counted on rank 0 only, and the global sums' backward sums every rank's
+    gradient of them, so each rank's backward gives the whole system's
+    gradient on its rows. The declared ghost-row trimming (``trim``, an
+    :class:`OwnedSlotHooks` or None) is registered around each forward of
+    :meth:`local_energy`: the step's, the counting forward's and the memory
+    probe's (which has no layout, so nothing is trimmed there).
     """
 
     def __init__(self, adapter, spec):
         self.adapter = adapter
         self.tap = spec.adapter_called
         self.expected = expected_calls(spec)
+        # The declared ghost-row trimming (its modules resolved now: a name that matches none raises ValueError).
+        self.trim = (OwnedSlotHooks(adapter.module, spec) if spec.owned_slot_inputs or spec.zero_ghost_outputs
+                     else None)
+        if self.trim is not None and getattr(adapter, "compiled", False):
+            # The hooks are registered and removed around every forward, which would invalidate compiled guards.
+            raise ValueError(f"model {getattr(adapter, 'name', type(adapter).__name__)!r}: ghost-row trimming needs "
+                             "eager modules (the adapter runs a compiled module)")
 
     def context(self, layout, owned_mask, n_total, first, *, count_only: bool = False):
         """The exchanges of one forward: a :class:`ShardContext` for the adapter's own layer loop, else the
@@ -426,10 +628,20 @@ class ShardedEnergyDerivative:
         return _Exchanges(layout, count_only=count_only)
 
     def local_energy(self, inputs, positions: Tensor, cell: Tensor, owned_mask: Tensor, exchanges) -> Tensor:
-        """This rank's share of the energy (FP64 scalar) at ``positions`` and ``cell`` (``exchanges`` active)."""
-        if self.tap:
-            return self.adapter.sharded_energy(inputs, positions, cell, exchanges).to(torch.float64).sum()
-        energies = self.adapter.node_energy(inputs, positions, cell).to(torch.float64)
+        """This rank's share of the energy (FP64 scalar) at ``positions`` and ``cell`` (``exchanges`` active), with
+        the declared ghost-row trimming's hooks registered for this forward. An energy tap may return the owned
+        slots' energies only (its readout trimmed) or every row's."""
+        with contextlib.nullcontext() if self.trim is None else self.trim.installed():
+            if self.tap:
+                return self.adapter.sharded_energy(inputs, positions, cell, exchanges).to(torch.float64).sum()
+            energies = self.adapter.node_energy(inputs, positions, cell).to(torch.float64)
+        if energies.shape[0] != owned_mask.shape[0]:
+            # The owned slots' energies only (the readout ran on them only, ShardSpec.owned_slot_inputs).
+            owned = exchanges.owned_rows
+            if not (exchanges.ghost_rows and energies.shape[0] == owned):
+                raise ValueError(f"node_energy returned {energies.shape[0]} rows; the rank has "
+                                 f"{owned_mask.shape[0]} rows ({owned} owned slots)")
+            owned_mask = owned_mask[:owned]
         # A select, not a product: a padded row's energy may be anything, NaN included.
         return torch.where(owned_mask, energies, energies.new_zeros(())).sum()
 
@@ -508,6 +720,22 @@ def _prepared(adapter, batch):
         return None, f"{type(error).__name__}: {error}"
 
 
+def md_step_flags(md, totals: Tensor, forces: Tensor, status, positions: Tensor) -> Tensor:
+    """The in-graph MD step's post-force half and its flags (``ShardedEvaluator.md_step``; device only, inside the
+    captured step after the energy's sum over the ranks and before the flags' MAX). ``md`` is the MD driver's hook
+    (``post(forces, energy, rows)``, ``flags(rows)``), ``positions`` the ``[rows, 3]`` owned slots its pre-force half
+    wrote and ``status`` the step's build. Returns ``[capacity overflow, largest displacement (float32 bits, a
+    nonnegative float's bits order as its value), non-finite step positions, the integrator's non-finite positions or
+    momenta]``: the overflow of a capacity, not of used-up candidates (which the stale flag reports)."""
+    rows = positions.shape[0]
+    with torch.no_grad():
+        md.post(forces[:rows], totals[:1], rows)
+        capacity = status.overflow.reshape(-1)[:1] & status.candidate_valid.reshape(-1)[:1]
+        displacement = status.max_displacement.reshape(1).to(torch.float32).view(torch.int32).to(torch.int64)
+        return torch.cat((capacity.long(), displacement, (~torch.isfinite(positions).all()).long().reshape(1),
+                          md.flags(rows).reshape(1).long()))
+
+
 class NodeHaloStrategy:
     """The node-halo exchange of one rank at P>1 on CUDA: the topology, the declared exchanges and the derivative.
 
@@ -526,8 +754,15 @@ class NodeHaloStrategy:
     stress)`` (flags: overflow, used-up candidates, non-finite results, a
     rank's new state: ``new_state``, set by the caller; for a model with a
     neighbour cap (``TopologySpec.max_neighbors``) a fifth, the most
-    neighbours of an atom in the builds so far; ``stress``: the [3, 3]
+    neighbours of an atom in the builds since the caller last zeroed
+    ``neighbor_count`` (before each step); ``stress``: the [3, 3]
     stress in eV/Å³ in the positions' dtype, None without ``stress``).
+    ``step(stress, md)``: the in-graph MD step (``ShardedEvaluator.md_step``)
+    with the MD driver's hook ``md``: its pre-force half writes the owned
+    slots before the build, its post-force half runs after the energy's sum,
+    and the four flags of :func:`md_step_flags` follow the step's own (one
+    MAX); it zeroes ``neighbor_count`` itself, first, inside the captured
+    step. ``refresh(state, floor)``: the topology's capacity floor.
     ``key``: changes when the buffers a captured step reads are replaced.
     The edge rule follows ``spec.message_flow`` (:data:`EDGE_RULES`).
     """
@@ -537,8 +772,9 @@ class NodeHaloStrategy:
 
         self.adapter, self.context = adapter, context
         topology_spec = adapter.topology_spec()
-        # The builds' running maximum of an atom's edges, for a model with a neighbour cap (an owned atom's edges
-        # are all on its rank, a ghost row's at most all: the MAX over the ranks is the whole system's).
+        # The builds' maximum of an atom's edges, for a model with a neighbour cap (an owned atom's edges are all on
+        # its rank, a ghost row's at most all: the MAX over the ranks is the whole system's); the evaluator zeroes it
+        # before each step.
         self.neighbor_count = (None if topology_spec.max_neighbors is None
                                else torch.zeros(1, dtype=torch.int64, device=device))
         self.topology = NodeHaloTopology(partition, context, cutoff=topology_spec.cutoff, skin=skin,
@@ -555,9 +791,9 @@ class NodeHaloStrategy:
         self.n_total = torch.zeros((), dtype=torch.float64, device=device)
         self.first = torch.full((), context.rank == 0, dtype=torch.bool, device=device)
 
-    def refresh(self, state: AtomState) -> AtomState:
+    def refresh(self, state: AtomState, floor: dict | None = None) -> AtomState:
         topology = self.topology
-        state = topology.refresh(state)
+        state = topology.refresh(state, floor)
         self.layout = topology.layout()
         inputs, error = _prepared(self.adapter, topology.builder.batch)
         # The adapter's checks (e.g. an element outside the model) fail on the ranks holding the atom only.
@@ -573,10 +809,15 @@ class NodeHaloStrategy:
     def set_positions(self, positions: Tensor) -> None:
         self.topology.set_positions(positions)
 
-    def step(self, stress: bool = False):
+    def step(self, stress: bool = False, md=None):
         topology = self.topology
         builder = topology.builder
         with torch.no_grad():
+            if md is not None:
+                if self.neighbor_count is not None:
+                    self.neighbor_count.zero_()  # this step's builds only (inside the captured MD step)
+                positions = md.pre(topology.n_cap)
+                topology.load_owned_slots(positions)
             _, status = topology.build_rows()
         batch = builder.batch
         totals, forces = self.derivative(self.inputs, batch.positions, batch.cell, builder.owned_mask, self.layout,
@@ -586,6 +827,8 @@ class NodeHaloStrategy:
                            self.new_state, *(() if self.neighbor_count is None else (self.neighbor_count,))))
         group = self.context.group
         dist.all_reduce(totals, op=dist.ReduceOp.SUM, group=group)
+        if md is not None:
+            flags = torch.cat((flags, md_step_flags(md, totals, forces, status, positions)))
         dist.all_reduce(flags, op=dist.ReduceOp.MAX, group=group)
         return totals[:1], forces, flags, summed_stress(totals, batch.cell, forces.dtype)
 
@@ -626,23 +869,23 @@ class _ReferenceBatch:
                                 edge_image=edge_image, n_edges=None, cutoff=cutoff, padding=None)
 
 
-def _image_range(cell: Tensor, cutoff: float) -> Tensor:
-    """Every integer image whose cell translation may hold a neighbour within ``cutoff`` of a wrapped row."""
-    # Fractional reach is bounded by reciprocal-plane spacing, including
-    # periodic translations whose short Cartesian length comes from skew.
-    lengths = torch.linalg.inv(cell.double()).norm(dim=0).reciprocal()
-    reach = [int(math.ceil(cutoff / float(length))) + 1 for length in lengths]
+def _image_range(cell: Tensor, cutoff: float, spacings: Tensor | None = None) -> Tensor:
+    """Every integer image whose cell translation may hold a neighbour within ``cutoff`` of a wrapped row (a pair's
+    distance exceeds its fractional offset along an axis times the cell's face spacing there). ``spacings``: the
+    face spacings (``DomainPartition.face_spacings``, an orthogonal cell's lengths); None: computed from ``cell``."""
+    spacings = face_spacings(cell) if spacings is None else spacings
+    reach = [int(math.ceil(cutoff / float(spacing))) + 1 for spacing in spacings]
     axes = [torch.arange(-k, k + 1, dtype=torch.float64) for k in reach]
     return torch.cartesian_prod(*axes)
 
 
 def reference_edges(positions: Tensor, owned: int, cell: Tensor, cutoff: float,
-                    edges: str = "receiver") -> tuple[Tensor, Tensor]:
+                    edges: str = "receiver", spacings: Tensor | None = None) -> tuple[Tensor, Tensor]:
     """The directed edges (centre, neighbour) and images of the owned centres (rows ``[0, owned)``) to every row
     within ``cutoff`` (exact, any image; not a row to itself at image 0), centre-major, on the CPU; ``edges="either"``
     adds the edges of the other rows to the owned ones (the reverse of each owned centre's edge to a row at or past
     ``owned``, its image negated)."""
-    images = _image_range(cell, cutoff).to(positions.dtype)
+    images = _image_range(cell, cutoff, spacings).to(positions.dtype)
     shifts = images @ cell.to(positions.dtype)
     centres = positions[:owned]
     # [owned, rows, images, 3]: neighbour + shift - centre
@@ -722,7 +965,7 @@ class NodeHaloReferenceTopology:
         rows = torch.cat((owned, self.layout.copy(owned)))
         pads = torch.full((n_cap - n,), self.pad_species, dtype=torch.long)
         species = torch.cat((state.numbers.long(), pads, incoming[:, 1])).to(torch.int32)
-        edge_index, edge_image = reference_edges(rows, n, cell, self.cutoff, self.edges)
+        edge_index, edge_image = reference_edges(rows, n, cell, self.cutoff, self.edges, partition.face_spacings)
         self.batch = _ReferenceBatch(rows, cell, species, edge_index, edge_image, self.cutoff).batch
         self.owned_mask = torch.arange(rows.shape[0]) < n
         self.atom_ids = torch.cat((state.ids.long(), torch.full((n_cap - n,), -1, dtype=torch.long), incoming[:, 0]))

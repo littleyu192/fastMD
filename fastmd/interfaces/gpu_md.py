@@ -2230,23 +2230,25 @@ class GPUResidentMolecularDynamics:
         ``allreduce_sum_``, nvt_nhc two per half step (+1 for ``fix_com``);
         no host synchronization.
 
-        ``integrator_in_graph`` (default True): when the evaluator runs the
-        topology epoch's model_graph (P>1 CUDA), each step is ONE replay of a
-        graph that also runs the integrator's halves
-        (``DistributedMatRISEvaluator.md_step``): the integrator's slots are
-        sized to the topology's owned capacity, the epoch refresh (migration
-        of the atoms with their cached forces, the integrator's in-place
-        reorder) runs at the committed positions before the step, and a step
-        that must be redone (capacity overflow, skin violation) is rolled back
-        to them first. Otherwise (False, or eager, the CPU reference and the
-        single-rank engine) the integrator runs outside the evaluator's
-        captured step, around ``evaluate`` (the op sequence and collectives of
-        the removed step 3.3 driver ``DistributedMD``, bitwise); the atoms
-        migrate inside ``evaluate`` and the integrator then reorders its rows
-        in place. The two placements give equal trajectories up to roundoff
-        (refreshes at q_n instead of q_{n+1}, reductions over the padded
-        rows). ``False`` is an opt-out for one version; an evaluator stand-in
-        without ``md_step`` always runs the integrator outside.
+        ``integrator_in_graph`` (default True): when the evaluator runs its
+        captured P>1 step (P>1 CUDA model_graph: the topology epoch's of
+        ``DistributedMatRISEvaluator``, and ``ShardedEvaluator``'s for MACE,
+        SevenNet, ORB and CHGNet), each step is ONE replay of a graph that
+        also runs the integrator's halves (the evaluator's ``md_step``): the
+        integrator's slots are sized to the topology's owned capacity, the
+        refresh (migration of the atoms with their cached forces, the
+        integrator's in-place reorder) runs at the committed positions before
+        the step, and a step that must be redone (capacity overflow, skin
+        violation) is rolled back to them first. Otherwise (False, or eager,
+        the CPU reference and the single-rank engine) the integrator runs
+        outside the evaluator's captured step, around ``evaluate`` (the op
+        sequence and collectives of the removed step 3.3 driver
+        ``DistributedMD``, bitwise); the atoms migrate inside ``evaluate`` and
+        the integrator then reorders its rows in place. The two placements
+        give equal trajectories up to roundoff (refreshes at q_n instead of
+        q_{n+1}, reductions over the padded rows). ``False`` is an opt-out for
+        one version; an evaluator stand-in without ``md_step`` always runs the
+        integrator outside.
 
         Exactly one start: ``state`` (the owned atoms with payload "masses",
         "momenta", in ASE units, float32 for nve/nvt, float64 plus
@@ -2817,11 +2819,12 @@ def _refused_in_domain(name: str):
 
 
 class _InGraphStep:
-    """The evaluator-driven driver's side of the in-graph P>1 MD step (``DistributedMatRISEvaluator.md_step``).
+    """The evaluator-driven driver's side of the in-graph P>1 MD step (``DistributedMatRISEvaluator.md_step``,
+    ``ShardedEvaluator.md_step``).
 
     The evaluator refreshes at the committed state (``refresh_state``,
     ``install``) and captures/replays ``pre`` / ``post`` / ``flags`` inside its
-    whole-step graph on ``rows`` = the topology's owned capacity;
+    captured step on ``rows`` = the topology's owned capacity;
     ``capture_key`` identifies the integrator buffers that graph reads.
     Holds the driver weakly (the evaluator's runner keeps this object).
     """

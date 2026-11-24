@@ -643,6 +643,34 @@ class ShardSpec:
     a growth with a small headroom) for a model whose padded edge rows cost as
     much as real ones; None: the topology's own (1/8 headroom).
 
+    Ghost-row trimming (node halo, ``"receiver"`` or ``"both_ends"``): a
+    ghost row receives no complete message sum, and what a layer computes on
+    it after the sum is never read (the next exchange point replaces it with
+    its owner's row, the energy sums the owned rows), so the per-atom stages
+    after a layer's message sum may run on the owned slots only.
+    ``owned_slot_inputs`` names the modules that run on them: inside a P>1
+    forward each tensor argument of such a module (positional or keyword)
+    whose rows are the rank's rows (owned slots, then ghost rows) keeps the
+    owned slots only. ``zero_ghost_outputs`` names the modules whose output
+    (a tensor, or each tensor of a tuple or list) holding the owned slots'
+    rows gets zero ghost rows appended, for a consumer that reads every row
+    (e.g. a gather over all rows) and drops the ghost rows itself. A module is
+    a dotted path in ``adapter.module`` (``"layers.0.gate"``) or a class
+    (``"package.module.Class"``: every submodule of exactly that class); one
+    that names no module refuses P>1 with the reason. The runtime registers
+    the hooks around each P>1 forward (eager, the captured step, the counting
+    forward) and they act only in that forward's context: another thread
+    (another evaluator's forward included), one CUDA rank and the memory probe
+    see the modules unchanged. An exchange
+    point may then receive its tensor with the owned slots' rows only (its
+    ghost rows are its owners' COPY either way). The generic checks
+    (``tests/ghost_row_checks.py``) verify a declaration through it: the
+    trimmed forward against the untrimmed one, the rows each declared module
+    runs on, and NaN in its ghost rows changing no owned result; the candidate
+    finder (:mod:`fastmd.distributed.ghost_rows`) proposes the modules. A module may
+    not be an input exchange point's, and the model must run eager modules
+    (the hooks change around every forward).
+
     ``message_flow="line_graph"`` (``fastmd.distributed.line_partial``): a
     model with a line graph (``TopologySpec.triplet_cutoff``) whose bond
     updates sum the messages of the triplets at both ends of a bond (CHGNet).
@@ -664,6 +692,10 @@ class ShardSpec:
     kernels: tuple[tuple[str, str], ...] = ()
     capacity_step: CapacityStep | None = None
     line_slot_cutoff: float | None = None  # line_graph: the bonds with triplets are shorter than this (Å)
+    # Ghost-row trimming: the modules that run on the owned slots only, and those whose output gets zero ghost rows
+    # appended (dotted paths in adapter.module or classes "package.module.Class")
+    owned_slot_inputs: tuple[str, ...] = ()
+    zero_ghost_outputs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.message_flow not in ("receiver", "both_ends", "line_graph"):
@@ -696,6 +728,16 @@ class ShardSpec:
         if line and self.adapter_called:
             raise ValueError("ShardSpec: a line-graph shard reads per-atom energies through its hooks (no pooled "
                              "readout, no exchange point without a module)")
+        for field_name in ("owned_slot_inputs", "zero_ghost_outputs"):
+            names = getattr(self, field_name)
+            if (not isinstance(names, tuple) or not all(isinstance(name, str) and name for name in names)
+                    or len(set(names)) != len(names)):
+                raise ValueError(f"ShardSpec: {field_name} is a tuple of distinct module paths or classes (non-empty "
+                                 "strings)")
+            if names and line:
+                # The line-partial exchange has rows of its own (line slots, sink atoms): no trimming there.
+                raise ValueError(f"ShardSpec: {field_name} trims the node halo's ghost rows; a line-graph shard has "
+                                 "none")
         if line != (self.line_slot_cutoff is not None) or (line and not (
                 isinstance(self.line_slot_cutoff, (int, float)) and math.isfinite(self.line_slot_cutoff)
                 and self.line_slot_cutoff > 0)):
@@ -744,8 +786,8 @@ class ShardSpec:
 
     def digest(self) -> str:
         """sha256 of the declaration (the exchange points, the message flow, the readout, the pad species, the
-        pins, and where declared the global reductions, the TF32 refusal, the P>1 kernels, the edge tiers and the
-        line-graph fields): the rank contract's entry and the P>1 plan fingerprint's."""
+        pins, and where declared the global reductions, the TF32 refusal, the P>1 kernels, the edge tiers, the
+        line-graph fields and the trimmed modules): the rank contract's entry and the P>1 plan fingerprint's."""
         import hashlib
         import json
 
@@ -757,7 +799,8 @@ class ShardSpec:
             for p in self.exchange_points]
         declaration = {"points": points, "message_flow": self.message_flow, "readout": self.readout,
                        "pad_species": self.pad_species, "pins": pins}
-        # Only where declared: the digest of a declaration without them is unchanged.
+        # Only where declared: the digest of a declaration without them is unchanged. The TF32 entry marks a refusal
+        # (now the default), so the digest of a shard that allows TF32 keeps its earlier value.
         if self.global_reductions:
             declaration["global_reductions"] = [(p.name, p.width) for p in self.global_reductions]
         if not self.allow_tf32:
@@ -769,6 +812,10 @@ class ShardSpec:
             declaration["capacity_step"] = (step.u_step, step.min_pad_u, step.u_thermal_factor)
         if self.line_slot_cutoff is not None:
             declaration["line_slot_cutoff"] = self.line_slot_cutoff
+        if self.owned_slot_inputs:
+            declaration["owned_slot_inputs"] = list(self.owned_slot_inputs)
+        if self.zero_ghost_outputs:
+            declaration["zero_ghost_outputs"] = list(self.zero_ghost_outputs)
         text = json.dumps(declaration, sort_keys=True, default=str)
         return hashlib.sha256(text.encode()).hexdigest()
 
@@ -786,7 +833,8 @@ class ShardSpecDeclaration(Protocol):
 @runtime_checkable
 class ShardedTap(Protocol):
     """Capability: the model's own P>1 forward and readout over a rank's rows, for a :class:`ShardSpec` whose
-    exchanges the adapter calls itself (a pooled readout: ORB).
+    exchanges the adapter calls itself (a pooled readout: ORB; a per-atom readout whose per-atom work skips the
+    ghost rows: MACE).
 
     ``sharded_energy(inputs, positions, cell, ctx)`` evaluates the model on one
     rank's rows (``prepare`` of its batch: the owned slots, atoms then unused
@@ -809,10 +857,16 @@ class ShardedTap(Protocol):
       number of ranks);
     * ``ctx.owned``: ``[rows]`` bool, the rank's owned real rows (a pooled sum
       reads these rows only); ``ctx.n_total``: the atoms of the whole system
-      (an FP64 scalar tensor).
+      (an FP64 scalar tensor);
+    * ``ctx.owned_rows``, ``ctx.ghost_rows``: the owned slots (the rows before
+      the ghost rows) and the ghost rows (host ints), for a layer loop that runs
+      its per-atom work on the owned slots only;
     * ``ctx.world_size``: the Python rank count, or None for a memory probe
       without a layout. Only an explicit value of 1 guarantees complete
-      neighbourhoods for every centre; probes retain the multi-rank path.
+      neighbourhoods for every centre; probes retain the multi-rank path;
+    * ``ctx.reverse_sum(x)``: the adjoint of ``ctx.exchange`` (one collective),
+      for an upstream exchange that is an autograd function of its own, whose
+      forward calls ``ctx.exchange`` (outside autograd) and whose backward this.
 
     The call must not synchronize the host or differentiate itself, and every
     rank must make the same calls in the same order.

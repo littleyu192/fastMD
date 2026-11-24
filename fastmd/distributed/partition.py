@@ -121,6 +121,22 @@ class AtomState:
         return self.numbers
 
 
+def face_spacings(cell: Tensor) -> Tensor:
+    """CPU FP64 heights across the three lattice vectors (rows of ``cell``).
+
+    Scalar arithmetic gives every rank the same tie-breaking bits without a
+    host-dependent LAPACK inverse or vectorized reduction.
+    """
+    a, b, c = (tuple(float(x) for x in row) for row in torch.as_tensor(cell).detach().cpu().double().tolist())
+
+    def cross(u, v):
+        return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+
+    areas = [cross(b, c), cross(c, a), cross(a, b)]
+    volume = abs(a[0] * areas[0][0] + a[1] * areas[0][1] + a[2] * areas[0][2])
+    return torch.tensor([volume / math.sqrt(x * x + y * y + z * z) for x, y, z in areas], dtype=torch.float64)
+
+
 class DomainPartition:
     """Fixed fractional-coordinate cuts of a nonsingular, fully periodic cell.
 
@@ -148,10 +164,16 @@ class DomainPartition:
         if not bool(torch.isfinite(torch.linalg.det(check))) or torch.linalg.det(check) == 0:
             raise ValueError("cell must be nonsingular")
         self.orthogonal = torch.allclose(unit @ unit.T, torch.eye(3, dtype=torch.float64), atol=1e-7, rtol=0)
-        # Rows are lattice vectors; column i of the inverse is the gradient
-        # of fractional coordinate i. Its reciprocal norm is the separation
-        # of the f_i=0 and f_i=1 planes (not the length of lattice vector i).
-        self.face_distances = torch.linalg.inv(check).norm(dim=0).reciprocal()
+        if self.orthogonal:
+            self.face_spacings = lengths
+        else:
+            # Scale-independent volume: reject a nearly coplanar basis before
+            # inverse geometry and image enumeration become ill-conditioned.
+            if not abs(float(torch.linalg.det(unit))) > 1e-6:
+                raise ValueError("cell must be nonsingular: its three lattice vectors are (nearly) coplanar")
+            self.face_spacings = face_spacings(check)
+        # Compatibility with FastMD's original triclinic partition API.
+        self.face_distances = self.face_spacings
         self.cell = cell.detach().clone()
         self.lengths = lengths
         self.world_size = world_size
@@ -214,12 +236,35 @@ class DomainPartition:
         """
         if not math.isfinite(halo) or halo <= 0:
             raise ValueError("halo width must be finite and positive")
-        for axis, length in enumerate(self.face_distances.tolist()):
+        for axis, length in enumerate(self.face_spacings.tolist()):
+            if halo > length and self.orthogonal:
+                raise ValueError(
+                    f"halo width {halo:g} A (cutoff + skin) exceeds the box length {length:g} A along "
+                    f"axis {'xyz'[axis]}: the distributed engine allows one periodic image per axis; "
+                    f"use a supercell with every length >= {halo:g} A")
             if halo > length:
                 raise ValueError(
-                    f"halo width {halo:g} A (cutoff + skin) exceeds the box face spacing {length:g} A along "
-                    f"axis {'xyz'[axis]}: the distributed engine allows one periodic image per axis; "
-                    f"use a supercell with every face spacing >= {halo:g} A")
+                    f"halo width {halo:g} A (cutoff + skin) exceeds the cell height {length:g} A across "
+                    f"lattice vector {'abc'[axis]} (the spacing of its faces): the distributed engine allows "
+                    f"one periodic image per axis; use a supercell with every height >= {halo:g} A")
+
+    def check_image_reach(self, halo: float) -> None:
+        """Reject skew bases whose halo can exceed the graph builders' image-key range.
+
+        The check applies to multi-rank construction. Orthogonal cells retain
+        their existing policy; a reduced basis can avoid this skew-cell limit.
+        """
+        if self.orthogonal:
+            return
+        from fastmd.graph.gpu_graph_builder import MAX_IMAGE
+
+        for axis, height in enumerate(self.face_spacings.tolist()):
+            if math.ceil(halo / height) + 2 > MAX_IMAGE:
+                raise ValueError(
+                    f"the cell height {height:g} A across lattice vector {'abc'[axis]} is below (cutoff + skin) / "
+                    f"{MAX_IMAGE - 2} = {halo / (MAX_IMAGE - 2):g} A: neighbours can sit more than {MAX_IMAGE} "
+                    f"periodic images away, beyond the graph builders' pair keys; use a reduced cell of the same "
+                    f"crystal (e.g. ase.build.minkowski_reduce) or a supercell")
 
     def neighbor_ranks(self, rank: int, halo: float) -> tuple[int, ...]:
         """Peer domains within ``halo`` of ``rank``'s domain (periodic), ascending; never ``rank``.
@@ -234,6 +279,14 @@ class DomainPartition:
         self.check_halo(halo)
         margin = max(1e-5, 64 * torch.finfo(torch.float32).eps * max(float(self.lengths.max()), halo))
         mine = self.rank_indices(rank)
+        if not self.orthogonal:
+            # The distance of two domains is the origin's distance to their
+            # difference parallelepiped, over the same periodic images.
+            lower, upper = self._domain_bounds("cpu")
+            squared = self._skew_box_squared(torch.zeros_like(lower), lower - upper[rank], upper - lower[rank],
+                                             halo + margin)
+            return tuple(peer for peer in range(self.world_size)
+                         if peer != rank and float(squared[peer]) <= (halo + margin) ** 2)
         result = []
         for peer in range(self.world_size):
             if peer == rank:
@@ -334,32 +387,8 @@ class DomainPartition:
         if not len(rows):
             return planes
         peers, rows = rows[:, 0], rows[:, 1]
-        at_lower, at_upper, fixed_only, transforms, metric = (
-            value.to(device) for value in _skew_patterns(tuple(self.cell.detach().cpu().double().flatten().tolist())))
         lower, upper = self._domain_bounds(device)
-        lower, upper, x = lower[peers], upper[peers], fractions.double()[rows]
-        # The images n of each axis with a plane gap of at most reach: lower - t <= x + n <= upper + t.
-        spread = (reach / self.face_distances.to(device) + 1e-9)
-        first = torch.ceil(lower - spread - x)
-        count = (torch.floor(upper + spread - x) - first + 1).clamp(min=0)
-        offsets = torch.tensor(list(itertools.product(*(range(int(k)) for k in count.amax(0).tolist()))),
-                               dtype=torch.float64, device=device)
-        exact = torch.empty(len(rows), dtype=torch.float64, device=device)
-        chunk = max(1, (1 << 20) // (27 * len(offsets)))
-        for start in range(0, len(rows), chunk):
-            part = slice(start, start + chunk)
-            # [pattern, image, row, axis]
-            y = (x[part] + first[part])[None] + offsets[:, None]
-            low, high = (y - upper[part])[None], (y - lower[part])[None]
-            bound = at_lower * low + at_upper * high
-            # Element-wise products (no GEMM): the same bits on the CPU and on CUDA.
-            d = [bound[..., 0] * transforms[..., 0, axis] + bound[..., 1] * transforms[..., 1, axis]
-                 + bound[..., 2] * transforms[..., 2, axis] for axis in range(3)]
-            value = sum(d[i] * metric[i, j] * d[j] for i in range(3) for j in range(3))
-            d = torch.stack(d, dim=-1)
-            feasible = (fixed_only | ((d >= low - 1e-9) & (d <= high + 1e-9))).all(-1)
-            feasible &= (offsets[:, None] < count[part][None]).all(-1)[None]
-            exact[part] = torch.where(feasible, value, math.inf).flatten(0, 1).amin(0)
+        exact = self._skew_box_squared(fractions.double()[rows], lower[peers], upper[peers], reach)
         squared = planes.clone()
         squared[peers, rows] = torch.maximum(planes[peers, rows], exact)
         return squared
@@ -398,6 +427,55 @@ class DomainPartition:
             distance = torch.stack(distances).amin(0).square() * lengths[axis].square()
             squared = squared + distance if self.orthogonal else torch.maximum(squared, distance)
         return squared
+
+
+    def _skew_box_squared(self, points: Tensor, lower: Tensor, upper: Tensor, reach: float) -> Tensor:
+        """FP64 squared Cartesian distances ``[M]`` from fractional ``points`` to the fractional boxes ``lower <= f
+        <= upper`` (rows aligned, ``[M, 3]``), over the periodic images: exact up to rounding where at most
+        ``reach``; ``inf`` where no image's face-plane distances are all within ``reach``.
+
+        For an image ``y = point + n`` the squared distance to a box is the
+        minimum of ``d G d`` (``G = cell cell^T``) over ``y - upper <= d <= y -
+        lower``. A convex quadratic attains its minimum over a box where each
+        coordinate is at a bound or solves the free coordinates' equations: one
+        of 27 patterns (lower, upper or free per axis), and every other feasible
+        pattern point is no smaller, so their minimum is the distance. A free
+        coordinate within 1e-9 of its bounds counts as feasible, which can only
+        lower the result. Only the images whose face-plane distance along every
+        axis is at most ``reach`` (plus 1e-9) can be within ``reach``: a
+        consecutive range of each axis, enumerated per row.
+        """
+        device = points.device
+        exact = torch.full((len(points),), math.inf, dtype=torch.float64, device=device)
+        if not len(points):
+            return exact
+        at_lower, at_upper, fixed, transforms, metric = (
+            value.to(device) for value in _skew_patterns(tuple(self.cell.detach().cpu().double().flatten().tolist())))
+        # The images n of each axis with a plane gap of at most reach: lower - t <= point + n <= upper + t.
+        spread = reach / self.face_spacings.to(device) + 1e-9
+        first = torch.ceil(lower - spread - points)
+        count = (torch.floor(upper + spread - points) - first + 1).clamp(min=0)
+        widths = [int(k) for k in count.amax(0).tolist()]
+        if not all(widths):
+            return exact
+        offsets = torch.tensor(list(itertools.product(*(range(k) for k in widths))),
+                               dtype=torch.float64, device=device)
+        chunk = max(1, (1 << 20) // (27 * len(offsets)))
+        for start in range(0, len(points), chunk):
+            part = slice(start, start + chunk)
+            # [pattern, image, row, axis]
+            y = (points[part] + first[part])[None] + offsets[:, None]
+            low, high = (y - upper[part])[None], (y - lower[part])[None]
+            bound = at_lower * low + at_upper * high
+            # Element-wise products (no GEMM): the same bits on the CPU and on CUDA.
+            d = [bound[..., 0] * transforms[..., 0, axis] + bound[..., 1] * transforms[..., 1, axis]
+                 + bound[..., 2] * transforms[..., 2, axis] for axis in range(3)]
+            value = sum(d[i] * metric[i, j] * d[j] for i in range(3) for j in range(3))
+            d = torch.stack(d, dim=-1)
+            feasible = (fixed | ((d >= low - 1e-9) & (d <= high + 1e-9))).all(-1)
+            feasible &= (offsets[:, None] < count[part][None]).all(-1)[None]
+            exact[part] = torch.where(feasible, value, math.inf).flatten(0, 1).amin(0)
+        return exact
 
 
 @functools.lru_cache(maxsize=16)

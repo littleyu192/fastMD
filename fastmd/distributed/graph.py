@@ -303,7 +303,7 @@ def _cpu_candidates(owned: AtomState, coordinates: AtomState, partition: DomainP
     # runs on the coordinate device: a CPU/CUDA norm difference of one ULP at
     # either cutoff changes the discrete graph, not just numerical E/F error.
     # Model geometry is recomputed differentiably from shard.positions.
-    lengths = partition.face_distances.numpy()
+    lengths = partition.face_spacings.numpy()
     cartesian = positions.double().numpy()
     lattice = cell.double().numpy()
     margin = max(1e-6, 32 * torch.finfo(positions.dtype).eps
@@ -313,8 +313,16 @@ def _cpu_candidates(owned: AtomState, coordinates: AtomState, partition: DomainP
         tree = cKDTree(cartesian)
     except ImportError:
         tree = None
-    shifts = itertools.product(*(range(-math.floor(atom_cutoff / length) - 1,
-                                        math.floor(atom_cutoff / length) + 2) for length in lengths))
+    if partition.orthogonal:
+        reach = [math.floor(atom_cutoff / spacing) + 1 for spacing in lengths]
+    else:
+        # FP32 wrapping of a skew cell can leave rows just outside [0, 1).
+        # Bound images by the rows' actual spread and the padded search radius.
+        spread = (np.maximum(np.ptp(cartesian @ np.linalg.inv(lattice), axis=0), 1.0) if len(cartesian)
+                  else np.ones(3))
+        reach = [math.floor((atom_cutoff + margin) / spacing + float(width))
+                 for spacing, width in zip(lengths, spread)]
+    shifts = itertools.product(*(range(-k, k + 1) for k in reach))
     candidate_rows: list[tuple[int, int, int, int, int]] = []
     centers = [index[key] for key in owned_ids]
     for image in shifts:

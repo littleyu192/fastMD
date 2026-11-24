@@ -711,6 +711,9 @@ def _distributed_plan(adapter, config, cuda, device, world_size, shard, skin, co
                                          if line else {})}
                                      for point in shard.exchange_points],
                  **({"line_slot_cutoff_A": shard.line_slot_cutoff} if line else {}),
+                 **({"ghost_row_trimming": {"owned_slot_inputs": list(shard.owned_slot_inputs),
+                                            "zero_ghost_outputs": list(shard.zero_ghost_outputs)}}
+                    if shard.owned_slot_inputs or shard.zero_ghost_outputs else {}),
                  "stress_method": STRESS_METHOD, "source_pins": pins, "p_gt_1_gate": dict(P_GT_1_GATE),
                  "estimate": False}
         if shard.global_reductions:  # (a pooled readout: the sums over the ranks of the owned rows' pooled values)
