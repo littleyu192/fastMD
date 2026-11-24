@@ -363,6 +363,9 @@ class GPUResidentMolecularDynamics:
             "candidate_refreshes": 0,
             "fallback_windows": 0,
             "recovery_replays": 0,
+            "fresh_list_fallbacks": 0,
+            "split_windows": 0,
+            "step_replays": 0,
             "max_edge_count": 0,
             "max_triplet_count": 0,
             "max_displacement": 0.0,
@@ -1129,6 +1132,9 @@ class GPUResidentMolecularDynamics:
             "candidate_refreshes",
             "fallback_windows",
             "recovery_replays",
+            "fresh_list_fallbacks",
+            "split_windows",
+            "step_replays",
         ):
             self._whole_step_accumulated[name] += old_stats[name]
         for name in ("max_edge_count", "max_triplet_count", "max_displacement"):
@@ -1404,6 +1410,7 @@ class GPUResidentMolecularDynamics:
         self.state = GPUMDState(
             positions=old_state.positions.clone(), momenta=old_state.momenta.clone(),
             forces=old_state.forces.clone(), potential_energy=old_state.potential_energy.clone())
+        split = old_runner.split_state()  # windows split after one outran the skin stay split
         self.whole_step_runner = None
         del old_runner, old_state
         gc.collect()
@@ -1414,6 +1421,7 @@ class GPUResidentMolecularDynamics:
             forces=self.state.forces,
             recapture=True,
         )
+        self.whole_step_runner.load_split_state(split)
         self._sync_whole_state()
 
     def _replay_whole_step(self, record: bool = False, settle: tuple | None = None) -> None:
@@ -1912,6 +1920,12 @@ class GPUResidentMolecularDynamics:
         try:
             while done < count and self.whole_step_runner is not None:
                 runner, start = self.whole_step_runner, self.nsteps
+                if ahead is None and runner.split_next:
+                    # A window run step by step is synchronous: step() runs it (with its out-of-memory handling).
+                    runner = None
+                    self.step()
+                    done += 1
+                    continue
                 record = self._stress_due(start + window)
                 if ahead is None:
                     target = self.temperature_target
@@ -1998,10 +2012,13 @@ class GPUResidentMolecularDynamics:
     def _launches_behind(self, runner: WholeStepGraphRunner, logged: bool) -> bool:
         """Whether :meth:`run` launches the next window behind this unsettled one: not when this one's frame
         is not staged on the device (``_log_current`` reads the live state), not when the tier cache checks
-        its demand after it (a switch moves the state), not when it will likely refresh the candidates."""
+        its demand after it (a switch moves the state), not next to a window run step by step, not when it will
+        likely refresh the candidates."""
         if logged and not self._stages_frames():
             return False
         if _WHOLE_STEP_TIER_CACHE and self._tier_check_counter + 1 >= _TIER_CHECK_INTERVAL:
+            return False
+        if runner.splitting:  # windows run step by step after one outran the skin
             return False
         return runner.refresh_unlikely()
 
@@ -2035,6 +2052,9 @@ class GPUResidentMolecularDynamics:
             "candidate_refreshes",
             "fallback_windows",
             "recovery_replays",
+            "fresh_list_fallbacks",
+            "split_windows",
+            "step_replays",
         ):
             stats[name] += self._whole_step_accumulated[name]
         for name in ("max_edge_count", "max_triplet_count", "max_displacement"):

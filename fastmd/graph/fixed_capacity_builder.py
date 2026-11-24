@@ -473,32 +473,55 @@ if _fixed_builder_available:
 
 
 
-    @triton.jit(do_not_specialize=_SIZES, do_not_specialize_on_alignment=_ALIGNMENT)
+    @triton.jit(do_not_specialize=[*_SIZES, "T_CAP"], do_not_specialize_on_alignment=[*_ALIGNMENT, "T_CAP"])
     def _window_flags_kernel(
         edge_count,
+        triplet_count,
         invalid_pairs,
         overflow,
+        candidate_valid,
         isolated_count,
         window_overflow,
         window_capacity_overflow,
         window_max_edges,
+        window_max_triplets,
         window_max_isolated,
         E_CAP,
+        T_CAP,
+        HAS_TRIPLETS: tl.constexpr,
         CHECK_ISOLATED: tl.constexpr,
     ):
-        """One edges-only build's contribution to a whole-step window's device flags, in one program:
-        the window overflow (|= the build's overflow, and isolated atoms when checked), the capacity
-        overflow (|= edges > E_CAP or invalid pairs) and the maxima of the edge and isolated-atom counts."""
+        """One build's contribution to a whole-step window's device flags, in one program: the window
+        overflow (|= the build's overflow, and isolated atoms when checked), the capacity overflow of
+        ``fixed_capacity_exceeded`` and the maxima of the edge, triplet and isolated-atom counts.
+
+        Only the builds up to the window's first failure count towards the capacity overflow and the
+        maxima. The steps after it continue from a state the window discards (for a line graph, on the
+        overflow substitute), so their counts could ask for a capacity growth, or report isolated atoms,
+        the window does not need. The failing build's own edge and triplet counts are lower bounds of the
+        true ones even on a stale candidate list, so they count; its isolated atoms count only when its
+        list was valid, because a stale list misses neighbours."""
+        counted = tl.load(window_overflow) == 0
         edges = tl.load(edge_count)
         isolated = tl.load(isolated_count)
         flag = tl.load(overflow) != 0
         if CHECK_ISOLATED:
             flag = flag | (isolated > 0)
-        tl.store(window_overflow, (tl.load(window_overflow) != 0) | flag)
-        capacity = (edges > E_CAP) | (tl.load(invalid_pairs) != 0)
-        tl.store(window_capacity_overflow, (tl.load(window_capacity_overflow) != 0) | capacity)
-        tl.store(window_max_edges, tl.maximum(tl.load(window_max_edges), edges))
-        tl.store(window_max_isolated, tl.maximum(tl.load(window_max_isolated), isolated))
+        tl.store(window_overflow, (counted == 0) | flag)
+        invalid = tl.load(invalid_pairs) != 0
+        if HAS_TRIPLETS:
+            triplets = tl.load(triplet_count)
+            capacity = (edges >= E_CAP) | (triplets > T_CAP) | invalid
+            most = tl.load(window_max_triplets)
+            tl.store(window_max_triplets, tl.where(counted, tl.maximum(most, triplets), most))
+        else:
+            capacity = (edges > E_CAP) | invalid
+        tl.store(window_capacity_overflow, (tl.load(window_capacity_overflow) != 0) | (capacity & counted))
+        most = tl.load(window_max_edges)
+        tl.store(window_max_edges, tl.where(counted, tl.maximum(most, edges), most))
+        listed = counted & (tl.load(candidate_valid) != 0)
+        most = tl.load(window_max_isolated)
+        tl.store(window_max_isolated, tl.where(listed, tl.maximum(most, isolated), most))
 
 
     @triton.jit
@@ -1521,10 +1544,18 @@ class FixedCapacityGraphBuilder:
     def _allocate_overflow_topology(self) -> None:
         # An overflow is observed only after the captured model evaluation. Keep
         # that evaluation memory-safe by substituting a valid all-padding topology
-        # on device (all-sink; with far self-loop padding all-loop: pair p on real
-        # atom p mod n_real); the transaction runner then rolls back and grows capacity.
+        # on device (with far self-loop padding all-loop: pair p on real atom
+        # p mod n_real); the caller discards the evaluation (a whole-step window
+        # rolls back, also over the steps after the overflow, which run on it too).
+        # Sink padding: far self-loops as balanced as a real graph's edges, pair u
+        # on row u * rows // u_capacity, so the model's segment and gather kernels
+        # cost what they cost on a real graph (one pair per sink row group made
+        # the steps after a skin failure 3.3x slower for MatRIS); the rows are all
+        # rows, or the sink rows of a P>1 domain (ghosts).
         safe_u = self.edge_ids // 2
-        if self._pad_loop is None:
+        if self._pad_loop is None and self.ghosts is None:
+            self._overflow_center = (safe_u * (self.n_real + self.n_dummy) // self.u_capacity).int()
+        elif self._pad_loop is None:
             safe_dummy = self.n_real + safe_u * self.n_dummy // self.u_capacity
             self._overflow_center = safe_dummy.int()
         else:
@@ -1545,13 +1576,8 @@ class FixedCapacityGraphBuilder:
             self._overflow_images.copy_(image_sign[:, None] * image)
         self._overflow_d2u = safe_u.int()
         self._overflow_u2d = (2 * self.u_ids).int()
-        if self._pad_loop is None:
-            line_dummy = self.triplet_ids * self.n_dummy // self.t_capacity
-            line_u = (
-                line_dummy * self.u_capacity + self.n_dummy - 1
-            ) // self.n_dummy
-        else:
-            line_u = self.triplet_ids * self.u_capacity // self.t_capacity
+        # About t_capacity / u_capacity triplets per pair, each on its bond's centre (sorted by pair and atom).
+        line_u = self.triplet_ids * self.u_capacity // self.t_capacity
         line_u = line_u.clamp(max=self.u_capacity - 1)
         line_de = 2 * line_u
         line_atom = self._overflow_center[line_de]
@@ -2363,16 +2389,18 @@ class FixedCapacityGraphBuilder:
 
     def accumulate_window(self, status: FixedCapacityGraphStatus, *, window_overflow: Tensor,
                           window_capacity_overflow: Tensor, window_max_edges: Tensor,
-                          window_max_isolated: Tensor, check_isolated: bool) -> None:
-        """Edges only: fold one build's ``status`` into a whole-step window's flags in one kernel (the
-        overflow, the capacity overflow of ``fixed_capacity_exceeded`` and the edge and isolated-atom
-        maxima; there are no triplets)."""
-        if not self.edges_only:
-            raise ValueError("accumulate_window is for edges-only builders")
+                          window_max_triplets: Tensor, window_max_isolated: Tensor, check_isolated: bool) -> None:
+        """Fold one build's ``status`` into a whole-step window's flags in one kernel: the overflow, the
+        capacity overflow of ``fixed_capacity_exceeded`` and the edge, triplet (line graphs) and
+        isolated-atom maxima, the last three from the builds up to the window's first failure only (see
+        ``_window_flags_kernel``)."""
+        has_triplets = not self.edges_only
         _window_flags_kernel[(1,)](
-            status.edge_count, status.invalid_pairs, status.overflow, status.isolated_atom_count,
-            window_overflow, window_capacity_overflow, window_max_edges, window_max_isolated,
-            E_CAP=self.e_capacity, CHECK_ISOLATED=bool(check_isolated), num_warps=1,
+            status.edge_count, status.triplet_count if has_triplets else status.edge_count,
+            status.invalid_pairs, status.overflow, status.candidate_valid, status.isolated_atom_count,
+            window_overflow, window_capacity_overflow, window_max_edges, window_max_triplets, window_max_isolated,
+            E_CAP=self.e_capacity, T_CAP=self.t_capacity if has_triplets else 0,
+            HAS_TRIPLETS=has_triplets, CHECK_ISOLATED=bool(check_isolated), num_warps=1,
         )
 
     @torch.no_grad()

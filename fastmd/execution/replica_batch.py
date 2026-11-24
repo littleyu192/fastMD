@@ -731,6 +731,7 @@ class ReplicaWholeStepRunner(WholeStepGraphRunner):
             self.fallback_windows = 0
             self.candidate_refreshes = 1
             self.recovery_replays = 0
+            self.fresh_list_fallbacks = 0
             self.launches = 0
             self.max_edge_count = 0
             self.max_triplet_count = 0

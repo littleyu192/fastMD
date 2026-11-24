@@ -62,7 +62,7 @@ from fastmd.interfaces.calculator import require_finite_geometry
 ENSEMBLES = ("nvt_nhc", "nvt", "nve")
 # The smallest union whose memory is measured (three distinct probe sizes); smaller ones are not bounded.
 _MEASURED_UNION = 4
-_COUNTERS = ("launches", "candidate_refreshes", "fallback_windows", "recovery_replays")
+_COUNTERS = ("launches", "candidate_refreshes", "fallback_windows", "recovery_replays", "fresh_list_fallbacks")
 
 
 class _Union:

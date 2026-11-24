@@ -652,6 +652,19 @@ class SlotRelaxationRunner(SlotWholeStepRunner):
         self._stress = None
         self.phases: tuple = ()
         super().__init__(**kwargs)
+        # FIRE moves a system's atoms at most maxstep per step (the norm of its whole step): an accelerating
+        # relaxation outgrows the growth its earlier windows measured, so the refresh rule takes this as a floor
+        # of the growth (with a cell filter the skin test's strain term comes on top: a floor, not a bound)
+        self.step_displacement_bound = float(self.integrator.parameters.maxstep)
+
+    def _list_built_at_window_start(self) -> bool:
+        """:meth:`WholeStepGraphRunner._list_built_at_window_start`, and with a cell filter the reference cells
+        of the list are the window's start cells."""
+        if not super()._list_built_at_window_start():
+            return False
+        builder = self.builder
+        return not isinstance(builder, CellRelaxationBuilder) or bool(
+            torch.equal(builder.reference_cells, builder.current_cells))
 
     @staticmethod
     def _union_shape(builder, integrator) -> tuple[int, int]:

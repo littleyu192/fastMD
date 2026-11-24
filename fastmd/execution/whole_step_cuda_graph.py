@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import warnings
 from collections.abc import Sequence
 
 import torch
@@ -22,6 +23,24 @@ from fastmd.execution.gpu_integrator import StatefulIntegrator
 from fastmd.engine.entry_config import scoped_call
 from fastmd.engine.entry_config import scoped_init
 from fastmd.engine._graph_capture import capture_graph
+
+
+# The candidate list is refreshed after a window when its largest displacement reaches the proactive fraction of the
+# skin, or when that displacement plus this many times the largest growth per window seen on the list (at least the
+# window's bound, for an integrator whose steps are bounded) would reach half the skin, where the next window would
+# fail. 1.1: rdx 1,344 atoms at 300 K, 8-step windows, refresh 2.5% more often than with the fraction alone.
+_REFRESH_GROWTH_MARGIN = 1.1
+# Windows failing from a candidate list built at their start (their own motion outran half the skin): a warning once a
+# runner has seen this many windows and this fraction of them failed so.
+_OUTRUN_WARN_WINDOWS = 16
+_OUTRUN_WARN_FRACTION = 0.05
+# The single-system runner, after a window failed from a list built at its start: that window and the next ones run
+# step by step (one-step graph replays) for this many windows, then a full window is tried again if the largest
+# growth per step seen, times this margin and the window's steps, fits in half the skin; a full window that fails so
+# doubles the next period, up to the maximum.
+_SPLIT_FIRST_WINDOWS = 4
+_SPLIT_MAX_WINDOWS = 256
+_SPLIT_FIT_MARGIN = 1.25
 
 
 def _require_finite_displacement(displacement: float, launch: int, replica: int | None = None) -> None:
@@ -61,7 +80,15 @@ class WholeStepGraphRunner:
     Candidate cell-list refresh remains an eager rare path. A captured window
     checkpoints its input state and ORs all device-side overflow flags. In
     strict mode an invalid window is rolled back and replayed eagerly with a
-    fresh candidate list before its state becomes visible to the caller.
+    fresh candidate list before its state becomes visible to the caller. A
+    window that failed on a candidate list built at its start runs its steps
+    eagerly at once (replayed on a fresh list it would fail the same way);
+    one on an older list is first replayed on a fresh list. The single-system
+    runner instead runs such a window, and the windows after it, step by step:
+    each step a replay of a one-step graph (captured at the first such
+    failure, in the window graph's pool) whose flags are read after it, the
+    candidates refreshed when due, until the growth per step predicts that a
+    full window fits again (``split_windows``).
     Isolated atoms are permitted when the model has reference energies unless
     ``validate_isolated_atoms=True``; capacity and candidate guards remain active.
 
@@ -212,6 +239,27 @@ class WholeStepGraphRunner:
         self.fallback_windows = 0
         self.candidate_refreshes = 1
         self.recovery_replays = 0
+        # fallback windows that failed on a candidate list built at their start (no recovery replay)
+        self.fresh_list_fallbacks = 0
+        # The largest displacement of an atom in one step when the integrator bounds it (Å; None: unbounded, as MD):
+        # the refresh rule's growth per window is at least steps_per_launch times it.
+        self.step_displacement_bound = None
+        # Windows split into steps after one outran the skin: the single-system runner of a functional integrator
+        # or of one whose state is a single flat buffer (the step's start is kept inside the one-step graph).
+        state = getattr(self.stateful_integrator, "state", None)
+        self.split_after_outrun = (type(self) is WholeStepGraphRunner and self.steps_per_launch > 1
+                                   and (self.stateful_integrator is None or isinstance(getattr(state, "flat", None),
+                                                                                         Tensor)))
+        self._step_graphs = {}  # record -> the one-step graph (captured lazily)
+        self._step_start = None  # the state at the start of the step a one-step graph runs (in-graph copy)
+        self._step_flags = None  # (capacity overflow, overflow, largest displacement) of that step
+        self._split_left = 0  # windows still to run step by step
+        self._split_period = _SPLIT_FIRST_WINDOWS
+        self._split_growth = 0.0  # the largest displacement growth per step seen while split
+        self._last_window_split = False
+        self.split_windows = 0
+        self.step_replays = 0
+        self._outrun_warned = False
         self.launches = 0
         self.max_edge_count = 0
         self.max_triplet_count = 0
@@ -341,47 +389,15 @@ class WholeStepGraphRunner:
             if self.step_targets is not None:
                 self.step_targets.apply(k)
             last = k == self.steps_per_launch - 1
-            if self._window_stats is not None and self.builder.edges_only:
-                # An edges-only model the engine differentiates: the stateful integrator's mirrors at the
-                # window's end only, the same flags in one kernel per step, the window's statistics in one
-                # buffer.
-                status = self._step_body(rebuild_candidates=False, **({"stress": True} if record and last else {}),
-                                         **({} if last else {"mirror": False}))
-                self.builder.accumulate_window(
-                    status, window_overflow=self.window_overflow,
-                    window_capacity_overflow=self.window_capacity_overflow,
-                    window_max_edges=self.window_max_edges, window_max_isolated=self.window_max_isolated,
-                    check_isolated=self.validate_isolated_atoms)
-                if last:
-                    self._window_stats.copy_(torch.cat([
-                        self.window_overflow.to(torch.float64), status.edge_count.to(torch.float64),
-                        status.triplet_count.to(torch.float64), status.max_displacement.to(torch.float64)]))
-                continue
-            # A record window's last step also computes the stress. A line-graph model the engine
-            # differentiates: the stateful integrator's mirrors at the window's end only.
-            status = self._step_body(rebuild_candidates=False,
-                                     **({"stress": True} if record and k == self.steps_per_launch - 1 else {}),
+            # A record window's last step also computes the stress. A model the engine differentiates: the
+            # stateful integrator's mirrors at the window's end only, the window's statistics in one buffer.
+            status = self._step_body(rebuild_candidates=False, **({"stress": True} if record and last else {}),
                                      **({} if last or self._window_stats is None else {"mirror": False}))
-            capacity_overflow = fixed_capacity_exceeded(status, self.builder)
-            overflow = self.window_overflow | status.overflow
-            if self.validate_isolated_atoms:
-                overflow = overflow | (status.isolated_atom_count > 0)
-            self.window_overflow.copy_(overflow)
-            self.window_capacity_overflow.copy_(
-                self.window_capacity_overflow | capacity_overflow.reshape(1)
-            )
-            self.window_max_edges.copy_(
-                torch.maximum(self.window_max_edges, status.edge_count)
-            )
-            self.window_max_triplets.copy_(
-                torch.maximum(self.window_max_triplets, status.triplet_count)
-            )
-            self.window_max_isolated.copy_(
-                torch.maximum(
-                    self.window_max_isolated,
-                    status.isolated_atom_count,
-                )
-            )
+            # The window's flags in one kernel per step; the counts only up to the window's first failure.
+            self.builder.accumulate_window(
+                status, window_overflow=self.window_overflow, window_capacity_overflow=self.window_capacity_overflow,
+                window_max_edges=self.window_max_edges, window_max_triplets=self.window_max_triplets,
+                window_max_isolated=self.window_max_isolated, check_isolated=self.validate_isolated_atoms)
             if last and self._window_stats is not None:
                 self._window_stats.copy_(torch.cat([
                     self.window_overflow.to(torch.float64), status.edge_count.to(torch.float64),
@@ -482,6 +498,19 @@ class WholeStepGraphRunner:
             edge_count = int(self.window_max_edges.item())
             triplet_count = int(self.window_max_triplets.item())
             raise FixedCapacityOverflow(edge_count, triplet_count)
+        if self._list_built_at_window_start():
+            # Replayed on a list refreshed here (the same list) the window would fail the same way: its own motion
+            # outran half the skin. Its steps run eagerly, each on a fresh list. (A truncated row of that list
+            # raises here, as after the refresh of a recovery replay.)
+            self.builder.assert_candidate_capacity()
+            if self.split_after_outrun:
+                self._split_redo(record)
+            else:
+                self._eager_window(record)
+            self.fresh_list_fallbacks += 1
+            self.fallback_windows += 1
+            self._warn_if_windows_outrun_skin()
+            return
         self.builder.refresh_candidates(self.positions)
         self.builder.assert_candidate_capacity()
         self.candidate_refreshes += 1
@@ -500,28 +529,283 @@ class WholeStepGraphRunner:
                 raise_if_isolated_atoms(isolated_count)
         if bool(self.window_overflow.item()):
             self._restore_backup()
+            if self.split_after_outrun:  # the window outran the list refreshed at its start too
+                self._split_redo(record)
+            else:
+                self._eager_window(record)
+        self.fallback_windows += 1
+
+    def _eager_window(self, record: bool, start: int = 0, stop: int | None = None) -> None:
+        """The window's steps from its start (restored), eagerly, each on a candidate list rebuilt at its
+        positions (``start``..``stop``: those steps, from the state at the start of step ``start``). A capacity
+        overflow, a truncated candidate row (the step's graph would be the overflow substitute: wrong forces),
+        isolated atoms (when checked) or any other error restore the window's start and raise."""
+        try:
             with fusion_scope(self.enable_model_fusions):
-                for k in range(self.steps_per_launch):
+                for k in range(start, self.steps_per_launch if stop is None else stop):
                     if self.step_targets is not None:
                         self.step_targets.apply(k)
                     status = self._step_body(
                         rebuild_candidates=True,
                         **({"stress": True} if record and k == self.steps_per_launch - 1 else {}))
-                    capacity_overflow = bool(
-                        fixed_capacity_exceeded(status, self.builder).item()
-                    )
-                    if capacity_overflow:
-                        self._restore_backup()
+                    if bool(fixed_capacity_exceeded(status, self.builder).item()):
                         raise FixedCapacityOverflow(
                             int(status.edge_count.item()),
                             int(status.triplet_count.item()),
                         )
+                    self.builder.assert_candidate_capacity()
                     if self.validate_isolated_atoms:
-                        isolated_count = int(status.isolated_atom_count.item())
-                        if isolated_count:
-                            self._restore_backup()
-                            raise_if_isolated_atoms(isolated_count)
-        self.fallback_windows += 1
+                        raise_if_isolated_atoms(int(status.isolated_atom_count.item()))
+        except BaseException:
+            self._restore_backup()
+            raise
+
+    def _split_redo(self, record: bool) -> None:
+        """A failed window that outran a list built at its start, redone from its start (restored) step by step;
+        the windows after it run step by step too (a new split period, doubled after a split one ended)."""
+        if not self._last_window_split:
+            self._split_left = self._split_period
+            self._split_period = min(2 * self._split_period, _SPLIT_MAX_WINDOWS)
+            self._split_growth = 0.0
+        try:
+            self._stepwise(record, in_fallback=True)
+        except BaseException:
+            self._restore_backup()
+            raise
+
+    def _window_replay(self, record: bool) -> None:
+        """The window graph's replay, or (while windows are split) the window step by step."""
+        self._last_window_split = self._split_left > 0
+        if not self._last_window_split:
+            (self.record_graph if record else self.graph).replay()
+            return
+        self._split_left -= 1
+        self.split_windows += 1
+        self._stepwise_window(record)
+
+    @scoped_call
+    def _stepwise_window(self, record: bool) -> None:
+        """A split window: the window graph's backup (eagerly), its steps (:meth:`_stepwise`), then the flags a
+        clean window leaves for :meth:`settle`, or a capacity overflow's (settle's fallback restores the start and
+        the driver grows the capacity)."""
+        with torch.no_grad():
+            if self.stateful_integrator is not None:
+                self.stateful_integrator.backup()
+            torch._foreach_copy_([self.backup_positions, self.backup_momenta, self.backup_forces, self.backup_energy],
+                                 [self.positions, self.momenta, self.forces, self.potential_energy])
+            for flag in (self.window_overflow, self.window_capacity_overflow, self.window_max_edges,
+                         self.window_max_triplets, self.window_max_isolated):
+                flag.zero_()
+        try:
+            done = self._stepwise(record, in_fallback=False)
+        except BaseException:
+            self._restore_backup()  # nothing of the window stays (an out of memory in a capture, a model error)
+            raise
+        if not done:
+            self.window_overflow.fill_(True)
+            self.window_capacity_overflow.fill_(True)
+            if self._window_stats is not None:
+                self._window_stats[0] = 1.0
+            return
+        self.window_overflow.zero_()
+        if self._window_stats is not None:
+            self._window_stats[0] = 0.0
+
+    def _stepwise(self, record: bool, *, in_fallback: bool) -> bool:
+        """The window's steps from its start, each a one-step graph replay with the step's target loaded first;
+        its flags read after it: a failed step redone eagerly from its start (kept in the graph), the candidates
+        refreshed when the next step's growth could reach half the skin (the refresh margin times the largest
+        growth per step measured; the proactive fraction of the skin before one is). The largest growth
+        per step is measured; at the end of a split period a full window is tried only if it fits. False: a
+        capacity overflow (``in_fallback``: the window's start restored and raised instead), the window's
+        largest counts in ``window_max_edges`` / ``window_max_triplets``."""
+        threshold = self.builder.skin * self.proactive_refresh_fraction
+        last = self.steps_per_launch - 1
+        previous = None  # the displacement after the previous step on the same list
+        for k in range(self.steps_per_launch):
+            stress = record and k == last
+            graph = self._step_graph(stress)
+            if self.step_targets is not None:
+                self.step_targets.apply(k)
+            graph.replay()
+            self.step_replays += 1
+            capacity, overflow, displacement = self._step_flags.tolist()
+            if previous is not None:  # an overflowing step's displacement (from the list it outran) counts too
+                self._split_growth = max(self._split_growth, displacement - previous)
+            if capacity:
+                if in_fallback:
+                    count = (int(self.window_max_edges.item()), int(self.window_max_triplets.item()))
+                    self._restore_backup()
+                    raise FixedCapacityOverflow(*count)
+                return False
+            if overflow:  # the step outran the list: from its start, eagerly on a rebuilt list
+                self._load_step_start()
+                try:
+                    self._eager_window(record, start=k, stop=k + 1)
+                except FixedCapacityOverflow as error:
+                    if in_fallback:
+                        raise
+                    self.window_max_edges.fill_(error.edge_count)
+                    self.window_max_triplets.fill_(error.triplet_count)
+                    return False
+                previous = 0.0
+                continue
+            # the refresh rule for a window of one step: due when the next step's growth could reach half the
+            # skin (the proactive fraction until a growth per step is measured)
+            if (displacement + _REFRESH_GROWTH_MARGIN * self._split_growth >= 0.5 * self.builder.skin
+                    if self._split_growth > 0.0 else displacement >= threshold):
+                self.builder.refresh_candidates(self.positions)
+                self.candidate_refreshes += 1
+                previous = 0.0
+            else:
+                previous = displacement
+        if previous == 0.0:  # the last step's list was rebuilt (an eager redo) or refreshed: no displacement left
+            self.builder._max_displacement.zero_()
+        if self._window_stats is not None:  # the last build's counts, as a window graph leaves them
+            self._window_stats[1:].copy_(torch.cat([
+                self.builder.edge_offsets[-1:].to(torch.float64), self.builder.pair_offsets[-1:].to(torch.float64),
+                self.builder._max_displacement.reshape(1).to(torch.float64)]))
+        if not in_fallback and self._split_left == 0:
+            # Back to full windows only if K steps of the largest growth per step seen fit in half the skin from
+            # here; else split a few more windows and measure again.
+            start = previous or 0.0
+            reach = start + _SPLIT_FIT_MARGIN * self.steps_per_launch * self._split_growth
+            if not (reach < 0.5 * self.builder.skin):
+                self._split_left = _SPLIT_FIRST_WINDOWS
+                self._split_growth = 0.0
+        return True
+
+    def _step_graph_body(self, record: bool) -> None:
+        """One step on the current candidate list (no target row: the host loads it), its start kept first and
+        its flags after it: the one-step graph."""
+        with torch.no_grad():
+            for kept, source in zip(self._step_start, self._step_sources()):
+                kept.copy_(source)
+        status = self._step_body(rebuild_candidates=False, **({"stress": True} if record else {}))
+        overflow = status.overflow.reshape(1)
+        if self.validate_isolated_atoms:
+            overflow = overflow | (status.isolated_atom_count > 0).reshape(1)
+        capacity = fixed_capacity_exceeded(status, self.builder).reshape(1)
+        self.window_max_edges.copy_(torch.maximum(self.window_max_edges, status.edge_count.reshape(1)))
+        self.window_max_triplets.copy_(torch.maximum(self.window_max_triplets, status.triplet_count.reshape(1)))
+        displacement = status.max_displacement.reshape(1).to(torch.float64)
+        self._step_flags.copy_(torch.cat([capacity.to(torch.float64), overflow.to(torch.float64), displacement]))
+        if self._window_stats is not None:
+            self._window_stats.copy_(torch.cat([
+                overflow.to(torch.float64), status.edge_count.reshape(1).to(torch.float64),
+                status.triplet_count.reshape(1).to(torch.float64), displacement]))
+
+    def _step_sources(self) -> list[Tensor]:
+        if self.stateful_integrator is not None:
+            return [self.stateful_integrator.state.flat]
+        return [self.positions, self.momenta, self.forces, self.potential_energy]
+
+    @torch.no_grad()
+    def _load_step_start(self) -> None:
+        for source, kept in zip(self._step_sources(), self._step_start):
+            source.copy_(kept)
+        integrator = self.stateful_integrator
+        if integrator is not None:  # the float32 mirrors of the integrator's state
+            self.positions.copy_(integrator.positions)
+            self.momenta.copy_(integrator.momenta)
+            self.forces.copy_(integrator.forces)
+            self.potential_energy.copy_(integrator.potential_energy.reshape(-1)[:1])
+
+    @scoped_call
+    def _step_graph(self, record: bool):
+        """The one-step graph (``record``: its step also computes the stress), captured at its first use in the
+        window graph's pool (the graphs never replay concurrently); the state is restored after the capture.
+
+        No warmup step: the window graph's warmup and capture ran the same step body, so nothing is left to
+        initialize, and an eager step next to the window graph's pool would need a second working set (at rdx
+        10,752 K=32 the peak reserved memory was 169 GiB with one, 85 GiB without)."""
+        graph = self._step_graphs.get(record)
+        if graph is not None:
+            return graph
+        if self._step_start is None:
+            self._step_start = [torch.empty_like(source) for source in self._step_sources()]
+            self._step_flags = torch.zeros(3, dtype=torch.float64, device=self.device)
+        saved = [source.clone() for source in (self.positions, self.momenta, self.forces, self.potential_energy)]
+        saved_stress = None if self.stress is None else self.stress.clone()
+        integrator = self.stateful_integrator
+        saved_integrator = integrator.snapshot() if integrator is not None else None
+        edges, triplets = self.window_max_edges.clone(), self.window_max_triplets.clone()
+
+        def restore_saved() -> None:
+            torch._foreach_copy_([self.positions, self.momenta, self.forces, self.potential_energy], saved)
+            if saved_stress is not None:
+                self.stress.copy_(saved_stress)
+            if integrator is not None:
+                integrator.load_snapshot(saved_integrator)
+            self.window_max_edges.copy_(edges)
+            self.window_max_triplets.copy_(triplets)
+
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with fusion_scope(self.enable_model_fusions):
+                torch.cuda.synchronize()
+                pool = self.graph_pool if self.graph_pool is not None else self.graph.pool()
+                with capture_graph(graph, pool=pool):
+                    self._step_graph_body(record)
+        except BaseException:
+            restore_saved()
+            raise
+        restore_saved()
+        torch.cuda.synchronize()
+        self._step_graphs[record] = graph
+        return graph
+
+    def split_state(self) -> tuple:
+        """The split schedule, for the runner that replaces this one after a capacity growth: a split window
+        that overflowed the capacity is split again when replayed."""
+        return (self._split_left + (1 if self._last_window_split else 0), self._split_period, self._split_growth)
+
+    def load_split_state(self, state: tuple) -> None:
+        if self.split_after_outrun:
+            self._split_left, self._split_period, self._split_growth = state
+
+    @property
+    def split_next(self) -> bool:
+        """Whether the next window runs step by step (synchronously: GPU MD's run() runs it as step() does)."""
+        return self._split_left > 0
+
+    @property
+    def splitting(self) -> bool:
+        """Whether the window just run was split or the next one will be: no window is launched behind it (a
+        rewind would replay it as a full window)."""
+        return self._last_window_split or self._split_left > 0
+
+    def _list_built_at_window_start(self) -> bool:
+        """Whether the candidate list was built at the state the failed window started from (restored, the
+        runner's backup): refreshed after the window before it, or rebuilt by its last eager step (a runner
+        whose list also depends on its cells checks them too)."""
+        return bool(torch.equal(self.builder.reference_positions,
+                                self.backup_positions.to(self.builder.reference_positions.dtype)))
+
+    def _warn_if_windows_outrun_skin(self) -> None:
+        """Once per runner: when windows failing from a list built at their start reach the warning fraction of
+        at least the warning count of windows, name a window length that fits a quarter of the skin (a window
+        may start just below the proactive refresh) at the growth per step of those windows (at least half the
+        skin per window) or of the largest growth per window seen, if larger."""
+        if self._outrun_warned or self.launches < _OUTRUN_WARN_WINDOWS:
+            return
+        if self.fresh_list_fallbacks < _OUTRUN_WARN_FRACTION * self.launches:
+            return
+        self._outrun_warned = True
+        window = self.steps_per_launch
+        quarter = 0.25 * self.builder.skin
+        growth = max([value for value in self._displacement_growth if value is not None] + [2.0 * quarter])
+        per_step = growth / window
+        fitting = [k for k in range(1, window) if window % k == 0 and k * per_step <= quarter]
+        suggestion = (f"steps_per_launch={max(fitting)} (a divisor of {window}) would fit" if fitting else
+                      f"an atom moves about {per_step:.3f} A per step")
+        warnings.warn(
+            f"whole-step windows of {window} steps failed from a freshly built candidate list in "
+            f"{self.fresh_list_fallbacks} of {self.launches} windows: an atom moved more than half the candidate "
+            f"skin ({0.5 * self.builder.skin:.3f} A) within a window, which is then redone "
+            f"{'step by step' if self.split_after_outrun else 'eagerly'}. "
+            f"{suggestion}; or raise the candidate skin (CapacityConfig.candidate_skin).",
+            RuntimeWarning, stacklevel=3)
 
     @scoped_call
     def replay(self, *, strict: bool = True, record: bool = False, launched=None) -> WholeStepState:
@@ -531,7 +815,7 @@ class WholeStepGraphRunner:
         record = record or self.record_every_window
         if record and self.record_graph is None:
             raise ValueError("replay(record=True) needs a runner with record_stress=True")
-        (self.record_graph if record else self.graph).replay()
+        self._window_replay(record)
         self.launches += 1
         if launched is not None:
             launched()
@@ -574,28 +858,41 @@ class WholeStepGraphRunner:
         # The displacement's growth in this window; none after a fallback (whose eager steps may rebuild
         # the candidates at every step).
         self._settled_fallback = self.fallback_windows != fallbacks
+        if self.split_after_outrun and not self._last_window_split and not self._settled_fallback:
+            self._split_period = _SPLIT_FIRST_WINDOWS  # a full window passed
         if not self._settled_fallback:
             growth = displacement - self._settled_displacement
             self._displacement_growth[0] = max(growth, self._displacement_growth[0] or 0.0)
         self._settled_displacement = displacement
-        refresh_threshold = self.builder.skin * self.proactive_refresh_fraction
-        if displacement >= refresh_threshold:
+        if self._refresh_due(displacement, self._displacement_growth[0]):
             self.builder.refresh_candidates(self.positions)
             self.candidate_refreshes += 1
             self._settled_displacement = 0.0
             self._displacement_growth = [None, self._displacement_growth[0]]
 
+    def _refresh_due(self, displacement: float, growth: float | None) -> bool:
+        """Whether a window that ended with this largest displacement refreshes the candidates: the proactive
+        fraction of the skin reached, or the displacement plus the refresh margin times ``growth`` (the
+        largest growth per window seen on the list, at least the window's bound :attr:`step_displacement_bound`)
+        reaching half the skin."""
+        skin = self.builder.skin
+        if displacement >= skin * self.proactive_refresh_fraction:
+            return True
+        if self.step_displacement_bound is not None:
+            bound = self.steps_per_launch * self.step_displacement_bound
+            growth = bound if growth is None else max(growth, bound)
+        return growth is not None and displacement + _REFRESH_GROWTH_MARGIN * growth >= 0.5 * skin
+
     def refresh_unlikely(self) -> bool:
         """Whether the window in flight will likely neither refresh the candidates nor fall back: the last
         settled window did not fall back, and its largest displacement plus twice the largest growth per
-        window seen with this or the previous candidate list stays below the refresh threshold. A window
-        launched behind one that does is rolled back (one window of GPU time), so the MD driver launches
-        none behind a likely one."""
+        window seen with this or the previous candidate list does not make a refresh due. A window launched
+        behind one that does is rolled back (one window of GPU time), so the MD driver launches none behind
+        a likely one."""
         growth = [value for value in self._displacement_growth if value is not None]
-        if not growth or self._settled_fallback:
-            return False
-        threshold = self.builder.skin * self.proactive_refresh_fraction
-        return self._settled_displacement + 2.0 * max(growth) < threshold
+        if not growth or self._settled_fallback or self._split_left or self._last_window_split:
+            return False  # none behind a split window, nor ahead of one
+        return not self._refresh_due(self._settled_displacement + 2.0 * max(growth), max(growth))
 
     def launch(self, *, record: bool = False, behind: bool = False) -> int:
         """Replay one window without settling it, and copy the flags :meth:`settle` reads to host memory
@@ -611,7 +908,7 @@ class WholeStepGraphRunner:
             if self.stateful_integrator is not None:
                 # its backup (the previous window's start) into the held state
                 self.stateful_integrator.restore(self._held_state)
-        (self.record_graph if record else self.graph).replay()
+        self._window_replay(record)
         self.launches += 1
         if self._flag_slots is None:
             sources = self._flag_sources()
@@ -649,7 +946,9 @@ class WholeStepGraphRunner:
         displacement = flags[3]
         if not math.isfinite(displacement):
             return "refresh"
-        return "refresh" if displacement >= self.builder.skin * self.proactive_refresh_fraction else None
+        # the growth settle would record for this window
+        growth = max(displacement - self._settled_displacement, self._displacement_growth[0] or 0.0)
+        return "refresh" if self._refresh_due(displacement, growth) else None
 
     def _held_buffers(self) -> tuple[list[Tensor], list[Tensor]]:
         sources = [self.backup_positions, self.backup_momenta, self.backup_forces, self.backup_energy]
@@ -712,10 +1011,16 @@ class WholeStepGraphRunner:
         self.potential_energy.copy_(potential_energy.reshape(1))
         self.builder.refresh_candidates(self.positions)
         self._settled_displacement = 0.0
+        # a new state (precapture's end, a cached capacity tier): windows are not split until one outruns the skin
+        self._split_left, self._split_period, self._split_growth = 0, _SPLIT_FIRST_WINDOWS, 0.0
+        self._last_window_split = False
         if reset_counters:
             self.fallback_windows = 0
             self.candidate_refreshes = 1
             self.recovery_replays = 0
+            self.fresh_list_fallbacks = 0
+            self.split_windows = 0
+            self.step_replays = 0
             self.launches = 0
             self.max_edge_count = 0
             self.max_triplet_count = 0
@@ -730,6 +1035,9 @@ class WholeStepGraphRunner:
             "candidate_refreshes": self.candidate_refreshes,
             "fallback_windows": self.fallback_windows,
             "recovery_replays": self.recovery_replays,
+            "fresh_list_fallbacks": self.fresh_list_fallbacks,
+            "split_windows": self.split_windows,
+            "step_replays": self.step_replays,
             "max_edge_count": self.max_edge_count,
             "max_triplet_count": self.max_triplet_count,
             "max_displacement": self.max_displacement_seen,
