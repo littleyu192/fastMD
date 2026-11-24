@@ -175,6 +175,9 @@ class DistributedMatRISEvaluator:
             # The adapter (a model object is wrapped as it is), the strategy it
             # provides, and the module every rank evaluates.
             self.adapter = as_adapter(model)
+            if config is not None and config.geometry_dtype == "float64":
+                raise ValueError("DistributedEvaluator: geometry_dtype='float64' runs on the single-GPU entry points "
+                                 "and, for the shard models, ShardedEvaluator (MatRIS's geometry stays float32)")
             self.strategy = strategy_of(self.adapter, self.context.world_size)
             model = self.adapter.module
             request = ParallelConfig() if parallel is None else parallel
@@ -456,6 +459,17 @@ class DistributedMatRISEvaluator:
         """``"single"`` (one CUDA rank) or ``"distributed"`` (the multi-rank protocol: P>1, or CPU at any P)."""
         return "single" if self._engine is not None else "distributed"
 
+    @property
+    def geometry_dtype(self) -> torch.dtype:
+        """The dtype of the positions this evaluator takes and of the forces it returns: the model's (MatRIS's
+        geometry stays its own; ``ShardedEvaluator`` may run float64 geometry)."""
+        return self.dtype
+
+    @property
+    def geometry_cell(self) -> Tensor:
+        """The cell the positions belong to (the partition's; :meth:`distribute` checks the input against it)."""
+        return self.partition.cell
+
     def config_summary(self) -> dict:
         if self._engine is not None:
             return {
@@ -644,14 +658,17 @@ class DistributedMatRISEvaluator:
     def distribute(self, atoms=None, *, root: int = 0, payload_dtype: torch.dtype | None = None) -> AtomState:
         """Initial CPU scatter from ASE Atoms on root; other ranks pass None.
 
-        Initial masses and momenta are carried as payload for optional NVE, in
-        the model dtype unless ``payload_dtype`` is given; ``torch.float64``
+        The positions are in the evaluator's geometry dtype (``geometry_dtype``:
+        the model's, or float64 for float64 geometry). Initial masses and
+        momenta are carried as payload for optional NVE, in that dtype unless
+        ``payload_dtype`` is given; ``torch.float64``
         also carries the float64 input positions as "positions64" (the
         float64 MD state of ``nvt_nhc``, see
         ``GPUResidentMolecularDynamics.from_evaluator``).
         No global coordinates or forces are gathered by the inference loop.
         """
         global_root = validate_root(self.context, root)
+        geometry = self.geometry_dtype
         chunks = None
         error = None
         if self.context.rank == root:
@@ -660,16 +677,19 @@ class DistributedMatRISEvaluator:
                     raise ValueError("root must supply nonempty ASE Atoms")
                 if not all(atoms.pbc):
                     raise ValueError("only full PBC is supported")
+                # (compared in the model's dtype, as before: the evaluator runs its own cell, float64 on float64
+                # geometry)
                 cell = torch.as_tensor(atoms.cell.array, dtype=self.dtype)
                 if not torch.equal(cell, self.partition.cell.to(self.dtype)):
                     raise ValueError("input atoms cell differs from evaluator cell")
-                positions = torch.as_tensor(atoms.positions, dtype=self.dtype)
+                positions = torch.as_tensor(atoms.positions, dtype=geometry)
                 if not bool(torch.isfinite(positions).all()):  # before owner_of bins them
                     raise ValueError("positions must be finite")
                 numbers = torch.as_tensor(atoms.numbers, dtype=torch.long)
                 ids = torch.arange(len(atoms), dtype=torch.long)
-                owners = self.partition.owner_of(positions)
-                dtype = self.dtype if payload_dtype is None else payload_dtype
+                # (binned on the model dtype's rounding, as migration bins them)
+                owners = self.partition.owner_of(positions.to(self.dtype))
+                dtype = geometry if payload_dtype is None else payload_dtype
                 if dtype not in (torch.float32, torch.float64):
                     raise ValueError("payload_dtype must be torch.float32 or torch.float64")
                 payload = {"masses": torch.as_tensor(atoms.get_masses(), dtype=dtype),
@@ -698,22 +718,27 @@ class DistributedMatRISEvaluator:
 
         Root reads the file (:func:`~fastmd.execution.md_protocol.read_restart`)
         and checks it against this evaluator's cell (and, if given, root's
-        ``atoms`` numbers); every atom goes to the owner of its float32
-        position under the current partition, computed on root's device as
-        migration computes it, and each rank's rows are in ID order: exactly
-        the rows and order evaluate produces. Initialization-time Gloo
-        scatter. Returns ``{"prediction": the cached DistributedPrediction
+        ``atoms`` numbers); every atom goes to the owner of its position
+        rounded to the model's dtype under the current partition, computed on
+        root's device as migration computes it, and each rank's rows are in ID
+        order: exactly the rows and order evaluate produces. The positions and
+        cached forces are in the evaluator's geometry dtype (``geometry_dtype``).
+        Initialization-time Gloo scatter. Returns ``{"prediction": the cached DistributedPrediction
         (not re-evaluated; epoch -1), "step", "parameters", "temperature_K"
         (None for nve), "nhc_state" (nvt_nhc, else None), "offsets", "engine"
-        (the writer: "domain" or "native")}``, the ``restart`` argument of
-        ``GPUResidentMolecularDynamics.from_evaluator``; the payload dtype
-        follows the saved ensemble (float64 plus "positions64" for nvt_nhc).
+        (the writer: "domain" or "native"), "geometry_dtype" (the file's:
+        "float64" or "float32", its cached forces' dtype)}``, the ``restart``
+        argument of ``GPUResidentMolecularDynamics.from_evaluator``; the
+        payload dtype follows the saved ensemble (float64 plus "positions64"
+        for nvt_nhc) and else the geometry; the file's cell is checked in the
+        model's dtype, as the input atoms' are (the evaluator runs its own).
         """
         import numpy as np
         from fastmd.execution.md_protocol import read_restart
 
         context = self.context
         global_root = validate_root(context, root)
+        geometry = self.geometry_dtype
         chunks, error = None, None
         if context.rank == root:
             try:
@@ -725,18 +750,20 @@ class DistributedMatRISEvaluator:
                 if atoms is not None and not np.array_equal(data.numbers, atoms.get_atomic_numbers()):
                     raise ValueError("restart atomic numbers do not match the input structure")
                 nhc = data.parameters["ensemble"] == "nvt_nhc"
-                dtype = torch.float64 if nhc else self.dtype
+                dtype = torch.float64 if nhc else geometry
                 positions64 = torch.tensor(data.positions)
-                positions = positions64.to(self.dtype)
+                positions = positions64.to(geometry)
                 payload = {"masses": torch.tensor(data.masses).to(dtype), "momenta": torch.tensor(data.momenta).to(dtype)}
                 if nhc:
                     payload["positions64"] = positions64
-                forces = torch.tensor(data.forces)
+                # In the evaluator's geometry dtype: a file of another geometry (its cached forces float64 for float64
+                # geometry) continues on the evaluator's geometry as a file of this evaluator's would.
+                forces = torch.tensor(data.forces).to(geometry)
                 shared = {"step": data.step, "parameters": data.parameters, "energy": torch.tensor(data.energy),
                           "reference_energy": torch.tensor(data.reference_energy), "natoms": len(ids),
                           "temperature_K": data.temperature_K, "nhc_state": data.nhc_state, "offsets": data.offsets,
-                          "engine": data.engine}
-                owners = self.partition.owner_of(positions.to(self.device)).cpu()
+                          "engine": data.engine, "geometry_dtype": data.geometry_dtype}
+                owners = self.partition.owner_of(positions.to(device=self.device, dtype=self.dtype)).cpu()
                 chunks = []
                 for rank in range(context.world_size):
                     mask = owners == rank
@@ -760,7 +787,7 @@ class DistributedMatRISEvaluator:
                                            shared["reference_energy"].to(device), shared["natoms"], -1, {})
         return {"prediction": prediction, "step": shared["step"], "parameters": shared["parameters"],
                 "temperature_K": shared["temperature_K"], "nhc_state": shared["nhc_state"],
-                "offsets": shared["offsets"], "engine": shared["engine"]}
+                "offsets": shared["offsets"], "engine": shared["engine"], "geometry_dtype": shared["geometry_dtype"]}
 
     def _sync(self):
         if self.device.type == "cuda":

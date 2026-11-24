@@ -112,6 +112,10 @@ class MLIPModel(ModelInterface):
                 block.enable_compile = enable_compile
                 block.enable_checkpoint = enable_checkpoint
 
+        if self._inference_config.geometry_dtype == "float64":
+            raise ValueError("MatRISModel: geometry_dtype='float64' applies to the models the engine differentiates "
+                             "(the calculator, GPU-resident MD and the batched runners); the torch-sim interface runs "
+                             "MatRIS on its float32 geometry")
         apply_checkpoint(self.model, enable_checkpoint)
         saved_recompute.check_model(
             self.model, saved_recompute.explicit_mode(self._inference_config.saved_tensor_recompute))

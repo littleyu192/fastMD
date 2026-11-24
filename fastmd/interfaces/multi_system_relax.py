@@ -332,7 +332,7 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
             self._adapter, cell_filter=integrator.cell_filter, layout=union.layout,
             cells=integrator.cells if integrator.cell_filter else union.cells, atomic_numbers=union.numbers,
             atoms=union.atoms, u_capacity=union.u_capacity, t_capacity=union.t_capacity,
-            candidate_skin=self.candidate_skin, device=self.device, admit_cells=self._admit_cells)
+            candidate_skin=self.candidate_skin, device=self.device, admit_cells=self._admit_cells, config=self._config)
         union.runner = SlotRelaxationRunner(
             model=self._adapter, builder=builder, integrator=integrator, positions=positions, momenta=momenta,
             forces=forces, steps_per_launch=self.steps_per_launch, warmup=self._config.capacity.warmup,

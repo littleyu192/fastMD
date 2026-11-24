@@ -54,7 +54,7 @@ class AsyncGPUMDLogger:
     stored in the trajectory frame's calculator in Voigt order, so that
     ``atoms.get_stress()`` returns what it returns for a calculator's 3x3
     result; the text log is unchanged. ``value_dtype`` is the dtype of the
-    logged forces, cell and stress (float64 for a float64 model).
+    logged forces, cell and stress (float64 on float64 geometry).
     """
 
     def __init__(

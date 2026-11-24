@@ -44,7 +44,7 @@ from ..engine.entry_config import apply_checkpoint, release_adapter, use_adapter
 from ..engine.policy import fusion_scope
 from ..execution.gpu_integrator import default_fix_com, kinetic_energy_fp64
 from ..execution.gpu_nhc import maxwell_boltzmann_momenta
-from ..engine.energy_derivative import engine_derivative
+from ..engine.energy_derivative import default_geometry, engine_derivative, geometry_dtype
 from ..execution.replica_batch import (
     DEFAULT_UNION_ROWS,
     UNION_PROBE_FRACTIONS,
@@ -329,6 +329,8 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                self_check) -> None:
         adapter = self._adapter
         check_system_cells(adapter)  # before anything is negotiated or measured
+        # An unset geometry_dtype: float64 geometry for a float32 model that declares the input.
+        resolved = default_geometry(adapter, resolved, "gpu_md")
         whole_step = replace(resolved, execution="whole_step")
         if negotiated(adapter):
             plan = negotiate(adapter, whole_step, entry="gpu_md", device=self.device)
@@ -351,11 +353,14 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         saved_recompute.note_entry_point(module)
         for parameter in module.parameters():
             parameter.requires_grad_(False)
-        # float64 state: a float64 model the engine differentiates (MatRIS evaluates float32 graphs)
-        self._float64 = engine_derivative(adapter) is not None and adapter.topology_spec().model_dtype == "float64"
-        if self._float64 and self.ensemble != "nvt_nhc":
-            raise ValueError("MultiSystemMolecularDynamics: a float64 model needs ensemble='nvt_nhc' (the integrator "
-                             "with a float64 state); nve and nvt keep a float32 state")
+        # float64 state (every ensemble): float64 geometry, of a float64 model the engine differentiates or of a
+        # float32 one on float64 geometry (geometry_dtype "float64", or its default; MatRIS evaluates float32
+        # graphs); the self-check's floors follow the model's dtype
+        self._float64 = geometry_dtype(adapter, self._config) == torch.float64
+        # The runner's positions and momenta: nve and nvt integrate them, in the geometry's dtype; the Nose-Hoover
+        # chain (and FIRE) keep their float64 state themselves, mirrored in float32.
+        self._state_dtype = torch.float64 if self._float64 and self.ensemble != "nvt_nhc" else torch.float32
+        model64 = engine_derivative(adapter) is not None and adapter.topology_spec().model_dtype == "float64"
         self.candidate_skin = float(self._config.capacity.candidate_skin)
         self._line_graph = adapter.topology_spec().triplet_cutoff is not None  # each system's triplets too
         self._system_tables(systems)
@@ -368,7 +373,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         with (self._config.scope(), fusion_scope(self._config.optimization_profile != "generic"),
               _collections_of_new_objects()):
             if self_check:
-                floor, energy_floor = (1e-10, 1e-12) if self._float64 else (1e-5, 1e-6)
+                floor, energy_floor = (1e-10, 1e-12) if model64 else (1e-5, 1e-6)
                 check = self._self_check(floor, energy_floor)
                 plan = batch_systems(plan, adapter, systems=self.systems, self_check=check, own_cells=True)
             else:
@@ -574,7 +579,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         layout = SlotLayout(tuple(atoms))
         numbers = torch.as_tensor(np.concatenate(self._numbers[:k]), device=device)
         positions = torch.as_tensor(np.concatenate([system.get_positions() for system in self.templates[:k]]),
-                                    dtype=torch.float32, device=device)
+                                    dtype=geometry_dtype(adapter, self._config), device=device)
         cells = torch.as_tensor(np.stack(self._cells[:k]), dtype=torch.float64, device=device)
         pairs, triplets = slot_union_demand(adapter, positions, layout=layout, cells=cells, atomic_numbers=numbers,
                                             atoms=atoms, candidate_skin=self.candidate_skin, device=device)
@@ -583,7 +588,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
             adapter, layout=layout, cells=cells, atomic_numbers=numbers, atoms=atoms,
             u_capacity=union_capacity(pairs, step, line_graph=self._line_graph),
             t_capacity=union_triplet_capacity(triplets, step, replicas=k) if self._line_graph else 0,
-            candidate_skin=self.candidate_skin, device=device)
+            candidate_skin=self.candidate_skin, device=device, config=self._config)
         builder.refresh_candidates(positions)
 
         def evaluate() -> None:
@@ -688,7 +693,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         runs, demand = slot_union_memory_runs(self._adapter, systems, candidate_skin=self.candidate_skin,
                                               device=self.device, step=self._capacity_step,
                                               headroom=self.capacity_headroom, ceilings=self.ceilings[start:stop],
-                                              triplet_headroom=self.triplet_headroom)
+                                              triplet_headroom=self.triplet_headroom, config=self._config)
         occupied = sum(len(numbers) for _, _, numbers in systems)
         line_graph = self._line_graph
 
@@ -742,7 +747,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                     atomic_numbers=torch.as_tensor(numbers), atoms=[len(z) for _, _, z in systems[:first]],
                     u_capacity=union_capacity(pairs, line_graph=line_graph),
                     t_capacity=union_triplet_capacity(triplets, replicas=first) if line_graph else 0,
-                    candidate_skin=self.candidate_skin, device=self.device)
+                    candidate_skin=self.candidate_skin, device=self.device, config=self._config)
                 persistent = slot_union_persistent_bytes(builder)
                 del builder
                 torch.cuda.empty_cache()
@@ -788,9 +793,10 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
             low, high = (low, middle) if len(pack(middle)) - 1 <= count else (middle + 1, high)
         return np.asarray(pack(low))
 
-    def _union_tables(self, union: _SlotUnion, positions: list) -> tuple[torch.Tensor, torch.Tensor]:
+    def _union_tables(self, union: _SlotUnion, positions: list,
+                      dtype: torch.dtype = torch.float32) -> tuple[torch.Tensor, torch.Tensor]:
         """The union's row tables at ``positions`` (one ``(n, 3)`` per system): its species (a vacant row: its
-        system's first element) and float32 coordinates (a vacant row: the origin)."""
+        system's first element) and coordinates in ``dtype`` (a vacant row: the origin)."""
         layout = union.layout
         numbers = np.zeros(layout.rows, dtype=np.int32)
         coordinates = np.zeros((layout.rows, 3), dtype=np.float64)
@@ -800,7 +806,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
             numbers[start:start + n] = self._numbers[index]
             coordinates[start:start + n] = positions[slot]
         return (torch.as_tensor(numbers, device=self.device),
-                torch.as_tensor(coordinates, dtype=torch.float32, device=self.device))
+                torch.as_tensor(coordinates, dtype=dtype, device=self.device))
 
     def _start_union(self, union: _SlotUnion, positions: list, momenta: list) -> None:
         """The integrator of ``union`` at ``positions`` and ``momenta`` (one ``(n, 3)`` per system), and its first
@@ -809,7 +815,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         union.atoms = [len(self._numbers[index]) for index in range(union.start, union.stop)]
         union.cells = torch.as_tensor(np.stack(self._cells[union.start:union.stop]), dtype=torch.float64,
                                       device=self.device)
-        union.numbers, coordinates = self._union_tables(union, positions)
+        union.numbers, coordinates = self._union_tables(union, positions, self._state_dtype)
         layout = union.layout
         if self.ensemble == "nvt_nhc":
             union.integrator = SystemNoseHooverChainNVT(
@@ -827,13 +833,13 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                 moment[start:start + n] = momenta[slot]
             occupied = torch.zeros(layout.rows, dtype=torch.bool, device=self.device)
             occupied.index_fill_(0, torch.as_tensor(layout.occupied_rows(union.atoms), device=self.device), True)
-            union.integrator = SystemVelocityVerlet(
-                torch.as_tensor(masses, dtype=torch.float32, device=self.device), self.timestep,
+            union.integrator = SystemVelocityVerlet(  # on the runner's buffers: the state, in the geometry's dtype
+                torch.as_tensor(masses, dtype=self._state_dtype, device=self.device), self.timestep,
                 ceilings=torch.tensor(layout.ceilings, dtype=torch.int64, device=self.device),
                 atoms=torch.tensor(union.atoms, dtype=torch.int64, device=self.device),
                 system_of_row=layout.system_of_row(self.device), occupied=occupied, ensemble=self.ensemble,
                 temperature=self.temperature, taut_fs=kinds["taut"], fix_com=kinds["fix_com"])
-            state = coordinates, torch.as_tensor(moment, dtype=torch.float32, device=self.device)
+            state = coordinates, torch.as_tensor(moment, dtype=self._state_dtype, device=self.device)
         self._set_capacities(union, state[0])
         self._capture(union, *state, forces=None)
 
@@ -864,7 +870,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         builder = slot_union_builder(self._adapter, layout=union.layout, cells=union.cells,
                                      atomic_numbers=union.numbers, atoms=union.atoms, u_capacity=union.u_capacity,
                                      t_capacity=union.t_capacity, candidate_skin=self.candidate_skin,
-                                     device=self.device)
+                                     device=self.device, config=self._config)
         union.runner = SlotWholeStepRunner(
             model=self._adapter, builder=builder, integrator=union.integrator, positions=positions, momenta=momenta,
             forces=forces, steps_per_launch=self.steps_per_launch, warmup=self._config.capacity.warmup,
@@ -1062,7 +1068,8 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                 u_capacity=union_capacity(pairs, line_graph=self._line_graph), atom_graph_cutoff=cutoff,
                 candidate_cutoff=cutoff + self.candidate_skin, padding=adapter.padding_rule(),
                 prepare=adapter.prepare,
-                **graph_builder_options(adapter, union_triplet_capacity(triplets) if self._line_graph else 0),
+                **graph_builder_options(adapter, union_triplet_capacity(triplets) if self._line_graph else 0,
+                                        self._config),
                 **geometry)
         except ValueError as error:
             raise ValueError(f"{where}: the model rejects the system: {error}") from error
@@ -1095,7 +1102,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
 
     def get_positions(self) -> list[np.ndarray]:
         """One ``(n_s, 3)`` float64 array of unwrapped positions per system (the MD state: the Nose-Hoover chain's
-        float64 positions, or the runner's float32 ones for nve and nvt)."""
+        float64 positions, or the runner's ones for nve and nvt, in the geometry's dtype)."""
         return self._system_rows(lambda union: union.integrator.positions if self.ensemble == "nvt_nhc"
                                  else union.runner.positions)
 

@@ -744,8 +744,9 @@ class GPUNoseHooverChainNVT(_TargetTemperature, StatefulIntegrator):
     (the global momentum is removed after every step, one more
     ``allreduce_sum_``). Rows ``[0, n_owned)`` of the buffers are the owned
     atoms; ``positions``/``momenta``/``forces`` and the step halves use those
-    row views, :meth:`positions32` is the float32 evaluator input,
-    :meth:`migrating_fields` the payload that migrates with the atoms, and
+    row views, :meth:`positions32` is the evaluator input (a mirror in
+    ``input_dtype``: float32, or float64 for an evaluator on float64
+    geometry), :meth:`migrating_fields` the payload that migrates with the atoms, and
     :meth:`reorder_` loads the rows an epoch refresh returns. Collective
     under decomposed (every rank calls): the step halves,
     :meth:`kinetic_energy`, :meth:`temperature`, :meth:`conserved_energy`.
@@ -778,6 +779,7 @@ class GPUNoseHooverChainNVT(_TargetTemperature, StatefulIntegrator):
         scalar_sync: str = "broadcast",
         ke2_update: str = "scaled",
         fix_com: bool = False,
+        input_dtype: torch.dtype = torch.float32,
     ) -> None:
         if tchain < 1 or tloop < 1:
             raise ValueError("tchain and tloop must be >= 1")
@@ -791,6 +793,10 @@ class GPUNoseHooverChainNVT(_TargetTemperature, StatefulIntegrator):
             protocol = "single" if comm is None else "decomposed"
         if protocol not in ("single", "decomposed"):
             raise ValueError(f"unknown protocol {protocol!r}")
+        if input_dtype not in (torch.float32, torch.float64) or (protocol == "single"
+                                                                  and input_dtype != torch.float32):
+            raise ValueError("input_dtype is torch.float32, or torch.float64 with protocol='decomposed'")
+        self.input_dtype = input_dtype
         self.device = torch.device(device)
         masses_np = np.asarray(
             masses.detach().cpu().numpy() if torch.is_tensor(masses) else masses,
@@ -904,15 +910,15 @@ class GPUNoseHooverChainNVT(_TargetTemperature, StatefulIntegrator):
 
     def _allocate_slots(self, capacity: int) -> None:
         """Decomposed: state and backup with ``capacity`` rows (chain scratch
-        3*tloop), masses (capacity, 1) float64 (padding 1.0) and the float32
-        positions mirror. Rows are zero; the chain and energy are copied over."""
+        3*tloop), masses (capacity, 1) float64 (padding 1.0) and the positions
+        mirror in ``input_dtype``. Rows are zero; the chain and energy are copied over."""
         old = getattr(self, "state", None)
         options = {"dtype": torch.float64, "device": self.device}
         self.state = NHCState.allocate(capacity, self.tchain, self.device, scratch=3 * self.tloop)
         self._backup = NHCState.allocate(capacity, self.tchain, self.device,
                                          scratch=3 * self.tloop)
         self.masses = torch.ones(capacity, 1, **options)
-        self._positions32 = torch.zeros(capacity, 3, dtype=torch.float32, device=self.device)
+        self._positions32 = torch.zeros(capacity, 3, dtype=self.input_dtype, device=self.device)
         self._real = torch.zeros(capacity, dtype=torch.bool, device=self.device)  # rows [0, n_owned)
         self._real[:min(self.n_owned, capacity)] = True
         self.capacity = capacity
@@ -1078,7 +1084,8 @@ class GPUNoseHooverChainNVT(_TargetTemperature, StatefulIntegrator):
     @torch.no_grad()
     def step_pre_force_rows(self, rows: int) -> Tensor:
         """Decomposed :meth:`step_pre_force` on rows ``[0, rows)`` with the owned-row mask (capture-safe,
-        collective; the HAS_MASK kernels leave the padding rows untouched); the float32 positions view."""
+        collective; the HAS_MASK kernels leave the padding rows untouched); the evaluator's positions view (the
+        mirror in ``input_dtype``)."""
         st, real = self.state, self._real[:rows]
         q = st.positions[:rows]
         self._dc.pre_force(q, st.momenta[:rows], st.forces[:rows], self.masses[:rows].reshape(-1), real)
@@ -1280,8 +1287,8 @@ class GPUNoseHooverChainNVT(_TargetTemperature, StatefulIntegrator):
         self._positions32[:n].copy_(self.state.positions[:n])
 
     def positions32(self) -> Tensor:
-        """The evaluator's input: float32 (n_owned, 3) positions (decomposed:
-        a mirror written by :meth:`step_pre_force` and :meth:`reorder_`)."""
+        """The evaluator's input: (n_owned, 3) positions, float32 (decomposed: a
+        mirror in ``input_dtype`` written by :meth:`step_pre_force` and :meth:`reorder_`)."""
         if self._dc is None:
             return self.state.positions.to(torch.float32)
         return self._positions32[:self.n_owned]
@@ -1300,7 +1307,7 @@ class GPUNoseHooverChainNVT(_TargetTemperature, StatefulIntegrator):
         returned; its payload holds :meth:`migrating_fields`' names) in place.
 
         positions64, momenta and masses fill rows ``[0, n')``; the padding
-        rows are zeroed (masses 1.0); the float32 positions fill the mirror.
+        rows are zeroed (masses 1.0); the evaluator's positions fill the mirror.
         Forces are not carried (F(q_n) was consumed by the pre-force half and
         :meth:`step_post_force` writes F(q_{n+1}) on the new rows) unless the
         payload has "forces" (the refresh of the P>1 in-graph step runs

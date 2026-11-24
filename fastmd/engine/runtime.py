@@ -52,19 +52,24 @@ if os.environ.get("MATRIS_RUNTIME_ENGINE", "unified") != "unified":
 # Shared forward entrypoints are executable model state, just like forward.
 # Reject instance replacements at public admission and stamp internal callers'
 # bindings so prepare/run cannot execute two different model programs.
+# Every method of a stock MatRIS module class that a forward or its recomputation reaches through an attribute of
+# the module (an instance attribute would win) is listed, at P=1 and P>1 (the P>1 hooks call the layers'
+# attention_node_update/refinement_node_update; the gated MLP's fused paths call its private helpers);
+# tests/test_shared_forward_guards.py checks that every method of those classes is listed or known not to be one.
 MODEL_FORWARD_METHODS = frozenset({
     "forward", "forward_features", "embed_atoms", "normalize_readout",
     "atomic_energy", "atomic_energy_rows", "atomic_energies", "_graph_sum", "_per_atom_reference",
     "forward_lengths", "forward_indexed",
     "forward_vectors", "forward_basis", "attention_rows", "attention_nodes",
-    "attention_edges", "refinement_rows", "refinement_payload",
-    "refinement_nodes", "refinement_edges", "_fused_edge_ffn", "wrapper_attn_layer",
+    "attention_edges", "attention_node_update", "refinement_rows", "refinement_payload",
+    "refinement_nodes", "refinement_node_update", "refinement_edges", "_fused_edge_ffn", "wrapper_attn_layer",
     "wrapper_refine_layer", "_attn_layer_call", "_refine_layer_call", "_forward", "_normalize_real_counts",
     "_can_fuse_indexed_cat_first_linear", "_first_linear_modules",
     "_split_first_linear_params", "aligned_first_linear_block",
-    "forward_aligned_gather_cat3", "forward_aligned_gather_cat4",
-    "_run_after_first_activation", "_finish_gate", "_merged_attention_projection",
-    "_combined_swish_linear_weight",
+    "forward_aligned_gather_cat3", "forward_aligned_gather_cat4", "forward_gathered_chunks", "forward_with_residual",
+    "_run_after_first", "_run_after_first_activation", "_finish_gate", "_folded_biases", "_gated_tail",
+    "_second_layers", "_second_linears", "_register_gate_inputs", "_register_gate_output",
+    "_merged_attention_projection", "_combined_swish_linear_weight",
 })
 
 

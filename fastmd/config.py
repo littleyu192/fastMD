@@ -315,6 +315,8 @@ SAVED_TENSOR_RECOMPUTE = ("off", "on", "deep", "auto")
 # InferenceConfig.recompute_policy (fastmd.engine.saved_recompute.policy_threshold).
 RECOMPUTE_POLICY = ("safe", "fast")
 TOPOLOGY_REUSE = ("off", "skin", "auto")
+# InferenceConfig.geometry_dtype (fastmd.engine.energy_derivative.geometry_dtype).
+GEOMETRY_DTYPES = ("float32", "float64")
 # InferenceConfig.triton_dot_precision (fastmd.precision.triton_dot_input_precision).
 TRITON_DOT_PRECISIONS = ("auto", "ieee", "tf32x3", "tf32")
 # InferenceConfig.optimization_profile=None (2026-09-30; "legacy" before).
@@ -545,6 +547,23 @@ class InferenceConfig:
     outer configured scope, else the environment variable of that name
     (every profile), else "auto". The projection gradient's row addmm
     always accumulates in FP32 FMA.
+    ``geometry_dtype`` (models the engine differentiates: not MatRIS) is the dtype of the geometry the
+    model reads: the positions and cell, their wrap into the cell, each edge's vector and the strain of
+    a stress. "float64" for a float32 model: the state of the entry points (MD in every ensemble,
+    relaxation) and the published positions and cell stay float64, the wrap, the edge vectors and the
+    strain path are float64, and the adapter casts the edge vectors to the model's dtype at its input,
+    so the model's own arithmetic is unchanged; forces and stress come back float64. It removes the
+    float32 rounding of the coordinates from the forces (on dense cells the main difference from an
+    upstream float64 evaluation). MatRIS (its own derivative, kept bitwise, also its distributed
+    evaluator), a model whose adapter does not declare the input and the TorchSim interface refuse
+    "float64"; ``ShardedEvaluator`` runs it at every rank count (the ghost coordinates' COPY in float64)
+    and the MD it drives through ``from_evaluator`` follows it. None: the entry point's default,
+    "float64" for a float32 model whose adapter declares the input in the calculator, GPU-resident
+    MD's single-GPU driver, the batched runners (replicas, systems, relaxation, StructOptimizer) and
+    ``ShardedEvaluator`` at every rank count (and so the MD driven through it), else the model's dtype
+    (MatRIS, also its distributed evaluator, TorchSim; GPU-resident MD resuming a restart file of
+    float32 geometry); the plan records it as the "geometry" decision. "float32" opts out (the
+    float32 geometry and state of before) and is refused for a float64 model.
     No explicit configuration changes any process-wide environment variable.
     """
     execution: str | None = None
@@ -559,8 +578,11 @@ class InferenceConfig:
     topology_reuse: str = "auto"
     triton_dot_precision: str | None = None
     recompute_policy: str | None = None
+    geometry_dtype: str | None = None
 
     def __post_init__(self) -> None:
+        if self.geometry_dtype is not None and self.geometry_dtype not in GEOMETRY_DTYPES:
+            raise ValueError(f"geometry_dtype must be None or one of {GEOMETRY_DTYPES}, got {self.geometry_dtype!r}")
         if self.triton_dot_precision is not None and self.triton_dot_precision not in TRITON_DOT_PRECISIONS:
             raise ValueError(f"triton_dot_precision must be None or one of {TRITON_DOT_PRECISIONS}")
         if self.topology_reuse not in TOPOLOGY_REUSE:
@@ -614,6 +636,13 @@ class ResolvedConfig:
     topology_reuse: str = "auto"
     triton_dot_precision: str | None = None
     recompute_policy: str = "fast"
+    geometry_dtype: str | None = None
+    # The geometry an unset geometry_dtype takes at this entry point where it is not the model's own (float64 for a
+    # float32 model that declares float64 geometry input, in the calculator, GPU-resident MD and the batched runners
+    # on one GPU and in ShardedEvaluator at every rank count): set by the entry point once its model is loaded
+    # (energy_derivative.default_geometry), recorded in the plan's "geometry" decision and fingerprint, not in the
+    # configuration (as_dict).
+    geometry_default: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kernel_options", MappingProxyType(dict(self.kernel_options)))
@@ -633,6 +662,7 @@ class ResolvedConfig:
             "triton_dot_precision": self.triton_dot_precision,
             # Only when not the default: configuration fingerprints (and records) of the default stay.
             **({} if self.recompute_policy == "fast" else {"recompute_policy": self.recompute_policy}),
+            **({} if self.geometry_dtype is None else {"geometry_dtype": self.geometry_dtype}),
         }
 
     @cached_property
@@ -753,6 +783,8 @@ def resolve_config(
             else config.expert_overrides.get("MATRIS_TRITON_DOT_PRECISION")),
         recompute_policy=(config.recompute_policy if config is not None and config.recompute_policy is not None
                           else getattr(inherited, "recompute_policy", None) or recompute_policy_default()),
+        # A public control: an unconfigured entry runs on its model's geometry, also inside a configured scope.
+        geometry_dtype=None if config is None else config.geometry_dtype,
     )
 
 

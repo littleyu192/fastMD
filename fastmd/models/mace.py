@@ -262,6 +262,18 @@ _SHARD_PINS = {
     "mace.modules.radial.ZBLBasis.forward": "602a7077758ce3682537f5f4c691b2af5750280bc9a7bd771a48a61e57d61cf7",
 }
 
+# Geometry only: upstream reads positions for the edge vectors, and cell/unit shifts
+# only for its own derivatives, which the engine disables. Keep these pins separate
+# from the distributed hook implementation.
+_FLOAT64_GEOMETRY_PINS = {
+    "mace.modules.models.ScaleShiftMACE.forward":
+        _SHARD_PINS["mace.modules.models.ScaleShiftMACE.forward"],
+    "mace.modules.utils.prepare_graph":
+        "a369db1b449ebb4f4105cf7e42ad4cebea28950cd9d51a07f7b6cc8ec425c557",
+    "mace.modules.utils.get_edge_vectors_and_lengths":
+        "66c1b3a673cc95439b5e1d77d62bb8274adebf599db02d2000a3f3289a90a9b4",
+}
+
 
 # The upstream multi-GPU setup, ghost truncation and exchange autograd used only at P>1.
 _GHOST_PATH_PINS = (
@@ -446,11 +458,19 @@ class MACEAdapter:
         else:
             # row by row: no TF32 GEMM for FP32
             shifts = unit_shifts[:, 0:1] * cell[0] + unit_shifts[:, 1:2] * cell[1] + unit_shifts[:, 2:3] * cell[2]
+        edge_index = torch.stack((batch.edge_index[:, 1], batch.edge_index[:, 0])).to(torch.int64)
+        model_dtype = inputs.minus_one.dtype
+        if dtype != model_dtype:
+            # Form vectors in geometry precision and cast only at the model input.
+            # With zero positions MACE then reconstructs exactly these vectors.
+            vectors = positions.index_select(0, edge_index[1]) - positions.index_select(0, edge_index[0]) + shifts
+            positions = torch.zeros(positions.shape, dtype=model_dtype, device=positions.device)
+            shifts, unit_shifts, cell = vectors.to(model_dtype), unit_shifts.to(model_dtype), cell.to(model_dtype)
         return {
             "positions": positions,
             "node_attrs": node_attrs,
             # (sender, receiver) = (neighbour, centre), int64
-            "edge_index": torch.stack((batch.edge_index[:, 1], batch.edge_index[:, 0])).to(torch.int64),
+            "edge_index": edge_index,
             "unit_shifts": unit_shifts,
             "shifts": shifts,
             "cell": cell,
@@ -535,6 +555,22 @@ class MACEAdapter:
         ``cell`` and ``unit_shifts`` only for a stress, which the engine takes from its own strain)."""
         return True
 
+    def float64_geometry_input(self) -> bool:
+        """True for upstream's ``ScaleShiftMACE`` itself (as for :meth:`system_batching`) whose forward, graph setup
+        and edge vectors are the pinned ones (``_FLOAT64_GEOMETRY_PINS``): :meth:`node_energy` then takes float64
+        positions, cell and shifts for a float32 module (each edge's vector in float64, cast at the module's input,
+        which reads its positions and cell for nothing else; :class:`~fastmd.adapters.protocol.Float64GeometryInput`).
+        False for any other module (a subclass with a long-range term reads the positions and cell) or source."""
+        module = self.module
+        if (type(module).__name__, type(module).__module__) != ("ScaleShiftMACE", "mace.modules.models"):
+            return False
+        from ..adapters.patches import source_sha256
+
+        try:
+            return all(source_sha256(target) == _FLOAT64_GEOMETRY_PINS[target] for target in _FLOAT64_GEOMETRY_PINS)
+        except Exception:  # noqa: BLE001  (a target that cannot be resolved or read: not the pinned source)
+            return False
+
     def system_batching(self) -> str | None:
         """"union" for upstream's ``ScaleShiftMACE`` itself (as loaded, or as upstream's cuEquivariance
         converter rebuilds it): its node energies come from messages over edges and a per-atom readout, so
@@ -589,9 +625,10 @@ class MACEAdapter:
         the owned real slots' node energies of upstream's own multi-GPU forward (``ScaleShiftMACE.forward`` with
         ``lammps_mliap=True``) over the rank's rows (owned slots, then ghost rows).
 
-        That forward reads the edge vectors (upstream's ``get_edge_vectors_and_lengths`` of the rank's positions and
-        edge shifts, the function and inputs of :meth:`node_energy`), embeds every row and runs the first block's
-        ``linear_up`` on every row (a ghost row's own species). Each block sums its messages at the receivers (all
+        That forward reads the edge vectors (upstream's ``get_edge_vectors_and_lengths`` of the module's positions and
+        edge shifts of :meth:`node_energy`'s input: on float64 geometry the cast float64 vectors), embeds every row
+        and runs the first block's ``linear_up`` on every row (a ghost row's own species). Each block sums its
+        messages at the receivers (all
         owned; the sum's buffer spans every row) and truncates to the owned slots (``truncate_ghosts``): the
         block's linear, the skip connections, the products and the readouts run on the owned slots only. In every
         block but the first, ``linear_up`` runs on the owned slots and its output's ghost rows are filled with their
@@ -607,7 +644,9 @@ class MACEAdapter:
 
         data = self._data(inputs, positions, cell)
         owned = ctx.owned_rows
-        vectors, _ = get_edge_vectors_and_lengths(positions=positions, edge_index=data["edge_index"],
+        # The module's positions and shifts of _data: for float64 geometry the positions at the origin and the cast
+        # float64 vectors as the shifts, so these vectors are exactly the cast ones (as in node_energy).
+        vectors, _ = get_edge_vectors_and_lengths(positions=data["positions"], edge_index=data["edge_index"],
                                                   shifts=data["shifts"])
         data.update(vectors=vectors, natoms=(owned, ctx.ghost_rows), batch=inputs.graph_index[:owned],
                     lammps_class=_GhostExchange(ctx, _exchange_points(self.module)))

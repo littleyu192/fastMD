@@ -425,12 +425,13 @@ class LineHaloTopology(NodeHaloTopology):
 
     def __init__(self, partition: DomainPartition, context, *, cutoff: float, line_cutoff: float,
                  slot_cutoff: float, skin: float, pad_species: int = 1, n_dummy: int = 64,
-                 headroom: float = TIER_HEADROOM, align: int = TIER_ALIGN):
+                 headroom: float = TIER_HEADROOM, align: int = TIER_ALIGN, positions_dtype: torch.dtype = torch.float32,
+                 cell=None):
         from fastmd.adapters.protocol import PaddingRule
 
         super().__init__(partition, context, cutoff=cutoff, skin=skin, edges="either",
                          padding=PaddingRule("sink_atoms"), pad_species=pad_species, n_dummy=n_dummy,
-                         headroom=headroom, align=align)
+                         headroom=headroom, align=align, positions_dtype=positions_dtype, cell=cell)
         if not 0 < line_cutoff <= cutoff or not 0 < slot_cutoff:
             raise ValueError("the line-graph and slot cutoffs must be positive, the line graph's within the cutoff")
         self.line_cutoff, self.slot_cutoff = float(line_cutoff), float(slot_cutoff)
@@ -448,7 +449,7 @@ class LineHaloTopology(NodeHaloTopology):
         if self._builder_key != key:
             self.builder = None
             self.builder = FixedCapacityGraphBuilder(
-                cell=self.partition.cell.to(device=device, dtype=torch.float32),
+                **self._builder_cell(device),
                 atomic_numbers=torch.full((rows,), self.pad_species, dtype=torch.int64, device=device),
                 u_capacity=max(1, self.u_capacity), t_capacity=max(1, self.t_capacity),
                 atom_graph_cutoff=self.cutoff, line_graph_cutoff=self.line_cutoff, candidate_cutoff=self.halo,
@@ -633,14 +634,17 @@ class LinePartialStrategy:
     node halo's, the slots' folded into the stale one (a refresh and a redo); the fifth is the slots' own (a short
     boundary bond that is not a resolved slot, a slot without its bond, or a rank pair whose ends resolved different
     counts), which the evaluator counts. ``step(stress, md)`` and ``refresh(state, floor)``: the in-graph MD step and
-    the capacity floor, as the node halo's (the MD step's four flags after the fifth)."""
+    the capacity floor, as the node halo's (the MD step's four flags after the fifth). ``positions_dtype`` and
+    ``cell``: the geometry, as the node halo's."""
 
-    def __init__(self, adapter, spec, partition, context, *, skin: float, device):
+    def __init__(self, adapter, spec, partition, context, *, skin: float, device,
+                 positions_dtype: torch.dtype = torch.float32, cell=None):
         topology = adapter.topology_spec()
         self.adapter, self.spec, self.context = adapter, spec, context
         self.topology = LineHaloTopology(partition, context, cutoff=topology.cutoff,
                                          line_cutoff=topology.triplet_cutoff, slot_cutoff=spec.line_slot_cutoff,
-                                         skin=skin, pad_species=spec.pad_species)
+                                         skin=skin, pad_species=spec.pad_species, positions_dtype=positions_dtype,
+                                         cell=cell)
         self.derivative = LinePartialDerivative(adapter, spec.exchange_points)
         self.inputs = self.layout = None
         self.n_owned = 0
@@ -738,8 +742,8 @@ class LineReferenceTopology(NodeHaloReferenceTopology):
     """
 
     def __init__(self, partition: DomainPartition, context, *, cutoff: float, line_cutoff: float,
-                 slot_cutoff: float, dtype: torch.dtype, pad_species: int = 1):
-        super().__init__(partition, context, cutoff=cutoff, dtype=dtype, pad_species=pad_species)
+                 slot_cutoff: float, dtype: torch.dtype, pad_species: int = 1, cell=None):
+        super().__init__(partition, context, cutoff=cutoff, dtype=dtype, pad_species=pad_species, cell=cell)
         self.line_cutoff, self.slot_cutoff = float(line_cutoff), float(slot_cutoff)
 
     def refresh(self, state: AtomState) -> AtomState:
@@ -830,10 +834,11 @@ class LineReferenceTopology(NodeHaloReferenceTopology):
 
 
 def synthetic_line_batch(adapter, *, rows: int, edges: int, triplets: int, centres: int, cell: Tensor, species: int,
-                         dtype: torch.dtype, device):
+                         dtype: torch.dtype, device, geometry_dtype: torch.dtype | None = None):
     """A graph batch of ``rows`` rows, ``edges`` edge rows (pairs of opposite edges, centres among the first
     ``centres`` rows), their pairs and ``triplets`` triplet rows, at random coordinates in a cube of half the
-    line-graph cutoff's edge: the shapes of a rank's line-graph batch, for a memory probe."""
+    line-graph cutoff's edge: the shapes of a rank's line-graph batch, for a memory probe. Its positions and cell are
+    in ``geometry_dtype`` (the run's geometry: default ``dtype``)."""
     from fastmd.adapters.protocol import GraphBatch, PaddingRule
 
     topology = adapter.topology_spec()
@@ -852,9 +857,10 @@ def synthetic_line_batch(adapter, *, rows: int, edges: int, triplets: int, centr
     first = (2 * (rows_t % pairs)) % (2 * pairs)
     second = (first + 2) % (2 * pairs)
     line = torch.stack((edge_index[first, 0], d2u[first], first, d2u[second], second), dim=1)
-    return GraphBatch(positions=cartesian.to(device=device, dtype=dtype),
+    geometry_dtype = dtype if geometry_dtype is None else geometry_dtype
+    return GraphBatch(positions=cartesian.to(device=device, dtype=geometry_dtype),
                       frac_coords=(cartesian @ torch.linalg.inv(cell)).to(device=device, dtype=dtype),
-                      cell=cell.to(device=device, dtype=dtype),
+                      cell=cell.to(device=device, dtype=geometry_dtype),
                       species=torch.full((rows,), int(species), dtype=torch.int32, device=device), n_real=rows,
                       edge_index=edge_index.to(device=device, dtype=torch.int32),
                       edge_image=torch.zeros((2 * pairs, 3), dtype=torch.float32, device=device), n_edges=None,
@@ -865,17 +871,18 @@ def synthetic_line_batch(adapter, *, rows: int, edges: int, triplets: int, centr
 
 
 def line_exchange_bytes(points, *, rows: int, ghost_rows: int, send_rows: int, owned_slots: int, pairs: int,
-                        slots: int, itemsize: int) -> int:
+                        slots: int, itemsize: int, coordinate_itemsize: int | None = None) -> int:
     """The buffers of one step's exchanges beyond the model's own: the COPY points' as the node halo's
-    (``node_halo_memory.exchange_bytes``, where the rank has ghost rows) and per pair_merge point, ghost rows or not,
-    the slot rows sent, received and gathered both ways and the extended and merged partials of every bond (forward
-    and backward)."""
+    (``node_halo_memory.exchange_bytes``, where the rank has ghost rows; the coordinates' items of
+    ``coordinate_itemsize`` bytes) and per pair_merge point, ghost rows or not, the slot rows sent, received and
+    gathered both ways and the extended and merged partials of every bond (forward and backward)."""
     from .node_halo_memory import exchange_bytes
 
     copies = [point for point in points if point.kind == "copy"]
     merges = sum(point.width for point in points if point.kind == "pair_merge")
     return (exchange_bytes(copies, rows=rows, ghost_rows=ghost_rows, send_rows=send_rows, owned_slots=owned_slots,
-                           itemsize=itemsize) if ghost_rows else 0) + itemsize * merges * (8 * slots + 4 * (pairs + 1))
+                           itemsize=itemsize, coordinate_itemsize=coordinate_itemsize) if ghost_rows else 0) + \
+        itemsize * merges * (8 * slots + 4 * (pairs + 1))
 
 
 class LineGraphMemoryPredictor(NodeHaloMemoryPredictor):
@@ -889,16 +896,20 @@ class LineGraphMemoryPredictor(NodeHaloMemoryPredictor):
     capacities (synthetic line-graph batches; the first point once more, unmeasured, before), plus the exchange
     buffers of its COPY rows and line slots. One rank (the single-system builder) measures the same way."""
 
-    def __init__(self, points, *, model: str, exchange_points, itemsize: int, failure: str | None = None):
-        super().__init__([], model=model, exchange_points=exchange_points, itemsize=itemsize, failure=failure)
+    def __init__(self, points, *, model: str, exchange_points, itemsize: int, failure: str | None = None,
+                 coordinate_itemsize: int | None = None):
+        super().__init__([], model=model, exchange_points=exchange_points, itemsize=itemsize, failure=failure,
+                         coordinate_itemsize=coordinate_itemsize)
         self.points = list(points)  # (kind, edges, rows, triplets, peak bytes)
         self.fits = {kind: self._fit(kind) for kind in sorted({point[0] for point in self.points})}
 
     @classmethod
     def measure(cls, adapter, spec, extents: dict, *, cell: Tensor, device, dtype: torch.dtype,
-                kinds=("eager", "capture"), stream=None, single: bool = False) -> "LineGraphMemoryPredictor":
+                kinds=("eager", "capture"), stream=None, single: bool = False,
+                geometry_dtype: torch.dtype | None = None) -> "LineGraphMemoryPredictor":
         """Probe ``adapter`` on this rank's device (local: no collective; a probe that fails predicts nothing). The
-        model's per-atom energy tap at every point (``single``, one CUDA rank, runs the same tap)."""
+        model's per-atom energy tap at every point (``single``, one CUDA rank, runs the same tap), with positions and
+        cell in ``geometry_dtype`` (the run's geometry: default ``dtype``)."""
         import gc
 
         from .node_halo_memory import _peaks
@@ -915,7 +926,8 @@ class LineGraphMemoryPredictor(NodeHaloMemoryPredictor):
             for index, (probe_edges, probe_rows, probe_triplets) in enumerate([grid[0]] + grid):
                 batch = synthetic_line_batch(adapter, rows=probe_rows, edges=probe_edges, triplets=probe_triplets,
                                              centres=max(1, centres * probe_rows // max(rows, 1)), cell=cell,
-                                             species=spec.pad_species, dtype=dtype, device=device)
+                                             species=spec.pad_species, dtype=dtype, device=device,
+                                             geometry_dtype=geometry_dtype)
                 eager, captured = _peaks(adapter, adapter.prepare(batch), batch, device, "capture" in kinds, stream)
                 if index:  # (the first run is the unmeasured warm-up)
                     points += [(kind, probe_edges, probe_rows, probe_triplets, peak)
@@ -930,7 +942,8 @@ class LineGraphMemoryPredictor(NodeHaloMemoryPredictor):
         except Exception as error:  # noqa: BLE001 - as above
             failure = failure or f"memory probe failed: {type(error).__name__}: {str(error)[:200]}"
         return cls(points, model=name, exchange_points=spec.exchange_points,
-                   itemsize=torch.finfo(dtype).bits // 8, failure=failure)
+                   itemsize=torch.finfo(dtype).bits // 8, failure=failure,
+                   coordinate_itemsize=None if geometry_dtype is None else torch.finfo(geometry_dtype).bits // 8)
 
     def _fit(self, kind: str) -> dict:
         import numpy as np
@@ -984,7 +997,8 @@ class LineGraphMemoryPredictor(NodeHaloMemoryPredictor):
         exchange = line_exchange_bytes(self.exchange_points, rows=extents["rows"], ghost_rows=extents["ghost_rows"],
                                        send_rows=extents["send_rows"], owned_slots=extents["owned_slots"],
                                        pairs=extents["edges"] // 2, slots=extents.get("slots", 0),
-                                       itemsize=self.itemsize) if extents.get("pair_merges") else 0
+                                       itemsize=self.itemsize, coordinate_itemsize=self.coordinate_itemsize
+                                       ) if extents.get("pair_merges") else 0
         return int(math.ceil(max(model, 0.0) + headroom + exchange))
 
     def describe(self, entry: dict) -> str:
@@ -1000,19 +1014,25 @@ class LineGraphMemoryPredictor(NodeHaloMemoryPredictor):
                               "on this device) + max(2 x max residual, 16 MiB) + the exchange buffers"}
 
 
-def line_exchange_schedule(spec, dtype: torch.dtype, ghost_rows: list[int], slots: list[int]) -> dict:
+def line_exchange_schedule(spec, dtype: torch.dtype, ghost_rows: list[int], slots: list[int],
+                           coordinate_dtype: torch.dtype | None = None) -> dict:
     """The P>1 step's exchanges of a line-graph shard in order (as the node halo's ``exchange_schedule``): the
-    builder's and the derivative's coordinate COPYs, then per pair_merge point one collective carrying its line slots'
-    partials (``slots`` of each rank) and the ghost rows of the COPY fused into it (backward: the same, reversed),
-    an unfused COPY on its own, then the energy's sum and the step flags' MAX."""
+    builder's and the derivative's coordinate COPYs (in ``coordinate_dtype``, the geometry's: default ``dtype``),
+    then per pair_merge point one collective carrying its line slots' partials (``slots`` of each rank) and the ghost
+    rows of the COPY fused into it (backward: the same, reversed), an unfused COPY on its own, then the energy's sum
+    and the step flags' MAX."""
     itemsize = torch.finfo(dtype).bits // 8
     name = str(dtype).removeprefix("torch.")
+    coordinate_dtype = dtype if coordinate_dtype is None else coordinate_dtype
+    coordinate_itemsize = torch.finfo(coordinate_dtype).bits // 8
+    coordinate_name = str(coordinate_dtype).removeprefix("torch.")
     fused = {point.fuse_into: point for point in spec.exchange_points if point.fuse_into is not None}
-    stages = [{"name": "coordinates.builder", "kind": "copy", "width": 3, "dtype": name,
-               "forward_bytes": [ghost * 3 * itemsize for ghost in ghost_rows], "backward_bytes": [0] * len(ghost_rows)},
-              {"name": "coordinates", "kind": "copy", "width": 3, "dtype": name,
-               "forward_bytes": [ghost * 3 * itemsize for ghost in ghost_rows],
-               "backward_bytes": [ghost * 3 * itemsize for ghost in ghost_rows]}]
+    stages = [{"name": "coordinates.builder", "kind": "copy", "width": 3, "dtype": coordinate_name,
+               "forward_bytes": [ghost * 3 * coordinate_itemsize for ghost in ghost_rows],
+               "backward_bytes": [0] * len(ghost_rows)},
+              {"name": "coordinates", "kind": "copy", "width": 3, "dtype": coordinate_name,
+               "forward_bytes": [ghost * 3 * coordinate_itemsize for ghost in ghost_rows],
+               "backward_bytes": [ghost * 3 * coordinate_itemsize for ghost in ghost_rows]}]
     for point in spec.exchange_points:
         if point.fuse_into is not None:
             continue

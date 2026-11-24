@@ -135,8 +135,17 @@ and checkpoint use the same resolution for validation and loading; a MACE `.mode
 | Option | Meaning |
 | --- | --- |
 | `--weights-dtype` / `--dtype` | Model weights and arithmetic; `--dtype` remains compatible. Supported choices depend on the family. Multiple CUDA ranks require FP32 weights. |
+| `--geometry-dtype float32` | Explicit model geometry for compatible FP32 models, including the native MD configuration. It does not convert weights. |
+| `--geometry-dtype float64` | FP64 positions, cell, coordinate exchange, edge vectors, forces and MD state at every rank count for supporting shard adapters. Model weights and feature exchanges retain their own dtype. MatRIS refuses this option. |
 | `--stress` | Also evaluate fixed-frame stress and report a tension-positive 3 × 3 tensor in eV/Å³. This does not enable a barostat or NPT. |
 | `--oracle` / `--oracle-final` | Compare the initial / final MD frame with a separate unsharded reference. Reports retain the absolute gate and any measured-noise gate separately. |
+
+Eligible FP32 external models default to FP64 geometry in both single-rank and multi-rank evaluators
+and their MD drivers. `--geometry-dtype float32` restores FP32 geometry; when the option is unset,
+a resumed run follows the saved restart geometry. An explicit change from that saved dtype warns.
+MatRIS retains its FP32 geometry. FP64 weights cannot be combined with explicit FP32 geometry.
+The CUDA neighbor search, ownership and halo selection still use FP32 decisions; FP64 geometry
+preserves the coordinates used to evaluate the selected edges, with the same lattice shifts.
 
 The JSON report records the resolved model family, checkpoint and precision. For declared shards,
 `plan_record` describes the fixed-frame evaluations (`plan_record_scope`); native MD has its own execution
@@ -322,8 +331,8 @@ respectively. A MACE `.model` path can be used as `model` directly. Loaded adapt
 MACE-SOYO names download the upstream release checkpoint once and verify its SHA256; for local weights,
 use `load_adapter("mace_soyo", model_path="/path/to/model.pth", device="cuda")`.
 The adapter runs upstream's energy function with engine-owned forces and stress. It supports float32 or
-float64 weights, graph capture, union batching, and the declared node-halo
-shard. Multiple CUDA ranks require FP32 weights and geometry. Both `generic` and `topology` run its cuEquivariance kernels;
+float64 weights, FP64 geometry at every rank count, graph capture, union batching, and the declared node-halo
+shard. Multiple CUDA ranks require FP32 weights. Both `generic` and `topology` run its cuEquivariance kernels;
 there is no CPU or e3nn fallback. Charge/spin-conditioned models are rejected. Pinned source checks reject
 unreviewed upstream implementations at multiple ranks.
 
@@ -338,7 +347,7 @@ adapter = load_mace_soyo("mace_soyo_oam", head="omat_pbe", device="cuda", model_
 
 TACE names download SHA256-checked weights from a fixed upstream Hugging Face revision. For local weights,
 use `load_adapter("tace", model_path="/path/to/model.pt", device="cuda")`. The adapter supports the audited
-spherical `e3nnTACE` checkpoints, FP32 weights, graph capture, union batches,
+spherical `e3nnTACE` checkpoints, FP32 weights with optional FP64 geometry, graph capture, union batches,
 and declared node-halo exchanges. Batched systems retain their own cells and isolated-atom behavior;
 padding is routed to a separate sink atom. The Cartesian TACE-v1 family, long-range or universal-embedding
 models, and capped-neighbor models are rejected. Multi-rank source checks reject unreviewed implementations;

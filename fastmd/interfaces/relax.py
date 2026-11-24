@@ -152,7 +152,7 @@ class StructOptimizer:
                 result per structure, in order).
             fmax (float): The maximum force tolerance for relaxation.
             steps (int): The maximum number of steps for relaxation.
-            relax_cell (bool): Whether to relax the cell as well.
+            relax_cell (bool): Whether to relax the cell as well (ASE's optimizer requires a task with "s").
             ase_filter (str): The filter to apply to the atoms object for relaxation.
             save_path (str): The path to save the trajectory (a list of structures: a name with
                 ``{index}``, formatted with each structure's index).
@@ -541,6 +541,9 @@ class StructOptimizer:
     def _relax_with_ase(self, atoms, *, fmax, steps, relax_cell, ase_filter, save_path, loginterval,
                         crystal_feas_save_path, verbose, assign_magmoms, **kwargs) -> dict:
         """``relax`` of one structure with ASE's optimizer (the path of every relaxation before the GPU path)."""
+        if relax_cell and "s" not in self.calculator.task:
+            raise ValueError("StructOptimizer: relax_cell=True needs the stress, which task "
+                             f"{self.calculator.task!r} does not compute (a task with 's', or relax_cell=False)")
         atoms.calc = self.calculator
 
         stream = sys.stdout if verbose else io.StringIO()

@@ -221,9 +221,10 @@ class ForceStressHead(nn.Module):
                 if force_mask is not None:
                     force = force.masked_fill(~force_mask.unsqueeze(1), 0)
                 predict["f"] = torch.split(force, batch_graph['atoms_per_graph'])
-                # stress 
+                # stress: (1/V) dE/d(strain) with V = |det| (ASE's volume), so a left-handed basis of the lattice
+                # (a negative triple product) gives the same stress; |V| is V's bits for a right-handed one
                 stress = grad[1]
-                scale = 1 / batch_graph['volumes'] * 160.21766208 # units.GPa
+                scale = 1 / batch_graph['volumes'].abs() * 160.21766208 # units.GPa
                 stress = stress * scale
                 stress = list(torch.unbind(stress, dim=0))
                 predict["s"] = stress 
@@ -269,7 +270,7 @@ class ForceStressHead(nn.Module):
                 isotropic = stress[:, 0] # L=0
                 anisotropic = stress[:, [4,5,6,7,8]] # L=2
                 stress = reshape_stress(isotropic, anisotropic, stress.shape[0]) #[graphs, 3, 3]
-                scale = (1 / batch_graph['volumes'] * 160.21766208)
+                scale = (1 / batch_graph['volumes'].abs() * 160.21766208)  # |V|, as the conservative stress
                 stress = stress * scale
                 stress = list(torch.unbind(stress, dim=0))
                 predict["s"] = stress 

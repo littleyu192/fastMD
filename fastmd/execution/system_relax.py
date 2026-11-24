@@ -755,10 +755,11 @@ class SlotRelaxationRunner(SlotWholeStepRunner):
 
 def relaxation_builder(adapter, *, cell_filter: bool, layout: SlotLayout, cells, atomic_numbers: Tensor, atoms,
                        u_capacity: int, candidate_skin: float, device, admit_cells=None,
-                       t_capacity: int = 0) -> SlotUnionGraphBuilder:
+                       t_capacity: int = 0, config=None) -> SlotUnionGraphBuilder:
     """The slot union builder of ``adapter`` (:func:`~fastmd.execution.system_batch.slot_union_builder`'s
-    options, ``t_capacity`` triplets for a model with a line graph), a :class:`CellRelaxationBuilder` for a cell
-    filter; ``admit_cells``: the cells of the systems written later (the sort keys hold them)."""
+    options, ``t_capacity`` triplets for a model with a line graph; ``config``: its geometry dtype), a
+    :class:`CellRelaxationBuilder` for a cell filter; ``admit_cells``: the cells of the systems written later (the
+    sort keys hold them)."""
     from .replica_batch import graph_builder_options
 
     cutoff = float(adapter.topology_spec().cutoff)
@@ -766,4 +767,4 @@ def relaxation_builder(adapter, *, cell_filter: bool, layout: SlotLayout, cells,
     return kind(layout=layout, cells=cells, atomic_numbers=atomic_numbers, atoms=atoms, u_capacity=int(u_capacity),
                 atom_graph_cutoff=cutoff, candidate_cutoff=cutoff + candidate_skin, device=device,
                 padding=adapter.padding_rule(), prepare=adapter.prepare, admit_cells=admit_cells,
-                **graph_builder_options(adapter, t_capacity))
+                **graph_builder_options(adapter, t_capacity, config))

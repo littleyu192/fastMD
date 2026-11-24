@@ -557,6 +557,11 @@ class SevenNetAdapter:
         """True: :meth:`node_energy` takes the engine's per-edge shifts (SevenNet reads edge vectors only)."""
         return True
 
+    def float64_geometry_input(self) -> bool:
+        """True: :meth:`node_energy` takes float64 positions, cell and shifts for a float32 module (each edge's
+        vector in float64, cast at the module's input; :class:`~fastmd.adapters.protocol.Float64GeometryInput`)."""
+        return True
+
     def select_kernel(self, site: str, option: str) -> None:
         """Install ``option`` at the convolutions through sevenn's own switches, then run it once (the
         kernels compile on first use) and check that every convolution runs it. A cuEquivariance method

@@ -1061,18 +1061,24 @@ def radius_graph_view(batch: GraphBatch) -> RadiusGraph:
 
 
 def line_graph_batch(graph: RadiusGraph, *, positions: Tensor | None = None,
-                     n_real: int | None = None) -> GraphBatch:
+                     n_real: int | None = None, cell: Tensor | None = None) -> GraphBatch:
     """A ``GraphBatch`` over MatRIS's ``RadiusGraph`` (edges, pairs and triplets: the same tensors, no
     copy), for a model with a line graph that the engine differentiates (its position leaf is
-    ``positions``). ``positions``: the wrapped Cartesian coordinates, by default ``frac @ cell`` as the
-    builders compute them; ``n_real``: the real rows of a padded graph (default: every row)."""
+    ``positions``). ``positions``: the wrapped Cartesian coordinates, by default the graph's float64 ones
+    where it carries them (``model_positions``, float64 geometry: with its ``model_cell``), else ``frac @ cell``
+    as the builders compute them; ``cell``: the batch's cell (default: the graph's float64 one, else its
+    lattice); ``n_real``: the real rows of a padded graph (default: every row)."""
+    model_positions = getattr(graph, "model_positions", None)
     if positions is None:
-        positions = small_matmul(graph.atom_frac_coord, graph.lattice)
+        positions = (small_matmul(graph.atom_frac_coord, graph.lattice) if model_positions is None
+                     else model_positions)
+    if cell is None:
+        cell = graph.lattice if model_positions is None else graph.model_cell
     rows = graph.atomic_number.shape[0]
     return GraphBatch(
         positions=positions,
         frac_coords=graph.atom_frac_coord,
-        cell=graph.lattice,
+        cell=cell,
         species=graph.atomic_number,
         n_real=rows if n_real is None else int(n_real),
         edge_index=graph.atom_graph,
@@ -1193,8 +1199,12 @@ class FixedCapacityGraphBuilder:
         topology epoch); edges only, ``GhostSpec.edges`` names the edge rule,
         the coordinates are wrapped with the single-system expression, a
         lattice jump since the refresh is removed as with ``minimum_image``,
-        and padded self-loops go round robin over the real owned rows (float32
-        positions only).
+        and padded self-loops go round robin over the real owned rows. Ghost
+        rows with the builder's edge rule take float64 positions as a
+        single-system build of more than 4,096 atoms does (its float32 search,
+        wraps and edge decision from the float32 rounding; a ghost row holding
+        its owner's float64 coordinates gets its owner's float32 wrap and float64
+        published row); the caller's predicate takes float32 positions only.
         """
         if not _fixed_builder_available:
             raise RuntimeError(f"fixed-capacity graph builder requires Triton and nvalchemiops: {_fixed_builder_unavailable}")
@@ -1209,8 +1219,9 @@ class FixedCapacityGraphBuilder:
         if positions_dtype != torch.float32 and line_graph_cutoff is not None and not publish_positions:
             raise ValueError("float64 positions need the edges-only mode (line_graph_cutoff=None) or, with a line "
                              "graph, published positions")
-        if positions_dtype != torch.float32 and ghosts is not None:
-            raise ValueError("float64 positions need a single-system builder (no ghost rows)")
+        if positions_dtype != torch.float32 and ghosts is not None and ghosts.edges is None:
+            raise ValueError("float64 positions need a single-system builder or ghost rows with the builder's edge "
+                             "rule (GhostSpec.edges)")
         if not sorted_edges and line_graph_cutoff is not None:
             raise ValueError("unsorted edges need the edges-only mode (line_graph_cutoff=None)")
         self.sorted_edges = bool(sorted_edges)

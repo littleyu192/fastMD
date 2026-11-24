@@ -34,7 +34,7 @@ from fastmd.adapters.negotiate import batch_systems, check_system_batching, dry_
 from fastmd.adapters.protocol import CapacityStep, NegotiationError
 from fastmd.config import ConfigurationWarning, InferenceConfig, resolve_config
 from fastmd.engine import saved_recompute
-from fastmd.engine.energy_derivative import engine_derivative
+from fastmd.engine.energy_derivative import default_geometry, engine_derivative, geometry_dtype
 from fastmd.engine.entry_config import apply_checkpoint, release_adapter, use_adapter
 from fastmd.engine.policy import fusion_scope
 from fastmd.execution.gpu_integrator import default_fix_com, kinetic_energy_fp64
@@ -310,7 +310,8 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
     ensemble:
         ``"nvt_nhc"`` (ASE's ``NoseHooverChainNVT`` per replica, the default), ``"nvt"`` (Berendsen) or
         ``"nve"``; ``fix_com`` as in ``GPUResidentMolecularDynamics`` (each replica's own centre of mass).
-        A float64 model needs ``"nvt_nhc"`` (the integrator with a float64 state).
+        Each keeps a float64 state on float64 geometry (a float64 model, or ``geometry_dtype``: the default of a
+        float32 model that declares float64 geometry input).
     temperature, timestep, taut, tdamp, tchain, tloop:
         K, fs, the Berendsen time constant (fs), the chain's damping (fs, default ``100 * timestep``), chain
         length and loops, as in ``GPUResidentMolecularDynamics``.
@@ -450,6 +451,8 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
                union_size, self_check) -> None:
         adapter = self._adapter
         check_system_batching(adapter)  # before anything is negotiated or measured
+        # An unset geometry_dtype: float64 geometry for a float32 model that declares the input.
+        resolved = default_geometry(adapter, resolved, "gpu_md")
         whole_step = replace(resolved, execution="whole_step")
         if negotiated(adapter):
             plan = negotiate(adapter, whole_step, entry="gpu_md", device=self.device)
@@ -472,11 +475,14 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
         for parameter in module.parameters():
             parameter.requires_grad_(False)
         topology = adapter.topology_spec()
-        # float64 state: a float64 model the engine differentiates (MatRIS evaluates float32 graphs)
-        self._float64 = engine_derivative(adapter) is not None and topology.model_dtype == "float64"
-        if self._float64 and self.ensemble != "nvt_nhc":
-            raise ValueError("ReplicaMolecularDynamics: a float64 model needs ensemble='nvt_nhc' (the integrator with "
-                             "a float64 state); nve and nvt keep a float32 state")
+        # float64 state (every ensemble): float64 geometry, of a float64 model the engine differentiates or of a
+        # float32 one on float64 geometry (geometry_dtype "float64", or its default; MatRIS evaluates float32
+        # graphs); the self-check's floors follow the model's dtype
+        self._float64 = geometry_dtype(adapter, self._config) == torch.float64
+        # The runner's positions and momenta: nve and nvt integrate them, in the geometry's dtype; the Nose-Hoover
+        # chain keeps its float64 state itself, mirrored in float32.
+        self._state_dtype = torch.float64 if self._float64 and self.ensemble != "nvt_nhc" else torch.float32
+        model64 = engine_derivative(adapter) is not None and topology.model_dtype == "float64"
         self.candidate_skin = float(self._config.capacity.candidate_skin)
         self._line_graph = topology.triplet_cutoff is not None  # the union's line graph: triplet capacities too
         n, N = self.n_atoms, self.replicas
@@ -495,7 +501,8 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
         if union_size is None:
             union_size = max(1, min(N, DEFAULT_UNION_ROWS // n))
         union_size = min(int(union_size), N)
-        system = torch.as_tensor(atoms.get_positions(), dtype=torch.float32, device=self.device)
+        system = torch.as_tensor(atoms.get_positions(), dtype=geometry_dtype(adapter, self._config),
+                                 device=self.device)
         geometry = dict(cell=self.cell, atomic_numbers=self.numbers, pbc=self.pbc, candidate_skin=self.candidate_skin,
                         device=self.device)
         # The model's capacity step; MatRIS's from the configuration and this system (another model declares its own).
@@ -505,7 +512,7 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
         # The checks and memory probes in the runner's fusion scope (MatRIS's fused kernels; generic: none).
         with self._config.scope(), fusion_scope(self._config.optimization_profile != "generic"):
             if self_check:
-                floor, energy_floor = (1e-10, 1e-12) if self._float64 else (1e-5, 1e-6)
+                floor, energy_floor = (1e-10, 1e-12) if model64 else (1e-5, 1e-6)
                 plan = batch_systems(plan, adapter, systems=N, self_check=lambda: union_self_check(
                     adapter, positions=system, absolute_floor=floor, energy_floor=energy_floor, **geometry))
             else:
@@ -519,7 +526,7 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
             # The other replicas' buffers outside the shared pool, wherever the sizing may leave more than one union.
             persistent = (union_persistent_bytes(adapter, positions=system, step=self._capacity_step,
                                                  headroom=self.capacity_headroom,
-                                                 triplet_headroom=self.triplet_headroom, **geometry)
+                                                 triplet_headroom=self.triplet_headroom, config=self._config, **geometry)
                           if N > 1 and memory is not None else 0)
             union_size, plan = size_unions(plan, requested=union_size, memory=memory, union_edges=union_edges,
                                            device=self.device, replicas=N, persistent_per_replica=persistent,
@@ -591,7 +598,7 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
         memory. A failed measurement gives an invalid model, which bounds nothing."""
         runs, union_edges, union_triplets = union_memory_runs(
             adapter, positions=system, step=self._capacity_step, headroom=self.capacity_headroom,
-            triplet_headroom=self.triplet_headroom, **geometry)
+            triplet_headroom=self.triplet_headroom, config=self._config, **geometry)
         if union_size < _MEASURED_UNION:
             return None, union_edges, union_triplets, False
         capacities = union_probe_capacities(union_size, union_edges, union_triplets if self._line_graph else None)
@@ -623,12 +630,13 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
                 timestep=self.timestep * units.fs, tdamp=kinds["tdamp"] * units.fs, tchain=kinds["tchain"],
                 tloop=kinds["tloop"], device=self.device, force_dtype=torch.float64 if self._float64 else torch.float32)
             state = union.integrator.positions.to(torch.float32), union.integrator.momenta.to(torch.float32)
-        else:
+        else:  # the runner's buffers are the state, in the geometry's dtype
+            dtype = self._state_dtype
             union.integrator = ReplicaVelocityVerlet(
-                torch.as_tensor(self.masses, dtype=torch.float32, device=self.device), self.timestep, replicas=k,
+                torch.as_tensor(self.masses, dtype=dtype, device=self.device), self.timestep, replicas=k,
                 ensemble=self.ensemble, temperature=kinds["temperature"], taut_fs=kinds["taut"], fix_com=kinds["fix_com"])
-            state = (torch.as_tensor(positions.reshape(-1, 3), dtype=torch.float32, device=self.device),
-                     torch.as_tensor(momenta.reshape(-1, 3), dtype=torch.float32, device=self.device))
+            state = (torch.as_tensor(positions.reshape(-1, 3), dtype=dtype, device=self.device),
+                     torch.as_tensor(momenta.reshape(-1, 3), dtype=dtype, device=self.device))
         pairs, triplets = union_demand(self._adapter, state[0], replicas=k, cell=self.cell,
                                        atomic_numbers=self.numbers, pbc=self.pbc, candidate_skin=self.candidate_skin,
                                        device=self.device)
@@ -652,7 +660,7 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
         builder = union_builder(self._adapter, replicas=union.replicas, cell=self.cell, atomic_numbers=self.numbers,
                                 pbc=self.pbc, u_capacity=union.u_capacity, t_capacity=union.t_capacity,
                                 candidate_skin=self.candidate_skin, device=self.device,
-                                n_dummy=self._config.capacity.n_dummy)
+                                n_dummy=self._config.capacity.n_dummy, config=self._config)
         union.runner = ReplicaWholeStepRunner(
             model=self._adapter, builder=builder, integrator=union.integrator, positions=positions, momenta=momenta,
             forces=forces, steps_per_launch=self.steps_per_launch, warmup=self._config.capacity.warmup,
@@ -668,7 +676,7 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
 
     def get_positions(self) -> np.ndarray:
         """``(N, n, 3)`` float64 positions, unwrapped (the MD state: the Nose-Hoover chain's float64 positions,
-        or the runner's float32 ones for nve and nvt)."""
+        or the runner's ones for nve and nvt, in the geometry's dtype)."""
         return self._per_union(lambda union: (union.integrator.positions if self.ensemble == "nvt_nhc"
                                               else union.runner.positions).reshape(union.replicas, self.n_atoms, 3)
                                .to(torch.float64)).cpu().numpy()
@@ -747,8 +755,8 @@ class ReplicaMolecularDynamics(_UnionMolecularDynamics):
                     positions, moment = integrator.positions.to(torch.float32), integrator.momenta.to(torch.float32)
                     forces, energies = integrator.forces.to(union.runner.forces.dtype), integrator.potential_energy
                 elif momenta is not None:
-                    moment = torch.as_tensor(momenta[union.start:union.stop].reshape(-1, 3), dtype=torch.float32,
-                                             device=self.device)
+                    moment = torch.as_tensor(momenta[union.start:union.stop].reshape(-1, 3),
+                                             dtype=union.runner.momenta.dtype, device=self.device)
                 union.runner.reset(positions=positions, momenta=moment, forces=forces, potential_energy=energies)
                 union.accumulated = dict.fromkeys(_COUNTERS, 0)
                 union.max_edge_count = union.max_triplet_count = 0

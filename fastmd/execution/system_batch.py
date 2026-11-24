@@ -55,7 +55,7 @@ import torch
 from torch import Tensor
 
 from ..adapters.protocol import EnergyTap, ModelOwnedDerivative, NegotiationError, SystemSegments
-from ..engine.energy_derivative import engine_derivative, stress_unit_scale
+from ..engine.energy_derivative import engine_derivative, geometry_dtype, stress_unit_scale
 from ..engine.entry_config import scoped_call
 from ..graph.fixed_capacity_builder import FixedCapacityGraphBuilder, FixedCapacityGraphStatus, self_loop_padding
 from ..graph.geometry import small_matmul
@@ -487,15 +487,15 @@ class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
 
 
 def slot_union_builder(adapter, *, layout: SlotLayout, cells, atomic_numbers: Tensor, atoms, u_capacity: int,
-                       candidate_skin: float, device, t_capacity: int = 0) -> SlotUnionGraphBuilder:
+                       candidate_skin: float, device, t_capacity: int = 0, config=None) -> SlotUnionGraphBuilder:
     """The slot union builder of ``adapter`` at ``u_capacity`` undirected pairs (and ``t_capacity`` triplets for a
-    model with a line graph): its padding rule, ``prepare`` and builder options; candidates within cutoff +
-    ``candidate_skin``."""
+    model with a line graph): its padding rule, ``prepare`` and builder options (of ``config``: its geometry
+    dtype); candidates within cutoff + ``candidate_skin``."""
     cutoff = float(adapter.topology_spec().cutoff)
     return SlotUnionGraphBuilder(
         layout=layout, cells=cells, atomic_numbers=atomic_numbers, atoms=atoms, u_capacity=int(u_capacity),
         atom_graph_cutoff=cutoff, candidate_cutoff=cutoff + candidate_skin, device=device,
-        padding=adapter.padding_rule(), prepare=adapter.prepare, **graph_builder_options(adapter, t_capacity))
+        padding=adapter.padding_rule(), prepare=adapter.prepare, **graph_builder_options(adapter, t_capacity, config))
 
 
 def slot_union_demand(adapter, positions: Tensor, *, layout: SlotLayout, cells, atomic_numbers: Tensor, atoms,
@@ -1080,7 +1080,7 @@ def systems_self_check(adapter, systems, *, candidate_skin: float, device, repea
 
 def slot_union_memory_runs(adapter, systems, *, candidate_skin: float, device, step=None,
                            headroom: float = UNION_GROWTH_HEADROOM, ceilings=None,
-                           triplet_headroom: float = UNION_TRIPLET_GROWTH_HEADROOM):
+                           triplet_headroom: float = UNION_TRIPLET_GROWTH_HEADROOM, config=None):
     """``({kind: run(capacity)}, demand)`` for ``MeasuredMemoryModel.measure`` on sub-unions of ``systems`` (one
     ``(positions (n, 3), cell (3, 3), atomic_numbers (n,))`` each, in slot order): ``run(k)`` evaluates the slot
     union of the first ``k`` systems (each slot at its ceiling of ``ceilings``, default its atom count, vacant rows
@@ -1091,7 +1091,7 @@ def slot_union_memory_runs(adapter, systems, *, candidate_skin: float, device, s
     capture stream ("capture"), and returns the (edges, triplets) capacity it held (triplets 0 without a line
     graph); ``demand(k)`` is that union's (pair, triplet) demand. Atoms and edges grow together over the
     sub-unions, so a fit over edges holds the per-atom costs too. Each run makes its own builder; a captured graph
-    is released before the run returns."""
+    is released before the run returns. Each evaluation uses ``config``'s geometry dtype."""
     from ..engine._graph_capture import capture_graph
     from .replica_batch import union_capacity, union_triplet_capacity
 
@@ -1113,7 +1113,7 @@ def slot_union_memory_runs(adapter, systems, *, candidate_skin: float, device, s
             positions[start:start + len(z)] = np.asarray(coordinates, dtype=np.float64)
         cells = torch.as_tensor(np.stack([np.asarray(c, dtype=np.float64) for _, c, _ in systems[:k]]),
                                 dtype=torch.float64, device=device)
-        return (layout, atoms, torch.as_tensor(positions, dtype=torch.float32, device=device), cells,
+        return (layout, atoms, torch.as_tensor(positions, dtype=geometry_dtype(adapter, config), device=device), cells,
                 torch.as_tensor(numbers, device=device))
 
     def demand(k: int) -> tuple[int, int]:
@@ -1132,7 +1132,7 @@ def slot_union_memory_runs(adapter, systems, *, candidate_skin: float, device, s
         builder = slot_union_builder(adapter, layout=layout, cells=cells, atomic_numbers=numbers, atoms=atoms,
                                      u_capacity=union_capacity(pairs, step, headroom=headroom, line_graph=line_graph),
                                      t_capacity=t_capacity if line_graph else 0, candidate_skin=candidate_skin,
-                                     device=device)
+                                     device=device, config=config)
         builder.refresh_candidates(positions)
 
         def evaluate() -> None:

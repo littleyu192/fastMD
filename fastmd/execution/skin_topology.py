@@ -33,6 +33,16 @@ margins, or an exact count on refresh. Edges-only buckets keep the key's
 triplet dimension (a constant: the demand has no triplets) and build no
 triplets (``t_capacity`` 0).
 
+Float64 geometry (``geometry_dtype`` of the configuration: a float64 model
+the engine differentiates, or a float32 one asked for it): the positions
+buffer, its pinned staging and the forces read back are float64 (the
+energy and stress are read in float64), and every builder publishes float64
+positions (the host coordinates minus the whole lattice vectors of the
+wrap) and the exact float64 cell. Each builder derives its float32 search
+cell from that cell; its candidates, wrap and device skin test stay float32,
+from the float32 cast of the positions, as in every builder. The results
+are those of the per-call float64 build: float64 forces and stress.
+
 ``MATRIS_TOPOLOGY_REUSE_CHECK=N`` checks the topology of the first call of a
 runner, every refresh, capture, growth or redo call and every N-th call
 against (a) a builder with candidates refreshed at the same host positions
@@ -42,7 +52,10 @@ coordinates bitwise, and the same edges and triplets up to pairs within
 CUTOFF_TIE of a cutoff (the two builders test d^2 < rc^2 in a kernel vs
 sqrt(sum) < rc in torch). For an edges-only model the per-call build is
 ``atoms_to_edges_gpu`` and the check covers its edges and wrapped positions (no
-pairs or triplets). Energies and forces are compared by the gate harnesses,
+pairs or triplets). On float64 geometry (b) is the per-call float64 build:
+also the model's float64 cell bitwise and its float64 positions (with a line
+graph too) to float64 rounding, which two expressions of the same wrap may
+differ by. Energies and forces are compared by the gate harnesses,
 not here (the reference evaluation would need a second pool or an eager
 working set next to the captured one).
 """
@@ -55,6 +68,7 @@ import torch
 
 from fastmd._nvtx import nvtx_range
 from fastmd.config import env_value
+from fastmd.engine.energy_derivative import geometry_dtype
 from fastmd.engine.policy import fusion_scope
 from fastmd.graph.fixed_capacity_builder import FixedCapacityGraphBuilder
 from fastmd.graph.fixed_capacity_builder import fixed_capacity_exceeded
@@ -95,8 +109,9 @@ class SkinTopologyRunner(BucketedGraphRunner):
 
     ``capture=False`` runs the same body eagerly (a builder per bucket, no
     graphs). ``evaluate(positions)`` takes host coordinates (float64, any
-    lattice image) and returns host results. ``model``: a MatRIS module or
-    an adapter (an edges-only one: builders without triplets).
+    lattice image) and returns host results (float64 geometry: float64 forces
+    and stress). ``model``: a MatRIS module or an adapter (an edges-only one:
+    builders without triplets).
     """
 
     def __init__(self, model, *, task, atomic_numbers, cell, pbc, skin, capture,
@@ -128,11 +143,17 @@ class SkinTopologyRunner(BucketedGraphRunner):
         # A model without triplets reads edges only: builders without a line graph.
         self._edges_only = topology.triplet_cutoff is None
         self.line_graph_cutoff = None if self._edges_only else float(topology.triplet_cutoff)
+        # The dtype of the geometry the model reads (float64: float64 geometry, see the module docstring) and of
+        # the runner's positions, their pinned staging and the forces read back.
+        self.positions_dtype = geometry_dtype(self.adapter, self._inference_config)
+        float64 = self.positions_dtype == torch.float64
         # The runner owns these device tensors (allocated once): the float32
-        # cell and numbers exactly as atoms_to_graph_gpu makes them.
+        # cell and numbers exactly as atoms_to_graph_gpu makes them (float64
+        # geometry: the float64 cell, from which each builder derives that
+        # float32 cell).
         self._numbers = np.array(atomic_numbers, dtype=np.int64)
         self._builder_args = dict(
-            cell=torch.from_numpy(self.cell.astype(np.float32)).to(self.device),
+            cell=torch.from_numpy(self.cell if float64 else self.cell.astype(np.float32)).to(self.device),
             atomic_numbers=torch.tensor(self._numbers, dtype=torch.int32, device=self.device),
             pbc=torch.tensor(self.pbc, device=self.device),
             atom_graph_cutoff=self.atom_graph_cutoff,
@@ -151,6 +172,9 @@ class SkinTopologyRunner(BucketedGraphRunner):
         if self._derivative is not None and not self._edges_only:
             # A line graph the engine differentiates: the batch's positions are its leaf.
             self._builder_args["publish_positions"] = True
+        if float64:
+            # The published positions (edges only, or the leaf above) and cell in float64.
+            self._builder_args["positions_dtype"] = torch.float64
         if max_neighbor_count is not None:
             # A model with a neighbour cap (edges only): every build folds its largest per-atom edge count into
             # this [1] device maximum (the caller reads it).
@@ -158,12 +182,12 @@ class SkinTopologyRunner(BucketedGraphRunner):
         # Owns the candidate list every bucket's builder reads; its own
         # capacity is irrelevant (it only counts the demand).
         self.owner = FixedCapacityGraphBuilder(u_capacity=1, t_capacity=self._t_capacity(1), **self._builder_args)
-        self.positions = torch.zeros((self.n_real, 3), dtype=torch.float32, device=self.device)
-        self._pinned_positions = torch.empty((self.n_real, 3), dtype=torch.float32, pin_memory=True)
+        self.positions = torch.zeros((self.n_real, 3), dtype=self.positions_dtype, device=self.device)
+        self._pinned_positions = torch.empty((self.n_real, 3), dtype=self.positions_dtype, pin_memory=True)
         self._pinned_flags = torch.empty(6, dtype=torch.int64, pin_memory=True)
         self._pinned_scalars = torch.empty(11, dtype=torch.float32, pin_memory=True)
         self._pinned_scalars64 = None  # FP64 energies (allocated at the first)
-        self._pinned_forces = torch.empty((self.n_real, 3), dtype=torch.float32, pin_memory=True)
+        self._pinned_forces = torch.empty((self.n_real, 3), dtype=self.positions_dtype, pin_memory=True)
         self._pinned_magmoms = torch.empty(self.n_real, dtype=torch.float32, pin_memory=True)
         self._reference = None      # host coordinates of the last refresh
         self._demand = None         # (u, t) of the last evaluation
@@ -351,8 +375,10 @@ class SkinTopologyRunner(BucketedGraphRunner):
         scalars = [energy, ref]
         if "s" in out:
             scalars.append(out["s"][0].reshape(-1))
-        # An FP64 energy (the engine-owned derivative's) is read in FP64, the stress values unchanged.
-        wide = energy.dtype == torch.float64
+        # An FP64 energy (the engine-owned derivative's) is read in FP64, the stress values unchanged; so is
+        # float64 geometry's float64 stress.
+        float64 = self.positions_dtype == torch.float64
+        wide = energy.dtype == torch.float64 or float64
         if wide and self._pinned_scalars64 is None:
             self._pinned_scalars64 = torch.empty(11, dtype=torch.float64, pin_memory=True)
         pinned = self._pinned_scalars64 if wide else self._pinned_scalars
@@ -373,7 +399,8 @@ class SkinTopologyRunner(BucketedGraphRunner):
             # (float32 for MatRIS: calculate() then scales them in float32).
             result = {"e": values[0:1].reshape(()).copy(), "ref_energy": values[1:2].reshape(()).copy()}
         if "s" in out:
-            result["s"] = values[2:11].reshape(3, 3).astype(np.float32)
+            # In the dtype of the stress (float64 geometry: float64, as the per-call build's).
+            result["s"] = values[2:11].reshape(3, 3).astype(np.float64 if float64 else np.float32)
         if "f" in out:
             result["f"] = self._pinned_forces.numpy().copy()
         if "m" in out:
@@ -450,15 +477,19 @@ class SkinTopologyRunner(BucketedGraphRunner):
             fractional coordinates (edges only: and the wrapped positions)
             bitwise; the same edges and triplets up to CUTOFF_TIE pairs, and
             bitwise index tensors when the edge and short-edge sets agree.
+            Float64 geometry: the per-call float64 build, also the model's
+            float64 cell bitwise and its float64 positions (``_same``).
         """
         self.checks += 1
         n = self.n_real
+        float64 = self.positions_dtype == torch.float64
         edges = int(builder.edge_offsets[-1])
         triplets = int(builder.pair_offsets[-1])
 
         def view(b, e, t):
+            # "lattice": the float32 cell the builders search with (the model's cell, except on float64 geometry).
             fields = {
-                "atomic_number": b.batch.species[:n], "lattice": b.batch.cell,
+                "atomic_number": b.batch.species[:n], "lattice": b.cell,
                 "frac": b.frac_coords[:n], "center": b.center[:e], "neighbor": b.neighbor[:e],
                 "images": b.images[:e],
             }
@@ -468,11 +499,16 @@ class SkinTopologyRunner(BucketedGraphRunner):
             else:
                 fields.update(d2u=b.directed2undirected[:e], u2d=b.undirected2directed[: e // 2],
                               line_graph=b.line_graph[:t])
+            if float64:
+                # The model's float64 cell and wrapped positions (with a line graph: the engine's leaf).
+                fields.update(model_cell=b.batch.cell, positions=b.batch.positions[:n])
             fields["isolated"] = b._isolated_atom_count
             return fields
 
         mine = view(builder, edges, triplets)
-        host_positions = torch.from_numpy(np.asarray(positions, dtype=np.float32)).to(self.device)
+        # The host input in the dtype the runner stages it in.
+        host_positions = torch.from_numpy(np.asarray(positions, dtype=np.float64 if float64 else np.float32)).to(
+            self.device)
         if self._scratch is None or (self._scratch.u_capacity, self._scratch.t_capacity) != (
                 builder.u_capacity, builder.t_capacity):
             self._scratch = FixedCapacityGraphBuilder(
@@ -493,9 +529,13 @@ class SkinTopologyRunner(BucketedGraphRunner):
             return
 
         ragged = atoms_to_graph_gpu(atoms, atom_graph_cutoff=self.atom_graph_cutoff,
-                                    line_graph_cutoff=self.line_graph_cutoff, check_isolated_atoms=False)
-        bad = [name for name, value in (("atomic_number", ragged.atomic_number), ("lattice", ragged.lattice),
-                                        ("frac", ragged.atom_frac_coord)) if not torch.equal(value, mine[name])]
+                                    line_graph_cutoff=self.line_graph_cutoff, check_isolated_atoms=False,
+                                    **({"positions_dtype": torch.float64} if float64 else {}))
+        inputs = [("atomic_number", ragged.atomic_number), ("lattice", ragged.lattice),
+                  ("frac", ragged.atom_frac_coord)]
+        if float64:
+            inputs += [("model_cell", ragged.model_cell), ("positions", ragged.model_positions)]
+        bad = [name for name, value in inputs if not self._same(name, mine[name], value, atoms)]
         if bad:
             raise AssertionError(f"skin graph inputs differ from the ASE atoms at call {self.calls}: {bad}")
         wrapped = small_matmul(mine["frac"], mine["lattice"])
@@ -535,12 +575,16 @@ class SkinTopologyRunner(BucketedGraphRunner):
 
     def _check_edges_only_rebuild(self, mine, edges, atoms) -> None:
         """check_topology (b) of an edges-only model against ``atoms_to_edges_gpu`` of ``atoms`` (its
-        per-call build): the same inputs and wrapped positions bitwise, the same edges up to
-        CUTOFF_TIE pairs."""
-        ragged = atoms_to_edges_gpu(atoms, self.atom_graph_cutoff, self.device, check_isolated_atoms=False)
-        bad = [name for name, value in (("atomic_number", ragged.species), ("lattice", ragged.cell),
+        per-call build; float64 geometry: the float64 one): the same inputs and wrapped positions bitwise
+        (float64 positions: ``_same``), the same edges up to CUTOFF_TIE pairs."""
+        float64 = self.positions_dtype == torch.float64
+        ragged = atoms_to_edges_gpu(atoms, self.atom_graph_cutoff, self.device, check_isolated_atoms=False,
+                                    **({"positions_dtype": torch.float64} if float64 else {}))
+        # The batch's cell is the model's: on float64 geometry the float64 one (no float32 cell published).
+        bad = [name for name, value in (("atomic_number", ragged.species),
+                                        ("model_cell" if float64 else "lattice", ragged.cell),
                                         ("frac", ragged.frac_coords), ("positions", ragged.positions))
-               if not torch.equal(value, mine[name])]
+               if not self._same(name, mine[name], value, atoms)]
         if bad:
             raise AssertionError(f"skin graph inputs differ from the ASE atoms at call {self.calls}: {bad}")
         if (ragged.edge_index.shape[0] == edges
@@ -553,6 +597,17 @@ class SkinTopologyRunner(BucketedGraphRunner):
             small_matmul(mine["frac"], mine["lattice"]), torch.stack([mine["center"], mine["neighbor"]], 1),
             mine["images"], ragged.edge_index, ragged.edge_image.round().int(), self.atom_graph_cutoff)
 
+    def _same(self, name, mine, theirs, atoms) -> bool:
+        """Whether ``mine`` (a field of the skin topology) equals ``theirs`` (the per-call build's): bitwise,
+        except float64 positions (float64 geometry), which the per-call build wraps with another expression of
+        the same whole lattice vectors (row by row, not a GEMM): to a few float64 roundings of the host
+        coordinates of ``atoms`` and the lattice vectors subtracted from them."""
+        if name != "positions" or mine.dtype != torch.float64:
+            return torch.equal(mine, theirs)
+        scale = float(np.abs(atoms.positions).max(initial=0.0)) + float(np.abs(self.cell).sum())
+        return mine.shape == theirs.shape and float((mine - theirs).abs().max()) <= (
+            8.0 * np.finfo(np.float64).eps * scale)
+
     def _tie_pairs(self, wrapped, edges_a, images_a, edges_b, images_b, cutoff) -> int:
         """Pairs in exactly one edge set; raises unless each is a cutoff tie."""
         def keys(edges, images):
@@ -562,8 +617,9 @@ class SkinTopologyRunner(BucketedGraphRunner):
         if not diff:
             return 0
         rows = torch.tensor(sorted(diff), dtype=torch.long, device=wrapped.device)
+        # The float32 cell the builders search with (``wrapped`` is of it).
         vector = (wrapped[rows[:, 1]].double() - wrapped[rows[:, 0]].double()
-                  + small_matmul(rows[:, 2:].double(), self._builder_args["cell"].double()))
+                  + small_matmul(rows[:, 2:].double(), self.owner.cell.double()))
         gap = (torch.linalg.vector_norm(vector, dim=1) - cutoff).abs().max().item()
         if gap > CUTOFF_TIE:
             raise AssertionError(f"skin topology: {len(diff)} pairs differ from the per-call build "

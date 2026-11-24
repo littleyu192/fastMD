@@ -302,14 +302,26 @@ class _PaddedLineGraphWorkspace:
 
     @classmethod
     def create(cls, graph: _PaddedGraphWorkspace, sample: RadiusGraph) -> "_PaddedLineGraphWorkspace":
-        positions = graph.pg.atom_frac_coord.new_zeros(graph.pg.atom_frac_coord.shape)
-        positions[: graph.n_real].copy_(small_matmul(sample.atom_frac_coord, sample.lattice))
-        return cls(graph, line_graph_batch(graph.pg, positions=positions, n_real=graph.n_real))
+        model = getattr(sample, "model_positions", None)  # float64 geometry: the graph's float64 positions and cell
+        positions = graph.pg.atom_frac_coord.new_zeros(graph.pg.atom_frac_coord.shape,
+                                                       **({} if model is None else {"dtype": model.dtype}))
+        positions[: graph.n_real].copy_(_line_graph_positions(sample))
+        cell = None if model is None else sample.model_cell.clone()
+        return cls(graph, line_graph_batch(graph.pg, positions=positions, n_real=graph.n_real, cell=cell))
 
     def update(self, g: RadiusGraph) -> None:
         self.graph.update(g)
         with nvtx_range("static input copy"):
-            self.batch.positions[: self.graph.n_real].copy_(small_matmul(g.atom_frac_coord, g.lattice))
+            self.batch.positions[: self.graph.n_real].copy_(_line_graph_positions(g))
+            if self.batch.cell is not self.graph.pg.lattice:
+                self.batch.cell.copy_(g.model_cell)
+
+
+def _line_graph_positions(g: RadiusGraph) -> torch.Tensor:
+    """The positions a line-graph bucket of a model the engine differentiates reads from a ragged build: the
+    graph's float64 ones (float64 geometry), else ``frac @ cell`` as the builders compute them."""
+    model = getattr(g, "model_positions", None)
+    return small_matmul(g.atom_frac_coord, g.lattice) if model is None else model
 
 
 @dataclass
@@ -334,10 +346,11 @@ class _LoopPaddedLineGraphWorkspace:
         dev = sample.lattice.device
         n, e_max = sample.atomic_number.shape[0], 2 * u_max
         rows = torch.arange(e_max, device=dev)
+        model = getattr(sample, "model_positions", None)  # float64 geometry: the graph's float64 positions and cell
         batch = GraphBatch(
-            positions=sample.atom_frac_coord.new_zeros(n, 3),
+            positions=sample.atom_frac_coord.new_zeros(n, 3, **({} if model is None else {"dtype": model.dtype})),
             frac_coords=sample.atom_frac_coord.new_zeros(n, 3),
-            cell=sample.lattice.clone(),
+            cell=sample.lattice.clone() if model is None else sample.model_cell.clone(),
             species=sample.atomic_number.new_zeros(n),
             n_real=n,
             edge_index=sample.atom_graph.new_zeros(e_max, 2),
@@ -367,8 +380,8 @@ class _LoopPaddedLineGraphWorkspace:
                 n, e, u, t, pb.n_real, self.u_max, self.t_max)
             pb.species.copy_(g.atomic_number)
             pb.frac_coords.copy_(g.atom_frac_coord)
-            pb.cell.copy_(g.lattice)
-            pb.positions.copy_(small_matmul(g.atom_frac_coord, g.lattice))
+            pb.cell.copy_(g.lattice if pb.cell.dtype == g.lattice.dtype else g.model_cell)
+            pb.positions.copy_(_line_graph_positions(g))
             pb.edge_index[:e].copy_(g.atom_graph)
             pb.edge_image[:e].copy_(g.neighbor_image)
             pb.pair_d2u[:e].copy_(g.directed2undirected)

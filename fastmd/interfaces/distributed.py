@@ -11,6 +11,7 @@ whole_step / model_graph with the single-CTA Nose-Hoover chain), see ``--md-engi
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import gc
 import glob
 import json
@@ -27,12 +28,13 @@ import torch.distributed as dist
 from fastmd.interfaces.gpu_md import GPUResidentMolecularDynamics
 from fastmd.execution.md_protocol import (
     ENSEMBLES, RESTART_FILE, THERMO_FILE, TRAJECTORY_FILE, HeatingRamp, constant_pressure_error, initialize_momenta,
+    read_restart,
 )
 from fastmd.config import InferenceConfig, resolve_config
 from fastmd.adapters import load_adapter
 from fastmd.models import DEFAULT, MODELS, check_load_options, model_family
 from fastmd.precision import (
-    NOISE_FLOOR_SHIFT_A, compute_references, matmul_precision_scope, oracle_report, precision_record,
+    NOISE_FLOOR_SHIFT_A, compute_references, fp32_gemm_mode, matmul_precision_scope, oracle_report, precision_record,
     warn_implicit_tf32,
 )
 from fastmd.distributed.affinity import ENVIRONMENT, MODES, bind_local_rank
@@ -49,6 +51,52 @@ from fastmd.distributed.watchdog import ProgressWatchdog
 # gate IEEE runs at the K3/G-D1 1e-5 limits (TF32 unchanged).
 SINGLE_ENGINE_TOLERANCE = {"ieee": {"energy_error_eV_per_atom": 1e-5, "force_RMSE_eV_A": 1e-5,
                                     "force_max_error_eV_A": 1e-5}}
+
+
+def adapter_references(atoms, *, model_name, checkpoint, device, model_dtype, run_precision,
+                       dot_precision=None, geometry_dtype=None) -> dict:
+    """Whole-system eager references with a separately pinned calculator for each precision.
+
+    An adapter calculator defaults to IEEE and pins that decision at construction. A calculator
+    created outside ``compute_references`` would therefore override its TF32 comparison scope.
+    Keep the evaluator's geometry dtype, but construct each calculator inside the intended scope.
+    """
+    from ase.calculators.calculator import all_changes
+    from fastmd.interfaces.calculator import MLIPCalculator
+
+    adapter = load_adapter(model_name, model_path=checkpoint, device=str(device), model_dtype=model_dtype,
+                           optimization_profile="generic", enable_compile=False, enable_checkpoint=False)
+    records = []
+    try:
+        geometry = geometry_dtype or adapter.topology_spec().model_dtype
+
+        def predict():
+            # Read effective math, not the legacy getter (which can fail with PyTorch's mixed APIs).
+            # Preserve high/medium for the TF32 pass; environmental overrides remain visible in the plan.
+            precision = "highest" if fp32_gemm_mode() == "ieee" else run_precision
+            calculator = MLIPCalculator(
+                model=adapter, task="ef", device=str(device),
+                config=InferenceConfig(execution="eager", optimization_profile="generic",
+                                       geometry_dtype=geometry, matmul_precision=precision,
+                                       checkpoint="off", report=False))
+            try:
+                calculator.calculate(atoms, properties=["energy", "forces"], system_changes=all_changes)
+                plan = calculator.plan_record()
+                records.append({"matmul_precision": plan.matmul_precision,
+                                "fp32_gemm": plan.precision.get("cublas"), "geometry_dtype": geometry})
+                return (float(calculator.results["energy"]) / len(atoms),
+                        torch.as_tensor(calculator.results["forces"]).cpu().clone())
+            finally:
+                calculator.close()
+
+        references = compute_references(predict, run_precision, dot_precision)
+        references["calculator_precision"] = dict(zip(("highest", "same_precision"), records))
+        return references
+    finally:
+        # The adapter was supplied to the calculators, so their close leaves ownership here.
+        close = getattr(adapter, "close", None)
+        if callable(close):
+            close()
 
 
 def removed_choice_error(args) -> str | None:
@@ -132,13 +180,30 @@ def sharded_configs(args) -> tuple[InferenceConfig, ParallelConfig]:
     """The same declared-shard settings for early validation and evaluator construction."""
     config = InferenceConfig(execution=args.execution, optimization_profile=args.profile, report=False,
                              matmul_precision=args.precision, saved_tensor_recompute=args.saved_tensor_recompute,
-                             triton_dot_precision=args.triton_dot_precision, recompute_policy=args.recompute_policy)
+                             triton_dot_precision=args.triton_dot_precision, recompute_policy=args.recompute_policy,
+                             geometry_dtype=args.geometry_dtype)
     parallel = ParallelConfig(domain_grid=tuple(args.grid) if args.grid else "auto", local_backend=args.local_backend,
                               exchange_self_rows=args.exchange_self_rows, payload_transport=args.payload_transport,
                               legacy_capacity_policy=args.legacy_capacity_policy, exchange_scheme=args.exchange_scheme,
                               topology_engine=args.topology_engine, topology_skin=args.topology_skin,
                               grad_mechanism=args.grad_mechanism, debug_replay_check=args.debug_replay_check)
     return config, parallel
+
+
+def resumed_geometry(config: InferenceConfig, adapter, written: str | None, world_size: int) -> InferenceConfig:
+    """``config`` of a shard model's resumed run: an unset ``geometry_dtype`` continues on the restart file's
+    geometry (``written``, "float32" or "float64"; None: a fresh start) where it is not the evaluator's default
+    already and the model runs it, so the continuation is the uninterrupted run's (as GPUResidentMolecularDynamics
+    resumes a file); an explicit one stays (``from_evaluator`` warns where it differs from the file's)."""
+    from fastmd.engine.energy_derivative import defaults_to_float64, takes_float64_default
+
+    if written is None or config.geometry_dtype is not None:
+        return config
+    model64 = adapter.topology_spec().model_dtype == "float64"
+    default = "float64" if model64 or defaults_to_float64(adapter, "distributed", world_size) else "float32"
+    if written == default or model64 or (written == "float64" and not takes_float64_default(adapter)):
+        return config
+    return dataclasses.replace(config, geometry_dtype=written)
 
 
 def model_options_error(args, family: str, parser) -> str | None:
@@ -151,6 +216,11 @@ def model_options_error(args, family: str, parser) -> str | None:
         return (f"--model {args.model}: a model family's name loads the checkpoint file given with --checkpoint "
                 "where its loader reads one; otherwise give a pretrained name of the registry "
                 "(e.g. mace_mp_0, sevennet_0, orb_v3, chgnet_0_3_0)")
+    if args.geometry_dtype == "float64" and family == DEFAULT:
+        return ("--geometry-dtype float64: MatRIS differentiates its own energy on float32 geometry at every rank "
+                "count; supporting shard adapters accept float64 geometry at every rank count")
+    if args.geometry_dtype == "float32" and args.dtype == "float64":
+        return "--geometry-dtype float32 cannot be used with float64 model weights"
     try:
         check_load_options(model_name, model_path=checkpoint, model_dtype=args.dtype,
                            optimization_profile=args.profile)
@@ -320,6 +390,7 @@ def build_native_dynamics(args, evaluator, model, atoms, resume: bool):
     profile = evaluator._resolved.optimization_profile if custom_strategy else args.profile
     config = InferenceConfig(execution=execution, optimization_profile=profile,
                              report=False, matmul_precision=args.precision,
+                             geometry_dtype=args.geometry_dtype,
                              saved_tensor_recompute=args.saved_tensor_recompute,
                              triton_dot_precision=args.triton_dot_precision, recompute_policy=args.recompute_policy)
     options = dict(model=model, task="ef", config=config, ensemble=args.ensemble, timestep=args.dt_fs,
@@ -384,7 +455,7 @@ def build_dynamics(args, evaluator, initial, atoms, resume: bool):
                    restart_interval=args.restart_interval, total_steps=args.md_steps,
                    integrator_in_graph=args.md_integrator_in_graph)
     if not resume:
-        # nvt_nhc integrates the float64 input state (distributed from root's atoms); nve/nvt the float32 one.
+        # nvt_nhc integrates the float64 input state; nve/nvt follow the evaluator's geometry dtype.
         if args.ensemble == "nvt_nhc":
             return GPUResidentMolecularDynamics.from_evaluator(evaluator, atoms=atoms, **options)
         return GPUResidentMolecularDynamics.from_evaluator(evaluator, initial.state, **options)
@@ -426,6 +497,11 @@ def main():
     parser.add_argument("--checkpoint", help="local weights for the selected model (CHGNet uses bundled weights)")
     parser.add_argument("--dtype", "--weights-dtype", dest="dtype", choices=("float32", "float64"), default=None,
                         help="model dtype; float64 is supported only by models that declare it")
+    parser.add_argument("--geometry-dtype", choices=("float32", "float64"), default=None,
+                        help="geometry dtype, independent of model weights. Supporting shard adapters default to "
+                             "float64 positions, cell, ghost coordinates, vectors, forces and MD state at "
+                             "every rank count; float32 opts out. An unset option resumes the restart "
+                             "file's geometry. MatRIS retains float32 and refuses float64")
     parser.add_argument("--input", required=True, help="ASE-readable fixed-cell full-PBC structure")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--execution", choices=("auto", "eager", "model_graph"), default="auto",
@@ -651,7 +727,9 @@ def main():
                 resume = bool(args.md_steps and args.resume and (args.md_output_dir / RESTART_FILE).exists())
                 if args.md_steps and args.seed is not None and not resume:
                     initialize_momenta(atoms, args.temp_start, args.seed)
-                metadata = {"cell": atoms.cell.array.tolist(), "pbc": atoms.pbc.tolist(), "resume": resume}
+                metadata = {"cell": atoms.cell.array.tolist(), "pbc": atoms.pbc.tolist(), "resume": resume,
+                            "restart_geometry": read_restart(args.md_output_dir / RESTART_FILE).geometry_dtype
+                            if family != DEFAULT and resume else None}
                 if args.output is not None and args.output.exists():
                     raise ValueError(f"refusing to overwrite {args.output}")
                 final_npz = None if args.output is None else args.output.with_suffix(".final.npz")
@@ -684,6 +762,21 @@ def main():
         from fastmd.adapters.protocol import ShardDeclaration
         custom_strategy = isinstance(adapter, ShardDeclaration) and adapter.custom_strategy() is not None
         model = adapter.module.eval().requires_grad_(False)
+        reference_geometry = adapter.topology_spec().model_dtype
+        if not custom_strategy:
+            from fastmd.engine.energy_derivative import default_geometry, geometry_dtype
+
+            error = None
+            try:
+                evaluation_config, parallel = sharded_configs(args)
+                evaluation_config = resumed_geometry(evaluation_config, adapter, metadata.get("restart_geometry"),
+                                                     context.world_size)
+                resolved_geometry = default_geometry(adapter, resolve_config(evaluation_config), "distributed",
+                                                      context.world_size)
+                reference_geometry = str(geometry_dtype(adapter, resolved_geometry)).removeprefix("torch.")
+            except Exception as exc:
+                error = str(exc)
+            collective_check(context, error)
 
         def synchronize():
             if device.type == "cuda":
@@ -700,22 +793,10 @@ def main():
 
         def adapter_reference(atoms):
             """Unsharded eager E/F on the whole system ``atoms``, before shard allocation."""
-            from fastmd.interfaces.calculator import MLIPCalculator
-            reference_adapter = load_adapter(
-                model_name, model_path=checkpoint, device=str(device), model_dtype=args.dtype,
-                optimization_profile="generic", enable_compile=False, enable_checkpoint=False)
-            calculator = MLIPCalculator(model=reference_adapter, task="ef", device=str(device),
-                                        config=InferenceConfig(execution="eager", optimization_profile="generic",
-                                                               checkpoint="off", report=False))
-            def predict():
-                from ase.calculators.calculator import all_changes
-                calculator.calculate(atoms, properties=["energy", "forces"], system_changes=all_changes)
-                return (float(calculator.results["energy"]) / len(atoms),
-                        torch.as_tensor(calculator.results["forces"]).cpu())
-            try:
-                return None, compute_references(predict, args.precision, args.triton_dot_precision)
-            finally:
-                calculator.close()
+            return None, adapter_references(
+                atoms, model_name=model_name, checkpoint=checkpoint, device=device, model_dtype=args.dtype,
+                run_precision=args.precision, dot_precision=args.triton_dot_precision,
+                geometry_dtype=reference_geometry)
 
         def calculator_floor(atoms):
             """The calculator's references on ``atoms`` shifted. Its graph is rebuilt there and not compared (the
@@ -806,9 +887,8 @@ def main():
             evaluation_config = InferenceConfig(
                 execution=None if auto_execution else args.execution, optimization_profile=args.profile, report=False,
                 matmul_precision=args.precision, saved_tensor_recompute=args.saved_tensor_recompute,
-                triton_dot_precision=args.triton_dot_precision, recompute_policy=args.recompute_policy)
-        else:
-            evaluation_config, parallel = sharded_configs(args)
+                triton_dot_precision=args.triton_dot_precision, recompute_policy=args.recompute_policy,
+                geometry_dtype=args.geometry_dtype)
         evaluator = DistributedEvaluator(adapter, metadata["cell"], pbc=metadata["pbc"], context=context,
                                          config=evaluation_config, parallel=parallel)
         if custom_strategy and single_engine != (evaluator.engine == "single"):
@@ -884,6 +964,8 @@ def main():
                     reference_profile=reference_profile,
                     # The floor only with positive topology evidence (else a missing edge could hide in it).
                     noise_floor=noise_floor if evidence is True else None))
+                if "calculator_precision" in references:
+                    oracle["calculator_precision"] = references["calculator_precision"]
                 oracle["passed"] = parity is not False and oracle["passed"]
                 # Other ranks wait in collective_check (--timeout) meanwhile.
                 oracle["rank0_seconds"] = reference_s + time.perf_counter() - oracle_started
@@ -1072,6 +1154,7 @@ def main():
                         energies["energy_eV_per_atom"], gathered["forces"], final_references,
                         precision_force_rmse_tolerance=tolerance, reference_profile="generic",
                         noise_floor=(lambda: calculator_floor(atoms)) if evidence["parity"] is True else None)
+                    final_oracle["calculator_precision"] = final_references["calculator_precision"]
                     final_oracle["edge_count_parity"] = evidence
                     if not final_oracle["passed"]:
                         final_error = f"final-frame single-GPU oracle failed: {final_oracle}"

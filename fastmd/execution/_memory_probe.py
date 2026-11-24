@@ -39,30 +39,31 @@ def probe_capacity_pairs(target_edges: int, target_triplets: int) -> list[tuple[
 
 
 def edges_only_memory_runs(adapter, *, cell, atomic_numbers, pbc, positions, n_real: int, device, task: str = "ef",
-                           candidate_skin: float = 0.0, n_dummy: int = 64):
+                           candidate_skin: float = 0.0, n_dummy: int = 64, config=None):
     """``{kind: run(edge capacity)}`` for ``MeasuredMemoryModel.measure``: ``adapter``'s evaluation of
     ``positions`` (``task``) on an edges-only fixed-capacity build at that capacity (the adapter's padding
     rule and ``prepare``, and the builder options the runtime gives the model; candidates within cutoff +
     ``candidate_skin``, built outside any graph), eager ("eager") or captured in a CUDA graph after a
     warmup on the capture stream ("capture"). The evaluation is the model's own call, or the
     engine-owned derivative of a model with an energy tap. Each run returns the (edges, triplets)
-    capacity it held. Only for a model declared sync-free (a capture of its evaluation must be valid)."""
+    capacity it held. Only for a model declared sync-free (a capture of its evaluation must be valid).
+    ``config``: the entry point's configuration (its geometry dtype)."""
     from fastmd.engine.energy_derivative import edges_only_builder_options
 
     def capacities(capacity: int) -> tuple[int, int]:
         return max(1, capacity // 2), 0
 
-    return _memory_runs(adapter, capacities, edges_only_builder_options(adapter), cell=cell,
+    return _memory_runs(adapter, capacities, edges_only_builder_options(adapter, config), cell=cell,
                         atomic_numbers=atomic_numbers, pbc=pbc, positions=positions, n_real=n_real, device=device,
                         task=task, candidate_skin=candidate_skin, n_dummy=n_dummy)
 
 
 def line_graph_memory_runs(adapter, *, cell, atomic_numbers, pbc, positions, n_real: int, device, task: str = "ef",
-                           candidate_skin: float = 0.0, n_dummy: int = 64):
+                           candidate_skin: float = 0.0, n_dummy: int = 64, config=None):
     """:func:`edges_only_memory_runs` for a model with a line graph that the engine differentiates: its
     evaluation on a fixed-capacity build with the line graph (the adapter's padding rule, the positions published), at an
     (edge, triplet) capacity pair; each run returns the (edges, triplets) capacity it held."""
-    from fastmd.engine.energy_derivative import engine_derivative
+    from fastmd.engine.energy_derivative import engine_derivative, geometry_dtype
 
     if engine_derivative(adapter) is None:
         raise ValueError("line_graph_memory_runs measures a model the engine differentiates")
@@ -70,7 +71,10 @@ def line_graph_memory_runs(adapter, *, cell, atomic_numbers, pbc, positions, n_r
     def capacities(capacity: tuple[int, int]) -> tuple[int, int]:
         return max(1, capacity[0] // 2), max(1, capacity[1])
 
-    return _memory_runs(adapter, capacities, {"publish_positions": True}, cell=cell, atomic_numbers=atomic_numbers,
+    options = {"publish_positions": True}
+    if geometry_dtype(adapter, config) == torch.float64:
+        options["positions_dtype"] = torch.float64
+    return _memory_runs(adapter, capacities, options, cell=cell, atomic_numbers=atomic_numbers,
                         pbc=pbc, positions=positions, n_real=n_real, device=device, task=task,
                         candidate_skin=candidate_skin, n_dummy=n_dummy)
 

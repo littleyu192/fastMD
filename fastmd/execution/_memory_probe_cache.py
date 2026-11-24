@@ -80,7 +80,10 @@ def probe_cache_key(adapter, atoms, config, *, task, device):
         system_inputs = getattr(adapter, "system_inputs", lambda: {})()
         from fastmd.adapters.patches import patch_report
         patches = patch_report(adapter.upstream_patches()) if hasattr(adapter, "upstream_patches") else []
+        # The public configuration fingerprint omits an entry's resolved geometry default.
+        # Keep it and intrinsic adapter precision separate so a float32 fit cannot bound float64 buffers.
         scope = (id(adapter), type(adapter), str(device), task, config.fingerprint,
+                 getattr(config, "geometry_default", None), str(getattr(adapter, "geometry_dtype", None)),
                  str(torch.get_default_dtype()), torch.is_autocast_enabled(device.type),
                  str(torch.get_autocast_dtype(device.type)),
                  torch.get_float32_matmul_precision(), torch.backends.cuda.matmul.allow_tf32,

@@ -54,8 +54,8 @@ What the adapter declares and does:
   evaluates it eagerly); a declined pin refuses to load.
 
 * **Precision**: float32, as upstream (its AtomRef runs float32 only): IEEE
-  FP32 under the plan's precision scope (TF32 changes CHGNet's forces by tenths
-  of an eV/Å).
+  FP32 under the plan's precision scope, TF32 on explicit request. Periodic
+  shifts use row-wise products so TF32 rounds only neural-network GEMMs.
 * **Isolated atoms**: ``"model"``: CHGNet evaluates an atom without neighbours
   itself (its energy is not the AtomRef weight).
 * **Several systems** (``system_batching``): ``"union"`` for upstream's
@@ -210,12 +210,14 @@ def _fourier_forward(self, x: Tensor) -> Tensor:
 # University of California, through Lawrence Berkeley National Laboratory, and the University of California, Berkeley.
 # Licensed under the Modified BSD License. Changed: the neighbours come shifted by the caller (the engine's per-edge
 # shifts, each in its own system's cell) instead of by ``image @ lattice``; the source is pinned (chgnet.bond_encoder).
-def _bond_bases(encoder, center: Tensor, neighbor: Tensor,
-                undirected2directed: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+def _bond_bases(encoder, center: Tensor, neighbor: Tensor, undirected2directed: Tensor,
+                dtype: torch.dtype | None = None) -> tuple[Tensor, Tensor, Tensor]:
     """Upstream ``BondEncoder.forward`` of ``encoder`` with each neighbour already at its shifted position: the bond
     bases of the atom graph and the bond graph (from each undirected pair's length) and the normalized bond
-    vectors."""
+    vectors. ``dtype`` casts their geometric difference at the module's input."""
     bond_vectors = center - neighbor
+    if dtype is not None:
+        bond_vectors = bond_vectors.to(dtype)
     bond_lengths = torch.norm(bond_vectors, dim=1)
     bond_vectors = bond_vectors / bond_lengths[:, None]
     undirected_bond_lengths = torch.index_select(bond_lengths, 0, undirected2directed)
@@ -466,14 +468,20 @@ class CHGNetAdapter:
         center, neighbor = positions.index_select(0, edges[:, 0]), positions.index_select(0, edges[:, 1])
         # BatchedGraph.from_graphs for one graph: bonds from the centre and neighbour positions and the
         # neighbour's image; angles from the two directed bond vectors of each triplet row.
-        if edge_shifts is None:
-            # The integer images in the cell's dtype (a float64 module's float64 cell; float32: the batch's own).
-            image = batch.edge_image if batch.edge_image.dtype == cell.dtype else batch.edge_image.to(cell.dtype)
+        image = batch.edge_image if batch.edge_image.dtype == cell.dtype else batch.edge_image.to(cell.dtype)
+        dtype = next(module.parameters()).dtype
+        if edge_shifts is None and cell.dtype == torch.float64 and dtype == torch.float64:
+            # Retain upstream arithmetic for an actual float64 module.
             bond_bases_ag, bond_bases_bg, bond_vectors = module.bond_basis_expansion(
                 center=center, neighbor=neighbor, undirected2directed=batch.pair_u2d, image=image, lattice=cell)
         else:
-            bond_bases_ag, bond_bases_bg, bond_vectors = _bond_bases(module.bond_basis_expansion, center,
-                                                                     neighbor + edge_shifts, batch.pair_u2d)
+            if edge_shifts is None:
+                # A GEMM here would round the lattice under TF32. Geometry uses
+                # row-wise products regardless of the neural network's precision.
+                edge_shifts = image[:, 0:1] * cell[0] + image[:, 1:2] * cell[1] + image[:, 2:3] * cell[2]
+            bond_bases_ag, bond_bases_bg, bond_vectors = _bond_bases(
+                module.bond_basis_expansion, center, neighbor + edge_shifts, batch.pair_u2d,
+                dtype=dtype if positions.dtype != dtype else None)
         angle_bases = module.angle_basis_expansion(bond_vectors.index_select(0, triplets[:, 2]),
                                                    bond_vectors.index_select(0, triplets[:, 4]))
         graph = BatchedGraph(
@@ -562,6 +570,11 @@ class CHGNetAdapter:
         their own run in the slots of one union with their line graph."""
         return True
 
+    def float64_geometry_input(self) -> bool:
+        """True: :meth:`node_energy` takes float64 positions, cell and shifts for a float32 module (each bond's
+        vector in float64, cast at the module's input; :class:`~fastmd.adapters.protocol.Float64GeometryInput`)."""
+        return True
+
     def capacity_step(self) -> CapacityStep:
         """CHGNet's capacity tiers (``_CAPACITY_STEP``): every padded edge runs the atom convolution's gated
         MLP and every padded triplet the bond convolution's and the angle update's, so a small cell takes
@@ -620,6 +633,6 @@ class CHGNetAdapter:
                                  reason="the multi-GPU line-partial hooks rely on this forward unchanged")
                      for target, sha256 in _SHARD_PINS.items())
         return ShardSpec(exchange_points=tuple(points), message_flow="line_graph", pad_species=1, source_pins=pins,
-                         line_slot_cutoff=float(module.graph_converter.bond_graph_cutoff))
+                         line_slot_cutoff=float(module.graph_converter.bond_graph_cutoff), allow_tf32=True)
 
 

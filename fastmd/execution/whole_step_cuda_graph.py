@@ -17,7 +17,6 @@ from fastmd.engine.policy import fusion_scope
 from fastmd.adapters import as_adapter
 from fastmd.adapters.protocol import SystemBatching
 from fastmd.engine.energy_derivative import engine_derivative
-from fastmd.engine.energy_derivative import geometry_dtype
 from fastmd.execution.gpu_integrator import GPUIntegrator
 from fastmd.execution.gpu_integrator import StatefulIntegrator
 from fastmd.engine.entry_config import scoped_call
@@ -94,9 +93,10 @@ class WholeStepGraphRunner:
 
     ``integrator`` is either a single-GPU :class:`GPUIntegrator` (NVE /
     Berendsen NVT, its ``step_pre_force`` / ``step_post_force``; the runner's
-    float32 buffers are the MD state; the Berendsen target is a device value
-    read at every replay, so ``set_temperature`` between replays needs no
-    recapture) or a
+    buffers are the MD state, float64 on float64 geometry (the builder's
+    float64 published positions) and float32 otherwise; the Berendsen target
+    is a device value read at every replay, so ``set_temperature`` between
+    replays needs no recapture) or a
     :class:`StatefulIntegrator` such as the float64 Nose-Hoover chain, which
     owns the MD state: each step runs ``step_pre_force`` -> model ->
     ``step_post_force``, the runner's buffers become float32 mirrors, and the
@@ -194,14 +194,22 @@ class WholeStepGraphRunner:
         self.n_real = builder.n_real
         self.device = builder.device
 
-        # Forces, energy and stress: float64 for float64 geometry the engine differentiates on a
-        # stateful (float64) integrator, which then also evaluates its own float64 positions; else
-        # float32. Positions and momenta are float32 either way (a stateful integrator's mirrors).
+        # Forces, energy and stress: float64 for float64 geometry (the builder's float64 published positions: a
+        # float64 model, or a float32 one on float64 geometry) of a model the engine differentiates, else float32.
+        # A stateful (float64) integrator then evaluates its own float64 positions and the runner's positions and
+        # momenta are its float32 mirrors; with a functional integrator (nve, Berendsen nvt) the runner's buffers
+        # are the MD state, in the geometry's dtype.
         value_dtype = torch.float32
-        if self._derivative is not None and self.stateful_integrator is not None:
-            value_dtype = geometry_dtype(self.adapter)
-        positions = positions.to(device=self.device, dtype=torch.float32)
-        momenta = momenta.to(device=self.device, dtype=torch.float32)
+        if self._derivative is not None and builder.positions is not None:
+            value_dtype = builder.positions.dtype
+        state_dtype = torch.float32 if self.stateful_integrator is not None else value_dtype
+        masses = getattr(integrator, "masses", None)
+        if self.stateful_integrator is None and masses is not None and masses.dtype != state_dtype:
+            # mixed precision would round the state or the kinetic energy without an error
+            raise ValueError(f"the integrator's masses are {masses.dtype}; the MD state of this runner is "
+                             f"{state_dtype} (the geometry's dtype)")
+        positions = positions.to(device=self.device, dtype=state_dtype)
+        momenta = momenta.to(device=self.device, dtype=state_dtype)
         self.positions = positions.clone()
         self.momenta = momenta.clone()
         self.forces = torch.empty_like(self.positions, **({} if value_dtype == torch.float32 else
@@ -275,7 +283,8 @@ class WholeStepGraphRunner:
         self.builder.assert_candidate_capacity()
         with fusion_scope(self.enable_model_fusions):
             initial_forces, initial_energy, initial_status = self._evaluate(
-                self.positions if value_dtype == torch.float32 else integrator.positions,
+                integrator.positions if self.stateful_integrator is not None and value_dtype != torch.float32
+                else self.positions,
                 rebuild_candidates=False,
                 **({"stress": True} if self.record_stress else {}),
             )
@@ -1018,7 +1027,10 @@ class WholeStepGraphRunner:
 
         With a stateful integrator the arguments are the float32 mirrors of
         its (already current) state; the integrator state is not changed.
+        Positions and momenta of another dtype than the state's are refused
+        (a float64 state would be rounded).
         """
+        _require_state_dtype(self, positions, momenta)
         self.positions.copy_(positions)
         self.momenta.copy_(momenta)
         self.forces.copy_(forces)
@@ -1058,6 +1070,13 @@ class WholeStepGraphRunner:
             "u_capacity": self.builder.u_capacity,
             "t_capacity": self.builder.t_capacity,
         }
+
+
+def _require_state_dtype(runner, positions: Tensor, momenta: Tensor) -> None:
+    """Reject reset coordinates that would silently round the runner's authoritative state."""
+    if positions.dtype != runner.positions.dtype or momenta.dtype != runner.momenta.dtype:
+        raise ValueError(f"reset: positions {positions.dtype} and momenta {momenta.dtype}, the runner's state is "
+                         f"{runner.positions.dtype}")
 
 
 class BatchedWholeStepGraphRunner:

@@ -706,15 +706,18 @@ def _validate_global_ids_cuda(ids: Tensor, context: Any) -> None:
                       if duplicate else None)
 
 
-def migrate_atoms(state: AtomState, partition: DomainPartition, context: Any) -> AtomState:
-    """Move authoritative records; preserve unwrapped positions and MD payload."""
+def migrate_atoms(state: AtomState, partition: DomainPartition, context: Any,
+                  owner_dtype: torch.dtype | None = None) -> AtomState:
+    """Move authoritative records; preserve unwrapped positions and MD payload. ``owner_dtype``: the dtype the
+    owners are decided in (the positions' rounded to it; default the positions' own), e.g. float32 for float64
+    positions over a float32 partition (the records keep their dtypes)."""
     error = None
     try:
         state.validate()
         _validate_backend(state, context)
         if context.world_size != partition.world_size:
             raise ValueError("partition and process-group world sizes differ")
-        owners = partition.owner_of(state.positions)
+        owners = partition.owner_of(state.positions if owner_dtype is None else state.positions.to(owner_dtype))
         destinations = [torch.where(owners == peer)[0] for peer in range(context.world_size)]
     except (ValueError, TypeError, RuntimeError, AttributeError) as exc:
         error = str(exc)

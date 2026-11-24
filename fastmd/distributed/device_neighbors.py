@@ -25,7 +25,8 @@ def neighbor_candidates(positions, cell, owner_ranks, rank, cutoff, context, *,
     lengths (returned, used for the three-body cutoff) are unchanged. (The
     rows exchange's per-row decision was removed with it in step 4.2.)
     """
-    from fastmd.graph.neighbor_list_backend import estimate_max_neighbors, neighbor_list, require
+    from fastmd.graph.neighbor_list_backend import (estimate_max_neighbors, neighbor_list, require,
+                                                   warp_on_torch_stream)
 
     require("GPU neighbor candidates need the nvalchemiops neighbor list")
 
@@ -48,11 +49,13 @@ def neighbor_candidates(positions, cell, owner_ranks, rank, cutoff, context, *,
             images = torch.zeros((queried, capacity, 3), dtype=torch.int32, device=device)
             counts = torch.zeros(queried, dtype=torch.int32, device=device)
             if queried:
-                neighbor_list(positions=positions, cutoff=cutoff + candidate_margin,
-                              cell=cell.unsqueeze(0), pbc=pbc, batch_idx=batch,
-                              method="batch_cell_list", half_fill=False,
-                              neighbor_matrix=matrix, neighbor_matrix_shifts=images,
-                              num_neighbors=counts, return_neighbor_list=False)
+                # Warp's default stream is ordered only with torch's default stream.
+                with warp_on_torch_stream(device):
+                    neighbor_list(positions=positions, cutoff=cutoff + candidate_margin,
+                                  cell=cell.unsqueeze(0), pbc=pbc, batch_idx=batch,
+                                  method="batch_cell_list", half_fill=False,
+                                  neighbor_matrix=matrix, neighbor_matrix_shifts=images,
+                                  num_neighbors=counts, return_neighbor_list=False)
                 # The installed kernel increments the count even when a slot
                 # overflows; its writes are bounds guarded. Never truncate.
                 maximum = int(counts.max().item())

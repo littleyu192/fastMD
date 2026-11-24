@@ -69,8 +69,9 @@ class _PinnedUpload:
 class StatefulIntegrator:
     """Integrator that owns the authoritative MD state in its own buffers.
 
-    :class:`GPUIntegrator` is functional: the MD driver keeps the float32
-    state and passes it in. A stateful integrator (e.g. the float64
+    :class:`GPUIntegrator` is functional: the MD driver keeps the state (in
+    the geometry's dtype: float32, float64 on float64 geometry) and passes it
+    in. A stateful integrator (e.g. the float64
     :class:`~fastmd.execution.gpu_nhc.GPUNoseHooverChainNVT`) keeps
     positions, momenta, the cached forces F(positions), the potential energy
     and any thermostat variables itself; the drivers only keep float32
@@ -152,7 +153,8 @@ class StatefulIntegrator:
         raise NotImplementedError
 
     def step_pre_force_rows(self, rows: int) -> Tensor:
-        """:meth:`step_pre_force` on rows ``[0, rows)`` with the owned-row mask; the float32 positions view."""
+        """:meth:`step_pre_force` on rows ``[0, rows)`` with the owned-row mask; the view of the positions the
+        evaluator takes (its geometry's dtype: float32, float64 on float64 geometry)."""
         raise NotImplementedError
 
     def step_post_force_rows(self, forces: Tensor, energy: Tensor | None, rows: int) -> None:

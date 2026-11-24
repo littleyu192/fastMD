@@ -19,11 +19,18 @@ rely on under either API:
 - the query is the atom-centric one that writes both rows of a pair from one
   distance, with no host synchronization (0.4's automatic choice may pick a
   pair-centric query, which reads sizes back to the host);
-- the Warp kernels run on Warp's current stream for the device, as before:
-  callers that need them ordered with torch's stream wrap the calls in
-  ``wp.ScopedStream(wp.stream_from_torch(...))``. The candidate refreshes run
-  outside CUDA graph capture; the current API's cell-list build also
-  allocates scan scratch through Warp's allocator.
+- the Warp kernels run on Warp's current stream for the device, as before. By
+  default that is a blocking stream of Warp's own, ordered with torch's
+  default stream but not with a side stream (a capture warm-up's, a caller's
+  ``torch.cuda.stream``), so the builders' neighbour queries and the
+  multi-rank candidate search run on torch's current stream: in
+  ``warp_on_torch_stream(device)`` or
+  ``wp.ScopedStream(wp.stream_from_torch(...))`` (the cell-list size
+  estimates and ``BatchedCandidateRefresher`` rely on the default stream's
+  ordering). No call runs under CUDA graph capture (the candidate refreshes
+  run outside it; the ragged builds and the multi-rank candidate search read
+  counts back to the host); the current API's cell-list build also allocates
+  scan scratch through Warp's allocator.
 
 With the current API, whose cell-list sizing reads the cell back to the host
 twice, a fixed-cell caller sizes its cell list once (``cell_list_for_fixed_cell``)
@@ -254,6 +261,32 @@ cell_list_for_fixed_cell = _functions.get("cell_list_for_fixed_cell", _sized_per
 estimate_batch_cell_list_sizes = _functions.get("estimate_batch_cell_list_sizes", _unavailable)
 neighbor_list = _functions.get("neighbor_list", _unavailable)
 del _functions
+
+
+def warp_on_torch_stream(device):
+    """Run Warp launches on torch's current stream for ``device``.
+
+    Queries follow the torch work before them (buffer fills, wrapped
+    positions) and precede the reads after them on any stream. A no-op off
+    CUDA, without the backend, and when Warp's current stream already is
+    torch's: wrapping the same stream again would make a second Warp stream
+    object for it, which invalidates a Warp capture.
+    """
+    import contextlib
+
+    import torch
+
+    device = torch.device(device)
+    if device.type != "cuda" or not available:
+        return contextlib.nullcontext()
+    if device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    import warp as wp
+
+    stream = torch.cuda.current_stream(device)
+    if wp.get_stream(f"cuda:{device.index}").cuda_stream == stream.cuda_stream:
+        return contextlib.nullcontext()
+    return wp.ScopedStream(wp.stream_from_torch(stream))
 
 
 def require(what: str | None = None) -> None:

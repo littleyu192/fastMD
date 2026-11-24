@@ -43,14 +43,9 @@ def check_converter_cutoffs(model: nn.Module) -> None:
                          "build with the converter, the distributed evaluator with model.config")
 
 
-def validate_model(model: nn.Module, *, single_rank: bool = False) -> None:
-    """Admit stock, unhooked FP32 models; frozen FP64 toys are internal only.
-
-    Model stages are shared with single-device execution; primitive policies
-    may still interpret leaf modules. Subclasses, hooks and replaced stage
-    methods cannot silently change the admitted distributed program.
-    ``single_rank`` (the single-GPU engine) skips the P>1 topology's rules.
-    """
+def stock_module_types() -> frozenset[type]:
+    """The exact module types an admitted model consists of: MatRIS's own (whose forward methods
+    ``MODEL_FORWARD_METHODS`` lists) and the torch modules they hold."""
     from fastmd.models.matris.converter import GraphConverter
     from fastmd.models.matris.basis_function import (
         BesselExpansion, FourierExpansion, GaussianExpansion, PolynomialEnvelope,
@@ -63,7 +58,7 @@ def validate_model(model: nn.Module, *, single_rank: bool = False) -> None:
     from fastmd.models.matris.readout import EnergyHead, ForceStressHead, MagmomHead
     from fastmd.models.matris.reference_energy import AtomRef
 
-    stock_types = {
+    return frozenset({
         MatRIS, GraphConverter, AtomTypeEmbedding, EdgeBasisEmbedding, ThreebodyEmbedding,
         FusedSiLU, FusedSigmoid, GatedMLP, GraphPooling, MLP, SwishLayer,
         Graph_Attention_Layer, Interaction_Block, Refinement,
@@ -72,7 +67,22 @@ def validate_model(model: nn.Module, *, single_rank: bool = False) -> None:
         nn.ModuleList, nn.Sequential, nn.Identity, nn.Linear, nn.Embedding,
         nn.LayerNorm, nn.RMSNorm, nn.BatchNorm1d,
         nn.SiLU, nn.Sigmoid, nn.ReLU, nn.GELU, nn.Softplus, nn.Tanh, nn.Dropout,
-    }
+    })
+
+
+def validate_model(model: nn.Module, *, single_rank: bool = False) -> None:
+    """Admit stock, unhooked FP32 models; frozen FP64 toys are internal only.
+
+    Model stages are shared with single-device execution; primitive policies
+    may still interpret leaf modules. Subclasses, hooks and replaced stage
+    methods cannot silently change the admitted distributed program.
+    ``single_rank`` (the single-GPU engine) skips the P>1 topology's rules.
+    """
+    from fastmd.models.matris.basis_function import SphericalExpansion
+    from fastmd.models.matris.functions import MLP
+    from fastmd.models.matris.model import MatRIS
+
+    stock_types = stock_module_types()
     # The op-selection recorder's own site hooks only observe (step 2.0).
     exempt = recorder_hook_ids()
     for name in ("_global_forward_hooks", "_global_forward_pre_hooks",

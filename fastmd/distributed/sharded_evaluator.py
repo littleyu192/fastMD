@@ -33,7 +33,15 @@ adapter's ``ShardSpec``:
 
 The forces of a P>1 evaluation are the owned atoms'; the energy is the FP64
 total and the stress (``evaluate(state, stress=True)``) the whole system's,
-the same on every rank. Each rank negotiates its plan with the entry point
+the same on every rank. The geometry (``InferenceConfig.geometry_dtype``;
+"float64" by default for a float32 model whose adapter declares float64 geometry
+input, at every rank count; "float32" opts out; ``geometry_dtype``) keeps the
+positions, the cell, the ghost coordinates' COPY, the edge vectors, the
+strain, the forces and the stress in float64, the model's arithmetic in its
+own dtype; the domain decomposition, the ownership and the halo read the
+float32 rounding of the coordinates, and on CUDA so do the neighbour search
+and the edge decision (as on one GPU; the CPU ranks' exact reference
+topologies decide their edges in float64). Each rank negotiates its plan with the entry point
 "distributed" (``fastmd.adapters.negotiate``) and the ranks agree it (the
 kernels, then the rank contract); ``plan_record()`` reports it, with a
 ``distributed`` block at P>1. At each new layout a memory admission predicts
@@ -92,19 +100,22 @@ _SLOTS = 4
 _CAPTURE_WARMUPS = CapacityConfig().warmup
 
 
-def exchange_schedule(spec, dtype: torch.dtype, ghost_rows: list[int], flags: int = 4) -> dict:
+def exchange_schedule(spec, dtype: torch.dtype, ghost_rows: list[int], flags: int = 4,
+                      coordinate_dtype: torch.dtype | None = None) -> dict:
     """The P>1 step's exchanges in order (``exchange_schedule``: name, kind, values per row, dtype, and each rank's
     forward and backward bytes from its ``ghost_rows``) and their sums per rank (``bytes_per_step``): the builder's
-    coordinate COPY, the derivative's differentiable one and each declared feature COPY (their reverse SUMs in the
-    backward), each global sum of a pooled readout (FP64, its backward the sum of the gradients), then the FP64 sum
-    of the energy (and strain gradients) and the step flags' MAX (``flags`` values)."""
-    itemsize = torch.finfo(dtype).bits // 8
-    stages = [("coordinates.builder", 3, False), ("coordinates", 3, True)] + [
-        (point.name, point.width, True) for point in spec.exchange_points]
-    copies = [{"name": name, "kind": "copy", "width": width, "dtype": str(dtype).removeprefix("torch."),
-               "forward_bytes": [ghost * width * itemsize for ghost in ghost_rows],
-               "backward_bytes": [ghost * width * itemsize if reverse else 0 for ghost in ghost_rows]}
-              for name, width, reverse in stages]
+    coordinate COPY, the derivative's differentiable one (both in ``coordinate_dtype``, the geometry's: default
+    ``dtype``) and each declared feature COPY (their reverse SUMs in the backward), each global sum of a pooled
+    readout (FP64, its backward the sum of the gradients), then the FP64 sum of the energy (and strain gradients) and
+    the step flags' MAX (``flags`` values)."""
+    coordinate_dtype = dtype if coordinate_dtype is None else coordinate_dtype
+    stages = [("coordinates.builder", 3, False, coordinate_dtype), ("coordinates", 3, True, coordinate_dtype)] + [
+        (point.name, point.width, True, dtype) for point in spec.exchange_points]
+    copies = [{"name": name, "kind": "copy", "width": width, "dtype": str(stage_dtype).removeprefix("torch."),
+               "forward_bytes": [ghost * width * (torch.finfo(stage_dtype).bits // 8) for ghost in ghost_rows],
+               "backward_bytes": [ghost * width * (torch.finfo(stage_dtype).bits // 8) if reverse else 0
+                                  for ghost in ghost_rows]}
+              for name, width, reverse, stage_dtype in stages]
     sums = [{"name": point.name, "kind": "global_sum", "width": point.width, "dtype": "float64",
              "forward_bytes": [8 * point.width] * len(ghost_rows),
              "backward_bytes": [8 * point.width] * len(ghost_rows)} for point in spec.global_reductions]
@@ -136,7 +147,8 @@ def dry_run_record(adapter, config, *, atoms, world_size: int, device=None, para
     if unsupported:
         raise ValueError(f"ShardedEvaluator does not run {', '.join(unsupported)}")
     device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
-    check_device(device, next(adapter.module.parameters()).dtype, world_size)
+    dtype = next(adapter.module.parameters()).dtype
+    check_device(device, dtype, world_size)
     pbc = tuple(bool(axis) for axis in atoms.get_pbc())
     skin = float(parallel.topology_skin)
     record = negotiate(adapter, config, entry="distributed", device=device, pbc=pbc, world_size=world_size,
@@ -144,12 +156,16 @@ def dry_run_record(adapter, config, *, atoms, world_size: int, device=None, para
     if record.distributed is None:
         return record
     cutoff = adapter.topology_spec().cutoff
-    partition = DomainPartition(torch.tensor(atoms.cell.array, dtype=torch.float64), world_size,
-                                parallel.domain_grid, pbc)
+    geometry = plan_geometry(record, dtype)
+    # The run's decomposition and owners: the cell and the positions in the model's dtype, as the evaluator, its
+    # distribute() and its migrations decide them (on float64 geometry too: on the float32 rounding; an FP64 cell may
+    # break the "auto" grid's ties differently: the face spacings of a rotated or a hexagonal cell round differently in
+    # another dtype).
+    partition = model_partition(atoms.cell.array, dtype, world_size, parallel.domain_grid, pbc)
     if world_size > 1:
         partition.check_image_reach(cutoff + skin)
-    positions = torch.tensor(atoms.positions, dtype=torch.float64)
-    owner = partition.owner_of(partition.wrap_positions(positions))
+    positions = torch.as_tensor(atoms.positions, dtype=dtype)
+    owner = partition.owner_of(positions)
     matrix = []  # matrix[sender][receiver]: the sender's atoms within the receiver's halo
     for sender in range(world_size):
         rows = torch.nonzero(owner == sender).reshape(-1)
@@ -197,12 +213,12 @@ def dry_run_record(adapter, config, *, atoms, world_size: int, device=None, para
         if line:
             capacities = [count + 2 for count in edges]
             slot_capacity = list(line_slots)
-    dtype = getattr(torch, adapter.topology_spec().model_dtype)
     block = record.distributed
     block.update(estimate=True, grid=list(partition.domain_grid),
-                 **(line_exchange_schedule(spec, dtype, ghosts, slot_capacity) if line
+                 **(line_exchange_schedule(spec, dtype, ghosts, slot_capacity, coordinate_dtype=geometry) if line
                     else exchange_schedule(spec, dtype, ghosts,
-                                           flags=4 + (adapter.topology_spec().max_neighbors is not None))))
+                                           flags=4 + (adapter.topology_spec().max_neighbors is not None),
+                                           coordinate_dtype=geometry)))
     block["per_rank"] = [{"rank": rank, "owned": owned[rank], "owned_slots": slots[rank],
                           "rows": slots[rank] + ghosts[rank] + (sinks if line else 0), "ghost_rows": ghosts[rank],
                           "ghost_atoms": ghost_atoms[rank], "edges": edges[rank], "edge_capacity": capacities[rank],
@@ -249,9 +265,22 @@ def declared_shard(adapter):
 
 
 def check_device(device: torch.device, dtype: torch.dtype, world_size: int) -> None:
-    """P>1 on CUDA runs float32 models (the ghost builder's coordinates are float32)."""
+    """P>1 on CUDA runs float32 models (on float32 or float64 geometry, ``InferenceConfig.geometry_dtype``)."""
     if device.type == "cuda" and world_size > 1 and dtype != torch.float32:
-        raise ValueError("P>1 on CUDA runs float32 models (the ghost builder's coordinates are float32)")
+        raise ValueError("P>1 on CUDA runs float32 models (float64 geometry for them: "
+                         "InferenceConfig.geometry_dtype='float64')")
+
+
+def plan_geometry(plan, dtype: torch.dtype) -> torch.dtype:
+    """The geometry dtype of a negotiated plan: its "geometry" decision (an explicit ``geometry_dtype``, or the
+    distributed entry point's default), else the model's ``dtype``."""
+    decision = next((decision for decision in plan.decisions if decision.id == "geometry"), None)
+    return dtype if decision is None else {"float32": torch.float32, "float64": torch.float64}[decision.chosen]
+
+
+def model_partition(cell, dtype: torch.dtype, world_size: int, domain_grid, pbc) -> DomainPartition:
+    """Build previews and evaluators from the same model-dtype cell on the CPU."""
+    return DomainPartition(torch.as_tensor(cell, dtype=dtype, device="cpu"), world_size, domain_grid, pbc)
 
 
 def _counted(count) -> tuple[dict, dict]:
@@ -267,7 +296,8 @@ def _counted(count) -> tuple[dict, dict]:
 def unsupported_settings(config, parallel: ParallelConfig) -> list[str]:
     """The settings of ``config`` (an ``InferenceConfig`` or None) and ``parallel`` the node-halo exchange does not
     run, each as "name=value": rejected rather than ignored. Honoured: ``execution``, ``optimization_profile``
-    (the kernels), ``matmul_precision``, ``ParallelConfig.domain_grid`` and ``topology_skin``; accepted without
+    (the kernels), ``matmul_precision``, ``geometry_dtype`` (negotiated), ``ParallelConfig.domain_grid`` and
+    ``topology_skin``; accepted without
     effect: ``saved_tensor_recompute`` (recorded off: the sharded derivative runs no recompute), ``report`` (no
     report is printed) and ``topology_engine`` (both values run the node-halo topology); ``payload_transport``
     "auto" or "all_to_all" (the COPY is one all_to_all of fixed per-peer blocks)."""
@@ -306,9 +336,11 @@ def model_fingerprint(module) -> str:
 
 class _SingleSystem:
     """One CUDA rank: the single-GPU engine's builder and derivative (no ghost rows, no hook); its edge capacity in
-    the tiers of the P>1 topology (``capacity_step``: the shard's declared ones, else the topology's)."""
+    the tiers of the P>1 topology (``capacity_step``: the shard's declared ones, else the topology's).
+    ``positions_dtype`` float64: float64 geometry of a float32 model (``cell`` then the float64 cell)."""
 
-    def __init__(self, adapter, cell: Tensor, *, skin: float, device, capacity_step=None):
+    def __init__(self, adapter, cell: Tensor, *, skin: float, device, capacity_step=None,
+                 positions_dtype: torch.dtype | None = None):
         from fastmd.engine.energy_derivative import EnergyDerivative, edges_only_builder_options
 
         self.adapter, self.device, self.skin = adapter, device, float(skin)
@@ -317,6 +349,8 @@ class _SingleSystem:
         # A model with a line graph: the single-system builder's line graph, positions published (its leaf).
         self.line = self.spec.triplet_cutoff is not None
         self.options = {"publish_positions": True} if self.line else edges_only_builder_options(adapter)
+        if positions_dtype is not None:
+            self.options = {**self.options, "positions_dtype": positions_dtype}
         self.dtype = self.options.get("positions_dtype", torch.float32)
         self.cell = cell
         self.derivative = EnergyDerivative(adapter)
@@ -419,7 +453,9 @@ class ShardedEvaluator:
     (default: model_graph where every rank's predicted capture peak fits),
     "model_graph" (one captured evaluation step per layout) or "eager".
     Settings the node-halo exchange does not run are rejected
-    (:func:`unsupported_settings`).
+    (:func:`unsupported_settings`). ``geometry_dtype`` and ``geometry_cell``:
+    the geometry the plan runs (see the module docstring) and its cell (the
+    caller's, in float64 on float64 geometry; else the partition's).
     """
 
     # The scatter of the initial structure or of a restart and the diagnostic gather, as DistributedMatRISEvaluator's
@@ -475,8 +511,7 @@ class ShardedEvaluator:
                     raise ValueError("the Gloo data backend requires a CPU model")
             elif self.context.backend == "nccl":
                 raise ValueError("NCCL requires a CUDA model")
-            self.partition = DomainPartition(torch.as_tensor(cell, dtype=self.dtype, device="cpu"), world,
-                                             self.parallel.domain_grid, pbc)
+            self.partition = model_partition(cell, self.dtype, world, self.parallel.domain_grid, pbc)
             self.skin = float(self.parallel.topology_skin)
             self.cutoff = float(adapter.topology_spec().cutoff)
             if world > 1:
@@ -491,6 +526,15 @@ class ShardedEvaluator:
             error = str(exc)
         collective_check(self.context, error)
         self.plan = self._agree_kernels(plan)
+        # The geometry (InferenceConfig.geometry_dtype, else the distributed entry point's default; the plan's
+        # "geometry" decision): float64 geometry of a float32 model keeps the positions, the cell (the caller's, in
+        # float64), the coordinate COPY, the edge vectors, the strain, the forces and the stress in float64; the
+        # partition, the ownership and the halo selection stay in the model's dtype, and on CUDA the neighbour search
+        # too (the CPU reference topologies decide their edges in float64).
+        self.geometry_dtype = plan_geometry(self.plan, self.dtype)
+        self._float64_geometry = self.geometry_dtype != self.dtype
+        self.geometry_cell = (torch.as_tensor(cell, dtype=self.geometry_dtype, device="cpu").detach().clone()
+                              if self._float64_geometry else self.partition.cell)
         execution = self.plan.decision("execution")
         self.execution = execution.chosen
         self.execution_auto = execution.evidence.get("requested") == "auto"
@@ -517,6 +561,8 @@ class ShardedEvaluator:
             "engine": self._engine_name(),
             "capture_warmups": _CAPTURE_WARMUPS,
             "deterministic": deterministic_mode(),
+            **({"geometry_dtype": str(self.geometry_dtype), "geometry_cell": self.geometry_cell.tolist()}
+               if self._float64_geometry else {}),
         }
         agree_rank_contract(self.context, contract)
         self.rank_contract_sha256 = hashlib.sha256(json.dumps(contract, sort_keys=True, default=str)
@@ -533,22 +579,28 @@ class ShardedEvaluator:
                 # name that matches none refuses the evaluator on every rank, as does the CUDA strategy's own).
                 self.derivative = (LinePartialDerivative(self.adapter, self.spec.exchange_points) if self._line
                                    else ShardedEnergyDerivative(self.adapter, self.spec))
+            # Float64 geometry of a float32 model: the engine's coordinates in float64, over the float64 cell.
+            geometry = ({"positions_dtype": self.geometry_dtype, "cell": self.geometry_cell}
+                        if self._float64_geometry else {})
             if self.single:
-                self._engine = _SingleSystem(self.adapter, self.partition.cell, skin=self.skin, device=self.device,
-                                             capacity_step=self.spec.capacity_step)
+                self._engine = _SingleSystem(self.adapter, self.geometry_cell, skin=self.skin, device=self.device,
+                                             capacity_step=self.spec.capacity_step,
+                                             positions_dtype=geometry.get("positions_dtype"))
             elif self.device.type == "cuda":
                 strategy = LinePartialStrategy if self._line else NodeHaloStrategy
                 self._engine = strategy(self.adapter, self.spec, self.partition, self.context, skin=self.skin,
-                                        device=self.device)
+                                        device=self.device, **geometry)
             elif self._line:
                 self._engine = LineReferenceTopology(self.partition, self.context, cutoff=self.cutoff,
                                                      line_cutoff=float(self.adapter.topology_spec().triplet_cutoff),
-                                                     slot_cutoff=self.spec.line_slot_cutoff, dtype=self.dtype,
-                                                     pad_species=self.spec.pad_species)
+                                                     slot_cutoff=self.spec.line_slot_cutoff,
+                                                     dtype=self.geometry_dtype, pad_species=self.spec.pad_species,
+                                                     cell=geometry.get("cell"))
             else:
                 self._engine = NodeHaloReferenceTopology(self.partition, self.context, cutoff=self.cutoff,
-                                                         dtype=self.dtype, pad_species=self.spec.pad_species,
-                                                         edges=EDGE_RULES[self.spec.message_flow])
+                                                         dtype=self.geometry_dtype, pad_species=self.spec.pad_species,
+                                                         edges=EDGE_RULES[self.spec.message_flow],
+                                                         cell=geometry.get("cell"))
         except (ValueError, TypeError, RuntimeError) as exc:
             error = str(exc)
         try:
@@ -703,7 +755,8 @@ class ShardedEvaluator:
             predictor = LineGraphMemoryPredictor if "triplets" in extents else NodeHaloMemoryPredictor
             self._predictor = predictor.measure(self.adapter, self.spec, extents, cell=self.partition.cell,
                                                 device=self.device, dtype=self.dtype, kinds=kinds,
-                                                stream=self._side_stream(), single=self.single)
+                                                stream=self._side_stream(), single=self.single,
+                                                geometry_dtype=self.geometry_dtype if self._float64_geometry else None)
             if self._admission is None:
                 self._admission = memory_admission.MemoryAdmission(device=self.device, predictor=self._predictor)
             self._admission.predictor = self._predictor
@@ -1212,9 +1265,11 @@ class ShardedEvaluator:
         block["rank_contract_sha256"] = self.rank_contract_sha256
         by_rank = self._admission.decisions[-1]["by_rank"] if self._admission and self._admission.decisions else []
         ghost_rows = [entry["ghost_rows"] for entry in by_rank]
-        block.update(line_exchange_schedule(self.spec, self.dtype, ghost_rows, [entry["slots"] for entry in by_rank])
+        block.update(line_exchange_schedule(self.spec, self.dtype, ghost_rows, [entry["slots"] for entry in by_rank],
+                                            coordinate_dtype=self.geometry_dtype)
                      if self._line else exchange_schedule(self.spec, self.dtype, ghost_rows,
-                                                          flags=4 + (self.max_neighbors is not None)))
+                                                          flags=4 + (self.max_neighbors is not None),
+                                                          coordinate_dtype=self.geometry_dtype))
         block["per_rank"] = [
             {"rank": rank, "owned": entry["owned"], "owned_slots": entry["owned_slots"], "rows": entry["rows"],
              "ghost_rows": entry["ghost_rows"], "edge_capacity": entry["edges"],
@@ -1231,8 +1286,7 @@ class ShardedEvaluator:
         if callable(layout):
             layout = None
         ghost_rows = 0 if layout is None else layout.ghost_rows
-        widths = 6 + sum(point.width for point in self.spec.exchange_points  # raw and wrapped coordinates
-                         if point.kind == "copy")
+        features = sum(point.width for point in self.spec.exchange_points if point.kind == "copy")
         # A line-graph shard's line slots: their partials at each pair_merge point.
         slot_values = getattr(layout, "slots", 0) * sum(point.width for point in self.spec.exchange_points
                                                         if point.kind == "pair_merge")
@@ -1243,14 +1297,17 @@ class ShardedEvaluator:
             "kernel": getattr(self.adapter, "kernel", None),
             "engine": self._engine_name(),
             "execution": self.execution, "domain_grid": list(self.partition.domain_grid), "skin": self.skin,
-            "cutoff": self.cutoff, "dtype": str(self.dtype), "matmul_precision": self.matmul_precision,
+            "cutoff": self.cutoff, "dtype": str(self.dtype), "geometry_dtype": str(self.geometry_dtype),
+            "matmul_precision": self.matmul_precision,
             "precision_state": state, "shard_spec": self.spec.digest(),
             "exchange_points": [(point.name, point.module, point.width) for point in self.spec.exchange_points],
             "source_pins": [outcome.as_dict() for outcome in self.pins],
             "ghost_rows": ghost_rows,
             # Forward bytes of this rank's ghost rows (and line slots) per evaluation (the backward moves those of the
-            # differentiable COPYs and the slots again).
-            "exchange_bytes_per_step": (ghost_rows * widths + slot_values) * torch.finfo(self.dtype).bits // 8,
+            # differentiable COPYs and the slots again): the raw and wrapped coordinates in the geometry's dtype, the
+            # features in the model's.
+            "exchange_bytes_per_step": ((ghost_rows * features + slot_values) * (torch.finfo(self.dtype).bits // 8)
+                                        + ghost_rows * 6 * (torch.finfo(self.geometry_dtype).bits // 8)),
             "refreshes": self.refreshes, "captured": bool(self._graphs) or self._md_graph is not None,
             "plan_fingerprint": self.plan.fingerprint, "execution_auto": self.execution_auto,
             "kernels": {d.id: d.chosen for d in self.plan.decisions if d.id.startswith("kernels.")},

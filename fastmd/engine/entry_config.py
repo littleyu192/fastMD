@@ -119,6 +119,8 @@ def configure_entrypoint(kind):
                     "matmul_precision": config.matmul_precision,
                     "topology_reuse": config.topology_reuse,
                     "triton_dot_precision": config.triton_dot_precision,
+                    # only when set: the records of a configuration without it stay as they were
+                    **({} if config.geometry_dtype is None else {"geometry_dtype": config.geometry_dtype}),
                 } if config is not None else {
                     "source": "entrypoint defaults",
                     "execution": default_execution,
@@ -335,5 +337,9 @@ def config_summary(instance):
             **({"neighbor_cap": instance.neighbor_cap_summary()}
                if getattr(instance, "_neighbor_count_max", None) is not None else {}),
             **({"auto_execution": _auto_summary(instance)} if getattr(instance, "_execution_auto", False) else {}),
+            # where geometry_dtype is set or defaulted: the dtype of the positions, cell, edge vectors, forces
+            # and stress
+            **({"geometry_dtype": "float64" if getattr(instance, "_float64", False) else "float32"}
+               if resolved.geometry_dtype is not None or resolved.geometry_default is not None else {}),
         },
     }

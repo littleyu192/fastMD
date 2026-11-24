@@ -63,7 +63,7 @@ from ..engine._graph_capture import capture_graph
 from ..graph.fixed_capacity_builder import FixedCapacityGraphBuilder
 from .gpu_integrator import GPUIntegrator, StatefulIntegrator
 from .gpu_nhc import _HAS_TRITON, _TRITON_MAX_ELEMS, _TargetTemperature
-from .whole_step_cuda_graph import WholeStepGraphRunner
+from .whole_step_cuda_graph import WholeStepGraphRunner, _require_state_dtype
 from ..engine.entry_config import scoped_call
 
 if _HAS_TRITON:
@@ -181,31 +181,33 @@ class ReplicaUnionGraphBuilder(FixedCapacityGraphBuilder):
         self.cell_list_cache = allocate_cell_list(self.n_real, max_total_cells, neighbor_radius, self.device)
 
 
-def graph_builder_options(adapter, t_capacity: int = 0) -> dict:
+def graph_builder_options(adapter, t_capacity: int = 0, config=None) -> dict:
     """The fixed-capacity builder options of ``adapter``'s graph beyond its capacities and cutoffs: edges only
     (its edges-only options), or the line graph of a model with triplets at ``t_capacity`` triplets, with the
-    positions (the engine's leaf) published, in float64 for a float64 model (none for a model that
-    differentiates its own energy: MatRIS reads the fractional coordinates)."""
+    positions (the engine's leaf) published, in float64 for float64 geometry (``geometry_dtype`` of ``config``: a
+    float64 model, or a float32 one asked for it; none for a model that differentiates its own energy: MatRIS
+    reads the fractional coordinates)."""
     topology = adapter.topology_spec()
     if topology.triplet_cutoff is None:
-        return dict(t_capacity=0, line_graph_cutoff=None, **edges_only_builder_options(adapter))
+        return dict(t_capacity=0, line_graph_cutoff=None, **edges_only_builder_options(adapter, config))
     if engine_derivative(adapter) is None:
         return dict(t_capacity=int(t_capacity), line_graph_cutoff=float(topology.triplet_cutoff))
     return dict(t_capacity=int(t_capacity), line_graph_cutoff=float(topology.triplet_cutoff), publish_positions=True,
-                **({"positions_dtype": torch.float64} if geometry_dtype(adapter) == torch.float64 else {}))
+                **({"positions_dtype": torch.float64} if geometry_dtype(adapter, config) == torch.float64 else {}))
 
 
 def union_builder(adapter, *, replicas: int, cell: Tensor, atomic_numbers: Tensor, pbc: Tensor, u_capacity: int,
-                  candidate_skin: float, device, t_capacity: int = 0, n_dummy: int = 64) -> ReplicaUnionGraphBuilder:
+                  candidate_skin: float, device, t_capacity: int = 0, n_dummy: int = 64,
+                  config=None) -> ReplicaUnionGraphBuilder:
     """The union builder of ``replicas`` copies for ``adapter`` at ``u_capacity`` undirected pairs (and
     ``t_capacity`` triplets for a model with a line graph): its padding rule (``n_dummy`` sink rows where it pads
-    with sink atoms), ``prepare`` and builder options (:func:`graph_builder_options`); candidates within cutoff +
-    ``candidate_skin``."""
+    with sink atoms), ``prepare`` and builder options (:func:`graph_builder_options` of ``config``); candidates
+    within cutoff + ``candidate_skin``."""
     cutoff = float(adapter.topology_spec().cutoff)
     return ReplicaUnionGraphBuilder(
         replicas=replicas, cell=cell, atomic_numbers=atomic_numbers, pbc=pbc, u_capacity=int(u_capacity),
         atom_graph_cutoff=cutoff, candidate_cutoff=cutoff + candidate_skin, device=device, n_dummy=int(n_dummy),
-        padding=adapter.padding_rule(), prepare=adapter.prepare, **graph_builder_options(adapter, t_capacity))
+        padding=adapter.padding_rule(), prepare=adapter.prepare, **graph_builder_options(adapter, t_capacity, config))
 
 
 def union_demand(adapter, positions: Tensor, *, replicas: int, cell: Tensor, atomic_numbers: Tensor, pbc: Tensor,
@@ -720,6 +722,7 @@ class ReplicaWholeStepRunner(WholeStepGraphRunner):
               reset_counters: bool = True) -> None:
         """:meth:`WholeStepGraphRunner.reset` with ``(N,)`` energies (a stateful integrator's state is the
         caller's)."""
+        _require_state_dtype(self, positions, momenta)
         self.positions.copy_(positions.reshape(self.positions.shape))
         self.momenta.copy_(momenta.reshape(self.momenta.shape))
         self.forces.copy_(forces.reshape(self.forces.shape))
@@ -837,7 +840,7 @@ def union_self_check(adapter, *, positions: Tensor, cell: Tensor, atomic_numbers
 
 def union_memory_runs(adapter, *, positions: Tensor, cell: Tensor, atomic_numbers: Tensor, pbc: Tensor,
                       candidate_skin: float, device, step=None, headroom: float = UNION_GROWTH_HEADROOM,
-                      triplet_headroom: float = UNION_TRIPLET_GROWTH_HEADROOM):
+                      triplet_headroom: float = UNION_TRIPLET_GROWTH_HEADROOM, config=None):
     """``({kind: run(capacity)}, edges(replicas), triplets(replicas))`` for ``MeasuredMemoryModel.measure`` on
     unions of this system (``positions``: one replica's ``(n, 3)``): ``adapter``'s evaluation of a union of
     that many copies at the capacity one growth would give it (:func:`union_capacity` with ``headroom``, and
@@ -849,9 +852,10 @@ def union_memory_runs(adapter, *, positions: Tensor, cell: Tensor, atomic_number
     per-triplet cost from the per-edge one); each run returns the (edges, triplets) capacity it held, which
     ``edges`` and ``triplets`` give for a union of any size (predict there; ``triplets`` 0 without a line
     graph). Atoms and edges grow together over the unions measured, so a fit over edges holds the per-atom
-    costs too. Each run makes its own builder, and a captured graph is released before the run returns."""
+    costs too. Each run uses ``config``'s geometry dtype and makes its own builder, and a captured graph is
+    released before the run returns."""
     numbers = atomic_numbers.to(device=device, dtype=torch.int32)
-    base = positions.to(device=device, dtype=torch.float32)
+    base = positions.to(device=device, dtype=geometry_dtype(adapter, config))
     single, single_triplets = union_demand(adapter, base, replicas=1, cell=cell, atomic_numbers=numbers, pbc=pbc,
                                            candidate_skin=candidate_skin, device=device)
     line_graph = adapter.topology_spec().triplet_cutoff is not None
@@ -869,7 +873,7 @@ def union_memory_runs(adapter, *, positions: Tensor, cell: Tensor, atomic_number
         coordinates = base.repeat(replicas, 1)
         builder = union_builder(adapter, replicas=replicas, cell=cell, atomic_numbers=numbers, pbc=pbc,
                                 u_capacity=edges(replicas) // 2, t_capacity=t_capacity, candidate_skin=candidate_skin,
-                                device=device)
+                                device=device, config=config)
         builder.refresh_candidates(coordinates)
 
         def evaluate() -> None:
@@ -904,7 +908,7 @@ def union_memory_runs(adapter, *, positions: Tensor, cell: Tensor, atomic_number
 
 def union_persistent_bytes(adapter, *, positions: Tensor, cell: Tensor, atomic_numbers: Tensor, pbc: Tensor,
                            candidate_skin: float, device, step=None, headroom: float = UNION_GROWTH_HEADROOM,
-                           triplet_headroom: float = UNION_TRIPLET_GROWTH_HEADROOM) -> int:
+                           triplet_headroom: float = UNION_TRIPLET_GROWTH_HEADROOM, config=None) -> int:
     """The device bytes one more replica adds to a union outside its graph pool, estimated: the builder's buffers
     (the candidate list above all) of two replicas less those of one, plus 32 float64 per atom for the runner's
     and the integrator's per-atom state (positions, momenta, forces, their backups and mirrors: about 30 for a
@@ -922,7 +926,7 @@ def union_persistent_bytes(adapter, *, positions: Tensor, cell: Tensor, atomic_n
                                 t_capacity=union_triplet_capacity(single_triplets * replicas, step,
                                                                   headroom=triplet_headroom,
                                                                   replicas=replicas) if line_graph else 0,
-                                candidate_skin=candidate_skin, device=device)
+                                candidate_skin=candidate_skin, device=device, config=config)
         seen, total = set(), 0
         for value in vars(builder).values():
             if torch.is_tensor(value) and value.device.type == "cuda" and value.data_ptr() not in seen:

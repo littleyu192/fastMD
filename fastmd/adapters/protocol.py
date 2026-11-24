@@ -26,7 +26,9 @@ for a model that declares a :class:`ShardSpec` (:class:`ShardSpecDeclaration`;
 with :class:`ShardedTap` where the adapter runs its own layer loop and pooled
 readout); replicas of a system run as one batch for a model that declares
 :class:`SystemBatching`, different systems for one that also takes the engine's
-per-edge shifts (:class:`EdgeShiftInput`). A
+per-edge shifts (:class:`EdgeShiftInput`). A float32 model declaring
+:class:`Float64GeometryInput` defaults to float64 geometry on single-GPU calculator, MD and batched entry points,
+and in ``ShardedEvaluator`` and its MD at every rank count (``InferenceConfig.geometry_dtype``). A
 model the runtime plans by rules of its own (:class:`RuntimePlanned`: MatRIS)
 is not negotiated; its decisions are recorded. A request a model cannot serve
 raises :class:`NegotiationError`.
@@ -134,7 +136,7 @@ class SystemSegments:
     count: int  # systems
     row_ptr: Tensor  # [count + 1] int64 on the device: the first row of each system, then the row count
     system_of_row: Tensor  # [rows] int32 on the device: the system of each atom row (of a vacant row: its slot's)
-    # [count, 3, 3] on the device, in the model's dtype: each system's cell (rows are its lattice vectors); None:
+    # [count, 3, 3] on the device, in the positions' dtype: each system's cell (rows are its lattice vectors); None:
     # every system has the batch's cell
     cells: Tensor | None = None
     # [count] int64 on the device: each system's atoms, the first rows of its slot; None: every row is occupied
@@ -508,7 +510,6 @@ class RecomputeParticipant(Protocol):
 
 
 
-
 @runtime_checkable
 class ShardDeclaration(Protocol):
     """Capability: the model's own multi-GPU exchange strategy, the object through which the distributed runtime
@@ -645,9 +646,11 @@ class ShardSpec:
     the upstream code the hooks (or the adapter's own layer loop) rely on,
     checked when an evaluator that exchanges is built (P>1, or CPU ranks; a
     mismatch refuses it with the reason); one CUDA rank, which exchanges
-    nothing, never reads them. ``allow_tf32=False``: the P>1 forward is
-    validated in IEEE FP32 only, and a TF32 request at P>1 raises
-    :class:`NegotiationError` (P=1 keeps it). ``kernels``: the option each kernel
+    nothing, never reads them. ``allow_tf32`` permits explicit TF32 requests
+    (``matmul_precision`` "high" or "medium") at P>1 only for a model validated
+    against TF32 at P=1. False (the default) refuses the request with
+    :class:`NegotiationError`; P=1 keeps it. TF32 is never on by default.
+    ``kernels``: the option each kernel
     site of the model runs at P>1 where that is fixed (``((site, option),
     ...)``, sites of the model's ``kernel_backends``; the adapter's own layer
     loop runs, e.g., eager modules), installed in place of the site's
@@ -715,7 +718,7 @@ class ShardSpec:
     pad_species: int = 1
     source_pins: tuple[Any, ...] = ()
     global_reductions: tuple[ExchangePoint, ...] = ()
-    allow_tf32: bool = True
+    allow_tf32: bool = False
     kernels: tuple[tuple[str, str], ...] = ()
     capacity_step: CapacityStep | None = None
     line_slot_cutoff: float | None = None  # line_graph: the bonds with triplets are shorter than this (Å)
@@ -960,6 +963,30 @@ class EdgeShiftInput(Protocol):
 
     def edge_shift_input(self) -> bool:
         ...
+
+
+@runtime_checkable
+class Float64GeometryInput(Protocol):
+    """Capability: the energy tap of a float32 model takes float64 geometry, for
+    ``InferenceConfig.geometry_dtype="float64"`` (the default of the calculator, GPU-resident MD and the batched
+    runners on one GPU, and of ``ShardedEvaluator`` at every rank count, for such a model).
+
+    True: the energy tap (:meth:`EnergyTap.node_energy`, or a whole-system tap's
+    :meth:`SystemEnergyTap.system_energy`) accepts float64 ``positions``, ``cell`` and ``edge_shifts`` while the
+    module stays float32. It computes every geometric input of the module from them in float64 (each edge's vector
+    ``positions[neighbour] + shift - positions[centre]``, in the model's own order of operations) and casts it to
+    the module's dtype at the module's input, so that the module's arithmetic is the float32 path's and the
+    gradients flow back to the float64 positions and strain. With float32 inputs the call is the float32 path,
+    bit for bit. The declaration comes from the adapter; False or None: the model runs on its own dtype's
+    geometry only."""
+
+    def float64_geometry_input(self) -> bool:
+        ...
+
+
+def takes_float64_geometry(adapter) -> bool:
+    """Whether ``adapter`` declares :class:`Float64GeometryInput` (its ``float64_geometry_input()`` is True)."""
+    return isinstance(adapter, Float64GeometryInput) and bool(adapter.float64_geometry_input())
 
 
 @runtime_checkable

@@ -32,7 +32,7 @@ from fastmd.engine import saved_recompute
 from fastmd.interfaces.calculator import require_finite_geometry
 from fastmd.engine.capacity_policy import CapacityKey, JointCapacityPolicy, declared_capacity, held_demand, thermal_factors
 from fastmd.execution.cuda_graph import BucketedGraphRunner
-from fastmd.engine.energy_derivative import edges_only_builder_options
+from fastmd.engine.energy_derivative import default_geometry, edges_only_builder_options, geometry_dtype
 from fastmd.engine.energy_derivative import engine_derivative
 from fastmd.engine.energy_derivative import stress_unit_scale
 from fastmd.execution.gpu_integrator import GPUIntegrator
@@ -105,6 +105,8 @@ class GPUResidentMolecularDynamics:
     The adapter supplies topology and energy/derivative capabilities. The
     runtime owns graph construction, topology reuse, integration and logging.
     Supported ensembles are nve, Berendsen nvt and Nose-Hoover-chain nvt_nhc.
+    NVE and Berendsen keep positions, momenta and masses in the geometry dtype:
+    float64 for declared foreign models by default, float32 for MatRIS.
     InferenceConfig chooses eager, model_graph, whole_step or automatic
     execution; whole-step capture is used only where the adapter permits it.
 
@@ -252,6 +254,14 @@ class GPUResidentMolecularDynamics:
         # The model's declared capacity step where the configuration keeps the default one, and the thermal
         # factors declared with it (_capture_factors).
         self._inference_config = declared_capacity(self._adapter, self._inference_config)
+        # An unset geometry_dtype: float64 geometry for a float32 model that declares the input (one GPU); a resumed
+        # restart file of float32 geometry (its cached forces float32: written before float64 geometry became the
+        # default, with geometry_dtype="float32", or by the from_evaluator driver on float32 geometry) continues on
+        # float32 geometry, as the uninterrupted run would.
+        self._inference_config = default_geometry(self._adapter, self._inference_config, "gpu_md")
+        if (restart is not None and self._inference_config.geometry_default is not None
+                and np.asarray(restart.forces).dtype != np.float64):
+            self._inference_config = replace(self._inference_config, geometry_default=None)
         self._thermal_factors = thermal_factors(self._adapter, self._inference_config)
         self.model = self._adapter.module
         if self.model is model or self._adapter is model:  # supplied, not loaded
@@ -265,13 +275,15 @@ class GPUResidentMolecularDynamics:
             param.requires_grad_(False)
         # None: the model differentiates itself (adapter.evaluate); else the engine-owned derivative.
         self._derivative = engine_derivative(self._adapter)
-        # Geometry may be float64 even when the saved neural weights are float32 (NequIP).
-        # Keep positions, cell, derivatives and logged values in that declared precision.
-        from fastmd.engine.energy_derivative import geometry_dtype
-        self._float64 = self._derivative is not None and geometry_dtype(self._adapter) == torch.float64
-        if self._float64 and ensemble.lower() != "nvt_nhc":
-            raise ValueError("GPUResidentMolecularDynamics: float64 geometry needs ensemble='nvt_nhc' (the "
-                             "integrator with a float64 state); nve and nvt keep a float32 state")
+        # Geometry can exceed the neural-weight precision. NVE and Berendsen integrate the geometry's dtype;
+        # the Nose-Hoover chain keeps its own float64 state with float32 mirrors in self.state.
+        self._float64 = geometry_dtype(self._adapter, self._inference_config) == torch.float64
+        self._state_dtype = (torch.float64 if self._float64 and ensemble.lower() != "nvt_nhc"
+                             else torch.float32)
+        if restart is not None and self._float64 != (np.asarray(restart.forces).dtype == np.float64):
+            warnings.warn(f"GPUResidentMolecularDynamics: the restart file was written on "
+                          f"{'float32' if self._float64 else 'float64'} geometry; this run continues on "
+                          f"{'float64' if self._float64 else 'float32'} geometry", RuntimeWarning, stacklevel=2)
 
         self.atomic_numbers = torch.as_tensor(
             atoms.get_atomic_numbers(), dtype=torch.int32, device=self.device
@@ -285,19 +297,19 @@ class GPUResidentMolecularDynamics:
                             if self._float64 else self.cell)
         self._positions_dtype = {"positions_dtype": torch.float64} if self._float64 else {}
         self.masses = torch.as_tensor(
-            atoms.get_masses(), dtype=torch.float32, device=self.device
+            atoms.get_masses(), dtype=self._state_dtype, device=self.device
         )
         self.n_atoms = int(self.atomic_numbers.shape[0])
         self.composition = atoms.get_chemical_formula()
 
         positions = torch.as_tensor(
-            atoms.get_positions(), dtype=torch.float32, device=self.device
+            atoms.get_positions(), dtype=self._state_dtype, device=self.device
         )
         if atoms.has("momenta"):
             momenta_np = atoms.get_momenta()
         else:
             momenta_np = np.zeros((self.n_atoms, 3), dtype=np.float32)
-        momenta = torch.as_tensor(momenta_np, dtype=torch.float32, device=self.device)
+        momenta = torch.as_tensor(momenta_np, dtype=self._state_dtype, device=self.device)
         self.state = GPUMDState(
             positions=positions,
             momenta=momenta,
@@ -394,7 +406,8 @@ class GPUResidentMolecularDynamics:
         self.line_graph_cutoff = None if self._edges_only else float(topology.triplet_cutoff)
         # The whole-step builder's options for this model (none for MatRIS): float64 positions, and no
         # per-build sort of the edge rows for a model that only needs them grouped by centre.
-        self._fixed_builder_options = edges_only_builder_options(self.adapter) if self._edges_only else {}
+        self._fixed_builder_options = (edges_only_builder_options(self.adapter, self._inference_config)
+                                       if self._edges_only else {})
         if self._edges_only and topology.max_neighbors is not None:
             # The builds list every pair within the cutoff and fold their largest per-atom edge count into
             # this device maximum (no host read); neighbor_cap_summary() reports it.
@@ -405,6 +418,8 @@ class GPUResidentMolecularDynamics:
         self._line_graph_batches = self._derivative is not None and not self._edges_only
         if self._line_graph_batches:
             self._fixed_builder_options["publish_positions"] = True
+            if self._float64:
+                self._fixed_builder_options["positions_dtype"] = torch.float64
         self.graph_builder = TensorGraphBuilder(
             cell=self._model_cell,
             atomic_numbers=self.atomic_numbers,
@@ -479,12 +494,14 @@ class GPUResidentMolecularDynamics:
             append_trajectory=append_trajectory,
             ring=logger_ring,
             **({"stress": True} if self.log_stress else {}),
-            # a float64 model: float64 forces, cell and stress in the frames
+            # float64 geometry: float64 forces, cell and stress in the frames
             **({"value_dtype": torch.float64} if self._float64 else {}),
-            # nvt_nhc: log the float64 state and the thermostat variables
+            # a float64 state (nvt_nhc's own, or nve's and nvt's on float64 geometry): logged in float64
+            **({"state_dtype": torch.float64}
+               if isinstance(self.integrator, GPUNoseHooverChainNVT) or self._state_dtype == torch.float64 else {}),
+            # nvt_nhc: the thermostat variables
             **(
                 {
-                    "state_dtype": torch.float64,
                     "extras": {
                         "nhc_eta": self.integrator.tchain,
                         "nhc_p_eta": self.integrator.tchain,
@@ -506,8 +523,10 @@ class GPUResidentMolecularDynamics:
         if changed:
             raise ValueError("GPUResidentMolecularDynamics: MD parameters differ from the restart file's "
                              f"(saved, requested): {changed}")
-        forces = torch.as_tensor(np.asarray(data.forces, dtype=np.float32), device=self.device)
-        energy = torch.as_tensor(np.asarray(data.energy, dtype=np.float32), device=self.device).reshape(())
+        # The cached forces and energy at the state's dtype (float64 geometry: float64, as the file holds them).
+        dtype = np.float64 if self._float64 else np.float32
+        forces = torch.as_tensor(np.asarray(data.forces, dtype=dtype), device=self.device)
+        energy = torch.as_tensor(np.asarray(data.energy, dtype=dtype), device=self.device).reshape(())
         if self.stateful_integrator is not None:
             self.stateful_integrator.set_forces(forces, energy=energy.reshape(1))
             if data.nhc_state is not None:
@@ -515,10 +534,18 @@ class GPUResidentMolecularDynamics:
         self.state.forces, self.state.potential_energy = forces.reshape(self.n_atoms, 3), energy
         self.nsteps = int(data.step)
 
+    @property
+    def restart_cell(self) -> Tensor:
+        """The cell a restart file records: the model's (float64 for float64 geometry, else the float32 cell)."""
+        return self._model_cell
+
     @classmethod
     def from_restart(cls, path, *, model: torch.nn.Module | ModelAdapter | str = "matris_10m_oam",
                      model_path: str | None = None, **kwargs) -> "GPUResidentMolecularDynamics":
         """Resume a native or distributed restart file on one GPU.
+
+        A file of float32 geometry resumes on float32 geometry unless config
+        explicitly requests float64; a changed geometry dtype emits a warning.
 
         Both FastMD's ``fastmd.distributed.md/1`` and MD's
         ``matris.distributed.md/1`` files are accepted. Supply the same model
@@ -1011,10 +1038,10 @@ class GPUResidentMolecularDynamics:
                                                     u_demand, capacity.u_step), u_factor), 0).u_capacity,
                                  policy.key_for(held_demand(u_demand, 0, u_factor), 0).u_capacity + capacity.u_step)
                 runs = edges_only_memory_runs(
-                    self.adapter, cell=self.cell, atomic_numbers=self.atomic_numbers, pbc=self.pbc,
-                    positions=self.state.positions, n_real=self.n_atoms, device=self.device,
+                    self.adapter, cell=self._model_cell, atomic_numbers=self.atomic_numbers, pbc=self.pbc,
+                    positions=self._probe_positions(), n_real=self.n_atoms, device=self.device,
                     task=self.force_task + ("s" if self.log_stress else ""), candidate_skin=self.candidate_skin,
-                    n_dummy=capacity.n_dummy)
+                    n_dummy=capacity.n_dummy, config=self._inference_config)
                 memory = measured_memory(MeasuredMemoryModel, runs, target, self.device)
                 plan = renegotiate_execution(plan, self.adapter, requested, entry="gpu_md", device=self.device,
                                              pbc=pbc, capacity={"edges": target}, memory=memory,
@@ -1056,10 +1083,17 @@ class GPUResidentMolecularDynamics:
                                   + capacity.t_step)}
         runs = line_graph_memory_runs(
             self.adapter, cell=self._model_cell, atomic_numbers=self.atomic_numbers, pbc=self.pbc,
-            positions=self.state.positions, n_real=self.n_atoms, device=self.device,
+            positions=self._probe_positions(), n_real=self.n_atoms, device=self.device,
             task=self.force_task + ("s" if self.log_stress else ""), candidate_skin=self.candidate_skin,
-            n_dummy=capacity.n_dummy)
+            n_dummy=capacity.n_dummy, config=self._inference_config)
         return target, runs
+
+    def _probe_positions(self) -> Tensor:
+        """The positions execution auto's memory probe evaluates: the float64 state's for float64 geometry (the
+        Nose-Hoover chain's own, else self.state's)."""
+        if self._float64 and self.stateful_integrator is not None:
+            return self.stateful_integrator.positions
+        return self.state.positions
 
     # What a whole-step trial changes besides the state (restored after it).
     _TRIAL_KEPT = ("whole_step_capacity_history", "whole_step_recaptures", "_whole_step_accumulated", "_tier_switch_up",
@@ -1571,7 +1605,7 @@ class GPUResidentMolecularDynamics:
         return self.log_stress and self.logger.should_log(step)
 
     def _logged_stress(self, step: int | None = None) -> Tensor:
-        """The current state's stress for its frame, eV/A^3 (MLIPCalculator's float32 GPa conversion):
+        """The current state's stress for its frame, eV/A^3 (MLIPCalculator's GPa conversion, in the stress's dtype):
         the logged step's evaluation; one evaluation now only for a first frame whose forces exist already
         (a resumed run, or forces evaluated before the first step). ``step``: the state's step (default
         ``nsteps``; a window that is not settled yet ends on a later one)."""
@@ -1598,7 +1632,7 @@ class GPUResidentMolecularDynamics:
         self._ensure_forces(**({"stress": True} if self.log_stress else {}))
         assert self.state.forces is not None
         assert self.state.potential_energy is not None
-        # a stateful integrator's float64 state, else the float32 state
+        # a stateful integrator's float64 state, else self.state (the geometry's dtype)
         source = (
             self.stateful_integrator
             if self.stateful_integrator is not None
@@ -2093,7 +2127,7 @@ class GPUResidentMolecularDynamics:
         if self._domain is not None:
             return self._domain_snapshot_atoms()
         atoms = self.atoms_template.copy()
-        # the float64 state of a stateful integrator, else the float32 state
+        # the float64 state of a stateful integrator, else self.state (the geometry's dtype)
         source = (
             self.stateful_integrator
             if self.stateful_integrator is not None
@@ -2251,14 +2285,21 @@ class GPUResidentMolecularDynamics:
         one version; an evaluator stand-in without ``md_step`` always runs the
         integrator outside.
 
-        Exactly one start: ``state`` (the owned atoms with payload "masses",
-        "momenta", in ASE units, float32 for nve/nvt, float64 plus
-        "positions64" for nvt_nhc: ``evaluator.distribute(atoms,
-        payload_dtype=...)``), ``atoms`` on root (other ranks pass None; it
-        is distributed here), or ``restart``
-        (``evaluator.distribute_restart(path)``: the cached evaluation is not
-        recomputed; every option must equal the file's except
-        ``total_steps``). Units as the native constructor: ``timestep``,
+        The geometry is the evaluator's (``evaluator.geometry_dtype``: float64
+        for a supporting float32 model of a ``ShardedEvaluator`` by default
+        at any P; else the model's, MatRIS's float32): the state follows
+        it, nve and Berendsen nvt then keep a float64 state, and float64
+        geometry of a float32 model writes float64 frames and the restart
+        file's float64 cell. Exactly one start:
+        ``state`` (the owned atoms with payload "masses", "momenta", in ASE
+        units, in the geometry's dtype for nve/nvt, float64 plus "positions64"
+        for nvt_nhc: ``evaluator.distribute(atoms, payload_dtype=...)``),
+        ``atoms`` on root (other ranks pass None; it is distributed here), or
+        ``restart`` (``evaluator.distribute_restart(path)``: the cached
+        evaluation is not recomputed; every option must equal the file's except
+        ``total_steps``; a file of another geometry continues on the
+        evaluator's with a warning: construct the evaluator with the file's
+        ``read_restart(path).geometry_dtype`` to continue it as it was). Units as the native constructor: ``timestep``,
         ``taut`` and ``tdamp`` (default 100 time steps) in fs.
         ``temperature``: the initial target (default ``ramp.start_K``, else
         300 K for nvt/nvt_nhc). A ``restart`` continues its saved target: with a
@@ -2444,6 +2485,12 @@ class GPUResidentMolecularDynamics:
             changed = resume_mismatch(saved, self.parameters, ignore=ignore)
             if changed:
                 raise ValueError(f"MD parameters differ from the restart file's (saved, requested): {changed}")
+            written = restart.get("geometry_dtype")
+            running = "float64" if state.positions.dtype == torch.float64 else "float32"
+            if written is not None and written != running:
+                # the evaluator was built first: a resume, not the uninterrupted run
+                warnings.warn(f"from_evaluator: the restart file was written on {written} geometry; this run "
+                              f"continues on the evaluator's {running} geometry", RuntimeWarning, stacklevel=3)
         natoms = sum(item[6] for item in agreed)
 
         self._domain = self.evaluator = evaluator
@@ -2461,6 +2508,11 @@ class GPUResidentMolecularDynamics:
         self.comm = comm = context.comm
         self.device = evaluator.device
         self.cell = evaluator.partition.cell
+        # Float64 geometry of a float32 model (a ShardedEvaluator's geometry_dtype): the frames, snapshots and restart
+        # files take its float64 cell and float64 values; the state's dtype follows the evaluated state's.
+        self._float64 = (getattr(evaluator, "geometry_dtype", None) == torch.float64
+                         and evaluator.dtype != torch.float64)
+        self._model_cell = evaluator.geometry_cell if self._float64 else self.cell
         self.runner = self.whole_step_runner = self.logger = None
         self._log_interval, self._logged_initial = agreed[0][7], False
         self.log_stress = log_stress
@@ -2481,7 +2533,10 @@ class GPUResidentMolecularDynamics:
                 tchain=tchain, tloop=tloop, forces=prediction.forces, potential_energy=prediction.energy,
                 device=evaluator.device, backend=nhc_backend, force_dtype=prediction.forces.dtype,
                 comm=comm, n_global=natoms, protocol="decomposed", scalar_sync=scalar_sync,
-                ke2_update=ke2_update, fix_com=fix_com, capacity=capacity)
+                ke2_update=ke2_update, fix_com=fix_com, capacity=capacity,
+                # float64 geometry of a float32 model: the evaluator takes the float64 positions (else the mirror of
+                # before, float32)
+                input_dtype=torch.float64 if self._float64 else torch.float32)
             integrator.warmup_compile()  # JIT before step 0
             if nhc_state is not None:
                 integrator.load_state_dict(nhc_state)
@@ -2527,15 +2582,18 @@ class GPUResidentMolecularDynamics:
                 if atoms is not None and np.array_equal(atoms.get_atomic_numbers(), numbers):
                     template = atoms.copy()  # IDs are the input order
                 else:
-                    template = Atoms(numbers=numbers, cell=self.cell.detach().cpu().double().numpy(), pbc=True)
+                    template = Atoms(numbers=numbers, cell=self._model_cell.detach().cpu().double().numpy(), pbc=True)
                     template.set_masses(frame["masses"].double().cpu().numpy())
                 thermostat = self.thermostat
                 self.logger = AsyncGPUMDLogger(
                     atoms_template=template, device=self.device, trajectory=trajectory, logfile=logfile,
                     loginterval=self._log_interval, append_trajectory=append_trajectory, ring=logger_ring,
                     **({"stress": True} if self.log_stress else {}),
-                    **({"state_dtype": torch.float64,
-                        "extras": {"nhc_eta": thermostat.tchain, "nhc_p_eta": thermostat.tchain,
+                    # float64 geometry: float64 forces, cell and stress in the frames
+                    **({"value_dtype": torch.float64} if self._float64 else {}),
+                    # a float64 state (nvt_nhc's own, or nve's and nvt's on float64 geometry): logged in float64
+                    **({"state_dtype": torch.float64} if thermostat is not None or self._float64 else {}),
+                    **({"extras": {"nhc_eta": thermostat.tchain, "nhc_p_eta": thermostat.tchain,
                                    "nhc_conserved_energy": 1}} if thermostat is not None else {}))
             except (OSError, *_ERRORS) as exc:
                 error = f"trajectory/logfile: {exc}"
@@ -2566,7 +2624,7 @@ class GPUResidentMolecularDynamics:
                     "nhc_conserved_energy": energy.to(torch.float64) + kinetic + thermostat.thermostat_energy()}
                 self.logger.enqueue(
                     step=self.nsteps, time_ps=self.nsteps * self.dt_fs / 1000.0, positions=frame["positions"],
-                    momenta=frame["momenta"], forces=frame["forces"], cell=self.cell, potential_energy=energy,
+                    momenta=frame["momenta"], forces=frame["forces"], cell=self._model_cell, potential_energy=energy,
                     kinetic_energy=kinetic, temperature=2.0 * kinetic / (self.dof * units.kB), extras=extras,
                     **({"stress": self.prediction.stress} if self.log_stress else {}))
             except (OSError, *_ERRORS) as exc:  # e.g. the writer thread's failure
@@ -2757,7 +2815,7 @@ class GPUResidentMolecularDynamics:
             return None
         atoms = Atoms(numbers=frame["numbers"].cpu().numpy(),
                       positions=frame["positions"].double().cpu().numpy(),
-                      cell=self.cell.detach().cpu().double().numpy(), pbc=True)
+                      cell=self._model_cell.detach().cpu().double().numpy(), pbc=True)
         atoms.set_masses(frame["masses"].double().cpu().numpy())
         atoms.set_momenta(frame["momenta"].double().cpu().numpy())
         return atoms

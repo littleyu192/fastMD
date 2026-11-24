@@ -847,9 +847,12 @@ class NodeHaloStrategy:
     step. ``refresh(state, floor)``: the topology's capacity floor.
     ``key``: changes when the buffers a captured step reads are replaced.
     The edge rule follows ``spec.message_flow`` (:data:`EDGE_RULES`).
+    ``positions_dtype`` and ``cell``: the geometry (``NodeHaloTopology``'s):
+    float64 positions, COPY and published cell for float64 geometry.
     """
 
-    def __init__(self, adapter, spec, partition, context, *, skin: float, device):
+    def __init__(self, adapter, spec, partition, context, *, skin: float, device,
+                 positions_dtype: torch.dtype = torch.float32, cell=None):
         from .node_halo_topology import NodeHaloTopology
 
         self.adapter, self.context = adapter, context
@@ -862,7 +865,7 @@ class NodeHaloStrategy:
         self.topology = NodeHaloTopology(partition, context, cutoff=topology_spec.cutoff, skin=skin,
                                          edges=EDGE_RULES[spec.message_flow], padding=adapter.padding_rule(),
                                          pad_species=spec.pad_species, max_neighbor_count=self.neighbor_count,
-                                         capacity_step=spec.capacity_step)
+                                         capacity_step=spec.capacity_step, positions_dtype=positions_dtype, cell=cell)
         self.derivative = ShardedEnergyDerivative(adapter, spec)
         self.inputs = self.layout = self._inputs_key = None
         self.n_owned = 0
@@ -999,16 +1002,23 @@ class NodeHaloReferenceTopology:
     to every row within the cutoff, at every image (a brute-force search: the
     reference of the CUDA builder, for small systems), and with
     ``edges="either"`` also those of the ghost rows to the owned ones.
+    ``dtype``: the rows' (the geometry's); ``cell``: the cell of the rows'
+    wrap and edge vectors (float64 geometry of a float32 model: the exact
+    float64 cell; default the partition's), the halo selected from the
+    coordinates in the partition's dtype.
     """
 
     def __init__(self, partition: DomainPartition, context, *, cutoff: float, dtype: torch.dtype,
-                 pad_species: int = 1, edges: str = "receiver"):
+                 pad_species: int = 1, edges: str = "receiver", cell=None):
         if not (math.isfinite(cutoff) and cutoff > 0):
             raise ValueError("cutoff must be finite and positive")
         if edges not in ("receiver", "either"):
             raise ValueError(f"edges must be 'receiver' or 'either', got {edges!r}")
         self.partition, self.context, self.cutoff, self.dtype = partition, context, float(cutoff), dtype
         self.pad_species, self.edges = int(pad_species), edges
+        # The wrap of the rows: the partition's, or one of the same grid over ``cell`` (its own cell in ``dtype``).
+        self.wrap = partition if cell is None else DomainPartition(torch.as_tensor(cell).detach().cpu().to(dtype),
+                                                                   partition.world_size, partition.domain_grid)
         self.layout = self.batch = self.owned_mask = None
         self.n_owned = 0
         self.stats = {}
@@ -1016,13 +1026,15 @@ class NodeHaloReferenceTopology:
     def refresh(self, state: AtomState) -> AtomState:
         """Migrate ``state`` and build this evaluation's rows, layout and edges (collective)."""
         context, partition = self.context, self.partition
-        state = migrate_atoms(state, partition, context).sorted()
+        # (Owners decided on the coordinates in the partition's dtype, as the halo.)
+        state = migrate_atoms(state, partition, context, owner_dtype=None if self.wrap is partition
+                              else partition.cell.dtype).sorted()
         world, rank = context.world_size, context.rank
         n = len(state.ids)
-        cell = partition.cell.to(self.dtype)
-        wrapped = partition.wrap_positions(state.positions.to(self.dtype))
+        cell = self.wrap.cell.to(self.dtype)
+        wrapped = self.wrap.wrap_positions(state.positions.to(self.dtype))
         if world > 1:
-            destinations = partition.halo_destinations(state.positions.to(self.dtype), self.cutoff)
+            destinations = partition.halo_destinations(state.positions.to(partition.cell.dtype), self.cutoff)
             destinations[rank] = destinations[rank][:0]
         else:
             destinations = [torch.zeros(0, dtype=torch.int64)]

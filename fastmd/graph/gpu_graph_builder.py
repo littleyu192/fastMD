@@ -18,6 +18,7 @@ from fastmd.graph.neighbor_list_backend import available as op_available
 from fastmd.graph.neighbor_list_backend import cell_list_for_fixed_cell
 from fastmd.graph.neighbor_list_backend import estimate_max_neighbors
 from fastmd.graph.neighbor_list_backend import neighbor_list as _nvidia_nl
+from fastmd.graph.neighbor_list_backend import warp_on_torch_stream
 
 try:
     import triton
@@ -159,9 +160,7 @@ def neighbor_list_nvidia(
             # The nvalchemiops API launches on Warp's current stream. Match
             # torch's stream so geometry/zero-fill writes precede the query
             # and the indexing below waits for its neighbour buffers.
-            import warp as wp
-
-            with wp.ScopedStream(wp.stream_from_torch(torch.cuda.current_stream(device))):
+            with warp_on_torch_stream(device):
                 _nvidia_nl(
                     positions=positions,
                     cutoff=cutoff + 1e-6,
@@ -626,7 +625,9 @@ def _build_line_graph(
         return line_graph, isolated_atom_counts, isolated_count
 
 
-def _extract_atoms(atoms_list, device: torch.device):
+def _extract_atoms(atoms_list, device: torch.device, wraps: list | None = None):
+    """The batched CUDA payload of ASE ``atoms_list``; ``wraps``: a list to which each structure's whole lattice
+    vectors of the wrap (``floor`` of the fractional coordinates the wrap reduces) are appended."""
     atomic_numbers = []
     frac_coords = []
     positions = []
@@ -640,7 +641,10 @@ def _extract_atoms(atoms_list, device: torch.device):
     for graph_idx, atoms in enumerate(atoms_list):
         cell = torch.from_numpy(atoms.get_cell().array.astype(np.float32)).to(device)
         pos = torch.from_numpy(atoms.get_positions().astype(np.float32)).to(device)
-        frac = small_matmul(pos, torch.linalg.inv(cell)) % 1.0
+        scaled = small_matmul(pos, torch.linalg.inv(cell))
+        frac = scaled % 1.0
+        if wraps is not None:
+            wraps.append(torch.floor(scaled))
         n_atoms = len(atoms)
         atomic_numbers.append(
             torch.tensor(atoms.get_atomic_numbers(), dtype=torch.int32, device=device)
@@ -938,6 +942,16 @@ def _build_graphs(
             return graphs, capacity
 
 
+def float64_wrapped_positions(given: Tensor, positions32: Tensor, inv_cell: Tensor, cell64: Tensor) -> Tensor:
+    """The float64 positions of a graph built from the float32 coordinates ``positions32`` (the float32 rounding of
+    ``given``) wrapped as ``small_matmul(positions32, inv_cell) % 1.0``: ``given`` in float64 minus the same whole
+    lattice vectors of the float64 cell ``cell64`` (row by row), so each edge's vector from them and the graph's
+    integer images is exact in float64."""
+    shift = torch.floor(small_matmul(positions32, inv_cell)).to(cell64.dtype)
+    return (given.to(device=cell64.device, dtype=cell64.dtype)
+            - (shift[:, 0:1] * cell64[0] + shift[:, 1:2] * cell64[1] + shift[:, 2:3] * cell64[2]))
+
+
 class TensorGraphBuilder:
     """Cached single-system tensor graph builder for fixed-cell GPU MD.
 
@@ -967,9 +981,8 @@ class TensorGraphBuilder:
         self.cell = cell.to(device=self.device, dtype=torch.float32)
         if positions_dtype not in (torch.float32, torch.float64):
             raise ValueError(f"positions_dtype must be torch.float32 or torch.float64, got {positions_dtype}")
-        if positions_dtype != torch.float32 and line_graph_cutoff is not None:
-            raise ValueError("float64 positions need the edges-only mode (line_graph_cutoff=None)")
-        # Edges only: the dtype of the batch's positions and cell (float64 from the caller's cell).
+        # The dtype of the batch's positions and cell (float64 from the caller's cell); with a line graph the
+        # graph's float64 positions and cell for a model the engine differentiates (``model_positions``).
         self.positions_dtype = positions_dtype
         self.model_cell = self.cell if positions_dtype == torch.float32 else cell.to(device=self.device,
                                                                                      dtype=positions_dtype)
@@ -1029,14 +1042,11 @@ class TensorGraphBuilder:
                 "compositions": self.compositions,
                 "cell_list": self.cell_list,
             }
+            if self.positions_dtype != torch.float32:
+                # The caller's positions minus the whole lattice vectors the float32 wrap removed.
+                payload["model_positions"] = float64_wrapped_positions(given, positions, self.inv_cell,
+                                                                       self.model_cell)
             if self.line_graph_cutoff is None:
-                if self.positions_dtype != torch.float32:
-                    # The caller's positions minus the whole lattice vectors the float32 wrap removed.
-                    shift = torch.floor(small_matmul(positions, self.inv_cell)).to(self.positions_dtype)
-                    cell = self.model_cell
-                    payload["model_positions"] = (
-                        given.to(device=self.device, dtype=self.positions_dtype)
-                        - (shift[:, 0:1] * cell[0] + shift[:, 1:2] * cell[1] + shift[:, 2:3] * cell[2]))
                 return self._build_edges(payload)
             graphs, self.max_neighbors = _build_graphs(
                 payload,
@@ -1046,6 +1056,8 @@ class TensorGraphBuilder:
                 check_isolated_atoms=self.check_isolated_atoms,
                 max_neighbors=self.max_neighbors,
             )
+            if self.positions_dtype != torch.float32:
+                set_model_geometry(graphs[0], payload["model_positions"], self.model_cell)
             return graphs[0]
 
     __call__ = build
@@ -1169,11 +1181,18 @@ def atoms_to_graph_gpu(
     check_isolated_atoms: bool = True,
     *,
     max_neighbors: int | None = None,
+    positions_dtype: torch.dtype = torch.float32,
 ) -> RadiusGraph | list[RadiusGraph]:
+    """MatRIS's graph of ASE ``atoms`` (or a list). ``positions_dtype=torch.float64`` (one structure): the graph
+    also carries float64 positions and cell (``set_model_geometry``) for a model the engine differentiates."""
     device = _cuda_device(device)
     batched = not hasattr(atoms, "get_positions")
+    if positions_dtype not in (torch.float32, torch.float64) or (positions_dtype != torch.float32 and batched):
+        raise ValueError(f"positions_dtype must be torch.float32, or torch.float64 for one structure; got "
+                         f"{positions_dtype}")
     atoms_list = list(atoms) if batched else [atoms]
-    payload = _extract_atoms(atoms_list, device)
+    wraps = [] if positions_dtype != torch.float32 else None
+    payload = _extract_atoms(atoms_list, device, wraps)
 
     graphs, _ = _build_graphs(
         payload,
@@ -1183,4 +1202,19 @@ def atoms_to_graph_gpu(
         check_isolated_atoms=check_isolated_atoms,
         max_neighbors=max_neighbors,
     )
+    if wraps is not None:
+        # The caller's float64 positions minus the whole lattice vectors the graph's float32 wrap removed.
+        cell64 = torch.from_numpy(atoms.get_cell().array.astype(np.float64)).to(device)
+        shift = wraps[0].to(torch.float64)
+        given = torch.from_numpy(atoms.get_positions().astype(np.float64)).to(device)
+        set_model_geometry(graphs[0], given - (shift[:, 0:1] * cell64[0] + shift[:, 1:2] * cell64[1]
+                                               + shift[:, 2:3] * cell64[2]), cell64)
     return graphs if batched else graphs[0]
+
+
+def set_model_geometry(graph: RadiusGraph, positions: Tensor, cell: Tensor) -> None:
+    """Attach float64 wrapped ``positions`` (``[atoms, 3]``) and ``cell`` to MatRIS's ``graph`` for a model the
+    engine differentiates on float64 geometry: :func:`~fastmd.graph.fixed_capacity_builder.line_graph_batch` and the
+    model-graph runner's line-graph buckets read them in place of its float32 ``frac @ lattice``."""
+    graph.model_positions = positions
+    graph.model_cell = cell

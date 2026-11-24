@@ -135,10 +135,11 @@ class ExtxyzTrajectory:
 class RestartData:
     """One restart file as host (numpy) arrays, rows in ID order.
 
-    ``ids``/``numbers`` int64; ``masses``, ``positions`` (float64 for nvt_nhc,
-    else the float32 values) and ``momenta`` float64; ``forces``, ``energy``
-    and ``reference_energy`` the cached evaluation of that state (forces
-    float32; a continuation does not re-evaluate); ``step`` the step count;
+    ``ids``/``numbers`` int64; ``masses``, ``positions`` (float64 for a float64
+    state: nvt_nhc, or float64 geometry; else the float32 values) and
+    ``momenta`` float64; ``forces``, ``energy`` and ``reference_energy`` the
+    cached evaluation of that state (forces float32, float64 on float64
+    geometry; a continuation does not re-evaluate); ``step`` the step count;
     ``parameters`` the driver's (see :func:`resume_mismatch`);
     ``temperature_K`` the thermostat target (None for nve); ``nhc_state`` the
     NHC ``state_dict`` (nvt_nhc, else None); ``offsets`` the output files'
@@ -162,6 +163,11 @@ class RestartData:
     nhc_state: dict | None
     offsets: dict
     engine: str
+
+    @property
+    def geometry_dtype(self) -> str:
+        """The geometry the file was written on, "float64" or "float32": its cached forces' dtype."""
+        return "float64" if np.asarray(self.forces).dtype == np.float64 else "float32"
 
 
 def read_restart(path) -> RestartData:
@@ -221,12 +227,15 @@ class MDOutputs:
     ``source`` is the driver. It provides ``comm`` (``rank``,
     ``gather_by_id``), ``nsteps``, ``parameters`` (stored in the restart file;
     "ensemble" and "tchain" select the frame extras), ``cell`` (the restart
-    file's and frames' cell), ``device`` (the logger's), ``md_fields()``,
+    file's and frames' cell; ``restart_cell`` instead where the driver has one:
+    the model's cell, float64 on float64 geometry), ``device`` (the logger's), ``md_fields()``,
     ``thermodynamics()`` (collective), ``thermostat_state()`` and
     ``collective_check(error)`` (every rank raises any rank's error).
     ``md_fields()`` returns views of the owned rows: "ids", "numbers",
-    "positions" (the integrator's, float64 for nvt_nhc), "momenta", "masses"
-    and the cached "forces", plus the cached "energy" and "reference_energy".
+    "positions" (the integrator's, float64 for a float64 state), "momenta",
+    "masses" and the cached "forces", plus the cached "energy" and
+    "reference_energy". The EXTXYZ frames keep the dtypes of the positions and
+    of the forces (float64 on float64 geometry) and the model's cell.
 
     Thermo line every ``thermo_interval`` steps, EXTXYZ frame every
     ``xyz_interval``, restart file every ``restart_interval`` (0 disables each;
@@ -290,7 +299,8 @@ class MDOutputs:
                         with open(self._tracked[name], "r+b") as stream:
                             stream.truncate(size)
                 if xyz_interval:
-                    self.logger = self._frame_logger(frame, fields["positions"].dtype, offsets is not None)
+                    self.logger = self._frame_logger(frame, fields["positions"].dtype, fields["forces"].dtype,
+                                                     offsets is not None)
             except (OSError, *_ERRORS) as exc:
                 error = str(exc)
         source.collective_check(error)
@@ -305,13 +315,17 @@ class MDOutputs:
                 self.close_quietly()  # the constructor raises: nobody else closes the writer
                 raise
 
-    def _frame_logger(self, frame: dict, state_dtype, append: bool):
-        """Root's EXTXYZ frame logger (the template from the gathered numbers and masses)."""
+    def _cell(self):
+        """The model cell for frames and restarts, preserving float64 geometry where present."""
+        return getattr(self.source, "restart_cell", self.source.cell)
+
+    def _frame_logger(self, frame: dict, state_dtype, value_dtype, append: bool):
+        """Root's frame logger; preserve the state's positions and the model's force and cell dtype."""
         from ase import Atoms
         from fastmd.execution.gpu_logging import AsyncGPUMDLogger
         source = self.source
         template = Atoms(numbers=frame["numbers"].cpu().numpy(),
-                         cell=source.cell.detach().cpu().double().numpy(), pbc=self._pbc())
+                         cell=self._cell().detach().cpu().double().numpy(), pbc=self._pbc())
         template.set_masses(frame["masses"].double().cpu().numpy())
         extras = {"step": 1, "time_fs": 1}
         ensemble = source.parameters["ensemble"]
@@ -323,7 +337,7 @@ class MDOutputs:
         trajectory = ExtxyzTrajectory(self._tracked[TRAJECTORY_FILE], append=append)
         try:
             return AsyncGPUMDLogger(template, source.device, trajectory=trajectory, state_dtype=state_dtype,
-                                    extras=extras)
+                                    value_dtype=value_dtype, extras=extras)
         except BaseException:
             trajectory.close()
             raise
@@ -388,7 +402,7 @@ class MDOutputs:
         try:
             self.logger.enqueue(
                 step=thermo["step"], time_ps=thermo["time_fs"] / 1000.0, positions=frame["positions"],
-                momenta=frame["momenta"], forces=frame["forces"], cell=self.source.cell,
+                momenta=frame["momenta"], forces=frame["forces"], cell=self._cell(),
                 potential_energy=scalar(thermo["potential_energy"]),
                 kinetic_energy=scalar(thermo["kinetic_energy"]), temperature=scalar(thermo["temperature"]),
                 extras=extras)
@@ -429,7 +443,8 @@ class MDOutputs:
                 masses=host(frame["masses"], torch.float64), positions=host(frame["positions"], torch.float64),
                 momenta=host(frame["momenta"], torch.float64), forces=host(frame["forces"]),
                 energy=host(fields["energy"]), reference_energy=host(fields["reference_energy"]),
-                cell=host(self.source.cell), pbc=self._pbc(), step=self.source.nsteps,
+                cell=host(self._cell()), pbc=self._pbc(),
+                step=self.source.nsteps,
                 parameters=self.source.parameters, temperature_K=thermostat.get("temperature_K"),
                 nhc_state=thermostat if self.source.parameters["ensemble"] == "nvt_nhc" else None,
                 offsets=offsets, engine=self.engine))

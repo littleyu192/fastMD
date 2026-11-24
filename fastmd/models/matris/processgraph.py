@@ -23,7 +23,8 @@ def process_graphs(graphs: Sequence[RadiusGraph],
             atoms_per_graph: List of atom counts per graph
             directed2undirected: Mapping from directed to undirected edges [total_direct_edges]
             undirected2directed: Mapping from undirected to directed edges [total_undirected_edges]
-            volumes: Volume of each graph [num_graphs, 1, 1]
+            volumes: Volume of each graph [num_graphs, 1, 1], the triple product of its lattice
+                vectors (negative for a left-handed basis: the stress readout divides by its magnitude)
             lattice: Lattice vectors [num_graphs*3, 3]
             atom_active_mask: Whether each atom has at least one graph edge
                 [total_atoms]
@@ -345,8 +346,9 @@ def _system_geometry(graph: RadiusGraph, systems, target_index: torch.Tensor, co
     (``systems.cells``; without them every system has the graph's lattice): the Cartesian coordinates
     (``frac @ cell`` row by row, the single-system arithmetic of each row; strained by its system's strain), the
     strains (``[count, 3, 3]`` leaf, or None), each system's cell (strained) as ``[count * 3, 3]``, its volume
-    ``[count, 1, 1]`` and each edge's image shift in the cell of its centre atom's system. Sink rows past the
-    systems take the first system's cell (they sit at the origin)."""
+    (the triple product of its unstrained cell, as ``volumes`` of ``process_graphs``) ``[count, 1, 1]`` and each
+    edge's image shift in the cell of its centre atom's system. Sink rows past the systems take the first system's
+    cell (they sit at the origin)."""
     count = systems.count
     lattice = graph.lattice
     cells = (lattice.expand(count, 3, 3) if systems.cells is None else systems.cells.to(lattice.dtype))

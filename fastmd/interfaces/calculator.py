@@ -16,7 +16,7 @@ from fastmd.adapters.negotiate import can_capture, negotiated
 from fastmd.config import ConfigurationWarning, InferenceConfig
 from fastmd.engine.entry_config import (apply_checkpoint, configure_entrypoint, config_summary, current_adapter,
                                    release_adapter, scoped_call, use_adapter)
-from fastmd.engine.energy_derivative import engine_derivative
+from fastmd.engine.energy_derivative import default_geometry, engine_derivative, geometry_dtype
 from fastmd.engine import saved_recompute
 
 from pymatgen.io.ase import AseAtomsAdaptor
@@ -127,6 +127,8 @@ class MLIPCalculator(Calculator):
         # The model's declared capacity step where the configuration keeps the default one.
         from fastmd.engine.capacity_policy import declared_capacity
         self._inference_config = declared_capacity(self._adapter, self._inference_config)
+        # An unset geometry_dtype: float64 geometry for a float32 model that declares the input.
+        self._inference_config = default_geometry(self._adapter, self._inference_config, "calculator")
         self.model = self._adapter.module
         if self.model is model or self._adapter is model:  # supplied, not loaded
             if model_path is not None:
@@ -151,8 +153,7 @@ class MLIPCalculator(Calculator):
         # None: the model differentiates itself (adapter.evaluate); else the engine-owned derivative
         # (stress in eV/A^3; a float64 model reads float64 graph batches).
         self._derivative = engine_derivative(self._adapter)
-        from fastmd.engine.energy_derivative import geometry_dtype
-        self._float64 = self._derivative is not None and geometry_dtype(self.adapter) == torch.float64
+        self._float64 = geometry_dtype(self.adapter, self._inference_config) == torch.float64
         # A model with a line graph that the engine differentiates reads the GPU graph builder's graphs
         # as graph batches with positions (line_graph_batch), not MatRIS's converter's.
         self._line_graph_batches = self._derivative is not None and not self._edges_only
@@ -229,7 +230,10 @@ class MLIPCalculator(Calculator):
         # Step C7: skin-epoch topology reuse (InferenceConfig.topology_reuse).
         # The runner of the current system is created at its first eligible
         # call; ``_skin_off_reason`` records why a call used the per-call
-        # rebuild instead (None when it did not).
+        # rebuild instead (None when it did not). On float64 geometry the
+        # runner takes the float64 coordinates and returns float64 forces and
+        # stress, as the rebuild path does (it reads the configuration's
+        # geometry dtype).
         self._skin = None
         self._skin_cell = None      # cell of the last periodic call
         self._skin_n = None         # its atom count
@@ -314,7 +318,7 @@ class MLIPCalculator(Calculator):
     def _cpu_geometry_dtype(self):
         """Geometry precision may exceed neural-weight precision (for example NequIP)."""
         from fastmd.engine.energy_derivative import geometry_dtype
-        return geometry_dtype(self.adapter)
+        return geometry_dtype(self.adapter, self._inference_config)
 
     def _skin_static_reason(self, enable_compile) -> str | None:
         """Why topology reuse never applies to this calculator (None: it may)."""
@@ -333,8 +337,6 @@ class MLIPCalculator(Calculator):
             return "no exact cutoff declared (a stale or kNN list is never reused)"
         if not self._gpu_graph:
             return "no GPU graph converter"
-        if self._float64:
-            return "a float64 model (the skin runner reads float32 coordinates)"
         parameter = next(iter(self.model.parameters()), None)
         if not isinstance(parameter, torch.Tensor) or parameter.device.type != "cuda":
             return "the model is not on a CUDA device"
@@ -457,7 +459,8 @@ class MLIPCalculator(Calculator):
         return self._skin
 
     def _skin_predict(self, skin, atoms):
-        """The skin path's prediction, or None after a fallback to the rebuild."""
+        """The skin path's prediction (float64 geometry: float64 forces and stress, as the rebuild path's), or
+        None after a fallback to the rebuild."""
         from fastmd.execution.skin_topology import SkinTopologyUnavailable
         try:
             out = skin.evaluate(atoms.get_positions(), atoms=atoms)
@@ -552,7 +555,8 @@ class MLIPCalculator(Calculator):
             from fastmd.graph.gpu_graph_builder import atoms_to_graph_gpu
             topology = self.adapter.topology_spec()
             return atoms_to_graph_gpu(atoms, topology.cutoff, topology.triplet_cutoff, self.device,
-                                      check_isolated_atoms=check_isolated_atoms)
+                                      check_isolated_atoms=check_isolated_atoms,
+                                      **({"positions_dtype": torch.float64} if self._float64 else {}))
         return self.model.graph_converter(
             structure, atoms=atoms, check_isolated_atoms=check_isolated_atoms,
         ).to(self.device)
@@ -702,7 +706,8 @@ class MLIPCalculator(Calculator):
                     self.adapter, cell=batch.cell, atomic_numbers=batch.species[:n],
                     pbc=torch.tensor(pbc, device=device), positions=batch.positions[:n], n_real=n,
                     device=device, task=self.task, n_dummy=config.capacity.n_dummy,
-                    candidate_skin=config.capacity.candidate_skin if self._skin_static is None else 0.0))
+                    candidate_skin=config.capacity.candidate_skin if self._skin_static is None else 0.0,
+                    config=config))
                 del batch
         elif self._line_graph_batches and _fixed_builder_available and can_capture(self.adapter):
             with self._inference_config.scope():
@@ -716,7 +721,8 @@ class MLIPCalculator(Calculator):
                     self.adapter, cell=batch.cell, atomic_numbers=batch.species, pbc=torch.tensor(pbc, device=device),
                     positions=batch.positions, n_real=batch.n_real, device=device, task=self.task,
                     n_dummy=config.capacity.n_dummy,
-                    candidate_skin=config.capacity.candidate_skin if self._skin_static is None else 0.0))
+                    candidate_skin=config.capacity.candidate_skin if self._skin_static is None else 0.0,
+                    config=config))
                 del batch
         plan = renegotiate_execution(plan, self.adapter, config, entry="calculator", device=device, pbc=pbc,
                                      capacity=capacity, memory=memory)

@@ -55,19 +55,25 @@ HEADROOM_FLOOR = 16 << 20
 _MIB = 1 << 20
 
 
-def exchange_bytes(points, *, rows: int, ghost_rows: int, send_rows: int, owned_slots: int, itemsize: int) -> int:
+def exchange_bytes(points, *, rows: int, ghost_rows: int, send_rows: int, owned_slots: int, itemsize: int,
+                   coordinate_itemsize: int | None = None) -> int:
     """The buffers of one step's exchanges beyond the model's own: per declared point the rows sent and received,
-    the concatenated input and the owners' sums with their gradients, and the coordinates' COPY."""
+    the concatenated input and the owners' sums with their gradients, and the coordinates' COPY (its items of
+    ``coordinate_itemsize`` bytes, the geometry's: default ``itemsize``)."""
     per_row = sum(point.width for point in points)
     rows_moved = 2 * send_rows + 2 * ghost_rows + 2 * rows + owned_slots + 1
-    return int(itemsize * (per_row * rows_moved + 6 * (send_rows + ghost_rows + rows)))
+    coordinates = 6 * (send_rows + ghost_rows + rows)
+    if coordinate_itemsize is None or coordinate_itemsize == itemsize:
+        return int(itemsize * (per_row * rows_moved + coordinates))
+    return int(itemsize * per_row * rows_moved + coordinate_itemsize * coordinates)
 
 
 def synthetic_batch(adapter, *, rows: int, edges: int, centres: int, cell: torch.Tensor, species: int,
-                    dtype: torch.dtype, device):
+                    dtype: torch.dtype, device, geometry_dtype: torch.dtype | None = None):
     """A graph batch of ``rows`` rows and ``edges`` edges (centres among the first ``centres`` rows, neighbours any
     other row, image 0) at random coordinates in a cube of half the cutoff's edge, so that every edge is shorter than
-    the cutoff: the shapes of a rank's batch, for a memory probe."""
+    the cutoff: the shapes of a rank's batch, for a memory probe. Its positions and cell are in ``geometry_dtype``
+    (the run's geometry: default ``dtype``)."""
     from fastmd.adapters.protocol import GraphBatch
 
     rows, centres = max(2, int(rows)), max(1, min(int(centres), int(rows)))
@@ -76,12 +82,13 @@ def synthetic_batch(adapter, *, rows: int, edges: int, centres: int, cell: torch
     cartesian = torch.rand((rows, 3), generator=generator, dtype=torch.float64) * (0.5 * cutoff)
     cell = cell.to(torch.float64).cpu()
     fractions = cartesian @ torch.linalg.inv(cell)
-    positions = cartesian.to(device=device, dtype=dtype)
+    geometry_dtype = dtype if geometry_dtype is None else geometry_dtype
+    positions = cartesian.to(device=device, dtype=geometry_dtype)
     index = torch.arange(edges, dtype=torch.int64)
     centre = index % centres
     neighbour = (centre + 1 + torch.div(index, centres, rounding_mode="floor") % (rows - 1)) % rows
     return GraphBatch(positions=positions, frac_coords=fractions.to(device=device, dtype=dtype),
-                      cell=cell.to(device=device, dtype=dtype),
+                      cell=cell.to(device=device, dtype=geometry_dtype),
                       species=torch.full((rows,), int(species), dtype=torch.int32, device=device), n_real=rows,
                       edge_index=torch.stack((centre, neighbour), dim=1).to(device=device, dtype=torch.int32),
                       edge_image=torch.zeros((edges, 3), dtype=torch.float32, device=device), n_edges=None,
@@ -173,9 +180,11 @@ class NodeHaloMemoryPredictor:
     strict = True
 
     def __init__(self, points: list[tuple[str, int, int, int]], *, model: str, exchange_points, itemsize: int,
-                 failure: str | None = None, owned_share: float | None = None):
+                 failure: str | None = None, owned_share: float | None = None, coordinate_itemsize: int | None = None):
         self.points = list(points)  # (kind, edges, rows, peak bytes)
         self.model, self.exchange_points, self.itemsize = model, tuple(exchange_points), int(itemsize)
+        # the bytes of a coordinate (the geometry's dtype; None: the model's)
+        self.coordinate_itemsize = coordinate_itemsize
         self.failure = failure
         # the probe's owned slots per row where it ran a declared ghost-row trimming (else None: every row's cost
         # is the same at any split)
@@ -185,12 +194,14 @@ class NodeHaloMemoryPredictor:
 
     @classmethod
     def measure(cls, adapter, spec, extents: dict, *, cell: torch.Tensor, device, dtype: torch.dtype,
-                kinds=("eager", "capture"), stream=None, single: bool = False) -> "NodeHaloMemoryPredictor":
+                kinds=("eager", "capture"), stream=None, single: bool = False,
+                geometry_dtype: torch.dtype | None = None) -> "NodeHaloMemoryPredictor":
         """Probe ``adapter`` on this rank's device at the 2 x 2 grid of a quarter and a half of ``extents``' edges
         and rows (``kinds``: "eager" and/or "capture"; ``stream``: the side stream of the warm-ups; ``single``: one
         CUDA rank, which runs the model's energy tap, not its own layer loop), after one unmeasured run at the
-        smallest point (one-time state then exists before the measurement). Local: no collective; a probe that fails
-        gives a predictor that predicts nothing."""
+        smallest point (one-time state then exists before the measurement), with positions and cell in
+        ``geometry_dtype`` (the run's geometry: default ``dtype``). Local: no collective; a probe that fails gives a
+        predictor that predicts nothing."""
         from .node_halo import ShardedEnergyDerivative
 
         name = getattr(adapter, "name", type(adapter).__name__)
@@ -207,7 +218,8 @@ class NodeHaloMemoryPredictor:
             for index, (probe_edges, probe_rows) in enumerate([grid[0]] + grid):
                 probe_centres = max(1, centres * probe_rows // max(rows, 1))
                 batch = synthetic_batch(adapter, rows=probe_rows, edges=probe_edges, centres=probe_centres, cell=cell,
-                                        species=spec.pad_species, dtype=dtype, device=device)
+                                        species=spec.pad_species, dtype=dtype, device=device,
+                                        geometry_dtype=geometry_dtype)
                 eager, captured = _peaks(adapter, adapter.prepare(batch), batch, device, "capture" in kinds, stream,
                                          derivative, probe_centres)
                 if index:  # (the first run is the unmeasured warm-up)
@@ -225,7 +237,8 @@ class NodeHaloMemoryPredictor:
             failure = failure or f"memory probe failed: {type(error).__name__}: {str(error)[:200]}"
         return cls(points, model=name, exchange_points=spec.exchange_points,
                    itemsize=torch.finfo(dtype).bits // 8, failure=failure,
-                   owned_share=centres / rows if trimmed else None)
+                   owned_share=centres / rows if trimmed else None,
+                   coordinate_itemsize=None if geometry_dtype is None else torch.finfo(geometry_dtype).bits // 8)
 
     def _fit(self, kind: str) -> dict:
         import numpy as np
@@ -282,7 +295,8 @@ class NodeHaloMemoryPredictor:
         headroom = max(2 * fit["max_residual"], HEADROOM_FLOOR)
         exchange = exchange_bytes(self.exchange_points, rows=extents["rows"], ghost_rows=extents["ghost_rows"],
                                   send_rows=extents["send_rows"], owned_slots=extents["owned_slots"],
-                                  itemsize=self.itemsize) if extents["ghost_rows"] else 0
+                                  itemsize=self.itemsize,
+                                  coordinate_itemsize=self.coordinate_itemsize) if extents["ghost_rows"] else 0
         return int(math.ceil(max(model, 0.0) + headroom + exchange))
 
     def predictions(self, modes, extents: dict) -> dict:

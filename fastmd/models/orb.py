@@ -581,6 +581,10 @@ class ORBAdapter:
             vectors = torch.where(keep[:, None], vectors, far)
             receivers = torch.where(keep, receivers, senders)
             image = torch.where(keep[:, None], image, 0.0)
+        dtype = inputs.one_hot.dtype
+        if vectors.dtype != dtype:
+            # Select nearest edges in geometry precision, then cast at the model input.
+            vectors, positions, image, cells = vectors.to(dtype), positions.to(dtype), image.to(dtype), cells.to(dtype)
         return AtomGraphs(
             senders=senders, receivers=receivers, n_node=n_node, n_edge=n_edge,
             node_features={"positions": positions, "atomic_numbers": numbers,
@@ -653,7 +657,6 @@ class ORBAdapter:
 
 
 
-
     # --- capability negotiation -----------------------------------------------
 
     @property
@@ -719,6 +722,11 @@ class ORBAdapter:
         """True: :meth:`system_energy` takes the engine's per-edge shifts (its edge vectors read ``positions`` and the
         shifts only; the cell it hands ORB's graph is not part of the energy), so different systems with cells of
         their own run in the slots of one union."""
+        return True
+
+    def float64_geometry_input(self) -> bool:
+        """True: :meth:`system_energy` takes float64 positions, cell and shifts for a float32 module (each edge's
+        vector in float64, cast at the module's input; :class:`~fastmd.adapters.protocol.Float64GeometryInput`)."""
         return True
 
     def upstream_patches(self) -> list:

@@ -8,7 +8,12 @@ those rows in one ``FixedCapacityGraphBuilder`` with edges-only ghost rows
 (``GhostSpec.edges``): each rank's builder decides its edges with the
 single-system arithmetic on the single-system coordinates, so the union of
 the ranks' edges is the single-system edge set and every row holds the bits
-a single-system build gives its atom. No model runs here.
+a single-system build gives its atom. On float64 geometry the rows hold the
+float64 coordinates: the search, wraps and edge decision read their float32
+rounding (the arithmetic of a single-system build of more than 4,096 atoms;
+the one-kernel float64 prologue of smaller ones may round a wrapped row
+differently in the last bit), and every row's published coordinates are its
+float64 ones minus the same whole lattice vectors. No model runs here.
 
 ``refresh(state)`` (collective, outside any CUDA graph; device work and a few
 small host reads, no per-atom host work): migrate the atoms to their spatial
@@ -78,7 +83,11 @@ class NodeHaloTopology:
     exceeds them; they never shrink. ``capacity_step`` (a model's
     ``CapacityStep``, or None): the edges' tiers (:func:`edge_tier`) in place of
     the headroom. ``n_total``: the atoms of the whole system at the last
-    refresh.
+    refresh. ``positions_dtype`` (float32 or float64) and ``cell``: the dtype of
+    the rows' coordinates (the state's positions, the coordinate COPY) and of
+    the builder's published positions and cell; float64 geometry keeps the
+    float64 ``cell`` (default: the partition's), while the halo selection and
+    the neighbour search read the float32 coordinates.
 
     Rows: owned slots ``[0, n_cap)`` (the migrated state's atoms, in its ID
     order, then unused slots), then one block of ghost slots per sending
@@ -89,7 +98,7 @@ class NodeHaloTopology:
     def __init__(self, partition: DomainPartition, context, *, cutoff: float, skin: float,
                  edges: str = "receiver", padding=None, pad_species: int = 1, n_dummy: int = 64,
                  headroom: float = TIER_HEADROOM, align: int = TIER_ALIGN, max_neighbor_count=None,
-                 capacity_step=None):
+                 capacity_step=None, positions_dtype: torch.dtype = torch.float32, cell=None):
         if edges not in ("receiver", "either"):
             raise ValueError(f"edges must be 'receiver' or 'either', got {edges!r}")
         if not (math.isfinite(cutoff) and cutoff > 0 and math.isfinite(skin) and skin > 0):
@@ -98,7 +107,16 @@ class NodeHaloTopology:
             raise ValueError("partition and process-group world sizes differ")
         if not 0 <= headroom or align < 1:
             raise ValueError("headroom must be nonnegative and align positive")
+        if positions_dtype not in (torch.float32, torch.float64):
+            raise ValueError(f"positions_dtype must be torch.float32 or torch.float64, got {positions_dtype}")
         self.partition, self.context = partition, context
+        # The rows' coordinates (the owned atoms' and their COPY into the ghost rows) and the builder's published
+        # positions and cell: float64 geometry keeps the caller's float64 coordinates and its float64 ``cell``
+        # (default: the partition's), the halo selection and the builder's neighbour search staying float32.
+        self.positions_dtype = positions_dtype
+        self.cell = (partition.cell if cell is None else torch.as_tensor(cell)).detach().to("cpu", positions_dtype)
+        if not torch.equal(self.cell.to(torch.float32), partition.cell.to("cpu", torch.float32)):
+            raise ValueError("node-halo topology: the cell does not round to the partition's float32 cell")
         self.cutoff, self.skin, self.edges = float(cutoff), float(skin), edges
         self.halo = self.cutoff + self.skin
         self.padding, self.pad_species, self.n_dummy = padding, int(pad_species), int(n_dummy)
@@ -130,21 +148,25 @@ class NodeHaloTopology:
         context, partition = self.context, self.partition
         error = None
         if not (isinstance(state.positions, torch.Tensor) and state.positions.is_cuda
-                and state.positions.dtype == torch.float32):
-            error = "node-halo topology: the positions must be a float32 CUDA tensor"
+                and state.positions.dtype == self.positions_dtype):
+            error = (f"node-halo topology: the positions must be a {str(self.positions_dtype).removeprefix('torch.')} "
+                     "CUDA tensor")
         if hasattr(context, "collective_check"):
             context.collective_check(error)
         elif error is not None:
             raise ValueError(error)
-        state = migrate_atoms(state, partition, context)
+        state = migrate_atoms(state, partition, context,
+                              owner_dtype=None if self.positions_dtype == torch.float32 else torch.float32)
         migrated = time.perf_counter()
         positions = state.positions.detach()
         device = positions.device
         world, rank = context.world_size, context.rank
         n = len(state.ids)
-        # Every owned atom's halo peers (distance to their domain boxes), on the device.
+        # Every owned atom's halo peers (its exact distance to their domains, boxes in fractional coordinates and so
+        # parallelepipeds of a skew cell, over the periodic images), on the device; for float64 geometry from the
+        # float32 coordinates the builder's neighbour search reads (the same decisions and margin).
         if world > 1:
-            mask = partition.halo_mask(positions, self.halo, rank)
+            mask = partition.halo_mask(positions.to(torch.float32), self.halo, rank)
         else:
             mask = torch.zeros((1, n), dtype=torch.bool, device=device)
         counts = torch.cat((torch.tensor([n], dtype=torch.int64, device=device), mask.sum(1)))
@@ -186,10 +208,10 @@ class NodeHaloTopology:
             # New capacities (the same event on every rank): new buffers.
             self._layout = layout
             self.layouts += 1
-            self._rows = torch.zeros((rows, 3), dtype=torch.float32, device=device)
+            self._rows = torch.zeros((rows, 3), dtype=self.positions_dtype, device=device)
             self._send_index = torch.zeros(sum(send_splits), dtype=torch.int64, device=device)
             self._reverse_index = torch.zeros(sum(send_splits), dtype=torch.int64, device=device)
-            self._send = torch.zeros((sum(send_splits), 3), dtype=torch.float32, device=device)
+            self._send = torch.zeros((sum(send_splits), 3), dtype=self.positions_dtype, device=device)
         self._builder_for(device)
         recv_offsets = [sum(recv_splits[:s]) for s in range(world)]
         ghost_slots = torch.cat([torch.arange(o, o + c, device=device) for o, c in zip(recv_offsets, recv_counts)]
@@ -242,7 +264,7 @@ class NodeHaloTopology:
         if self._builder_key != key:
             self.builder = None
             self.builder = FixedCapacityGraphBuilder(
-                cell=self.partition.cell.to(device=device, dtype=torch.float32),
+                **self._builder_cell(device),
                 atomic_numbers=torch.full((rows,), self.pad_species, dtype=torch.int64, device=device),
                 u_capacity=max(1, self.u_capacity), t_capacity=0, atom_graph_cutoff=self.cutoff,
                 line_graph_cutoff=None, candidate_cutoff=self.halo, n_dummy=self.n_dummy, device=device,
@@ -251,6 +273,13 @@ class NodeHaloTopology:
             self._builder_key = key
             self.builders += 1
         return self.builder
+
+    def _builder_cell(self, device) -> dict:
+        """The builder's cell options: the partition's float32 cell, or for float64 geometry the float64 cell (its
+        float32 rounding, the partition's, for the search) with float64 published positions."""
+        if self.positions_dtype == torch.float32:
+            return {"cell": self.partition.cell.to(device=device, dtype=torch.float32)}
+        return {"cell": self.cell.to(device=device), "positions_dtype": self.positions_dtype}
 
     def _install(self, numbers, atom_ids, active, owned, floor=None) -> int:
         """The epoch's rows in the builder, its candidates, and the agreed edge count at the refresh positions (at
@@ -305,14 +334,17 @@ class NodeHaloTopology:
         """Write the owned ``positions`` (``[n_owned, 3]``, the refreshed state's order) into the owned rows."""
         if self.builder is None:
             raise RuntimeError("node-halo topology: refresh before the first step")
-        if positions.shape != (self.n_owned, 3) or positions.dtype != torch.float32 \
+        if positions.shape != (self.n_owned, 3) or positions.dtype != self._rows.dtype \
                 or positions.device != self._rows.device:
             raise ValueError("node-halo topology: the positions do not match the refreshed owned atoms")
         self._rows[:self.n_owned].copy_(positions)
 
     def load_owned_slots(self, positions: torch.Tensor) -> None:
-        """Write ``positions`` (``[n_cap, 3]`` float32: the owned atoms in the refreshed order, then zero rows, as
-        the in-graph MD step's integrator holds them) into the owned slots. Device only, fixed shapes."""
+        """Write ``positions`` (``[n_cap, 3]`` in the rows' dtype: the owned atoms in the refreshed order, then zero
+        rows, as the in-graph MD step's integrator holds them) into the owned slots. Device only, fixed shapes."""
+        if positions.dtype != self._rows.dtype or positions.shape != (self.n_cap, 3):
+            raise ValueError(f"node-halo topology: the owned slots take [{self.n_cap}, 3] {self._rows.dtype} rows, got "
+                             f"{tuple(positions.shape)} {positions.dtype}")
         self._rows[:self.n_cap].copy_(positions)
 
     def demand(self) -> dict:

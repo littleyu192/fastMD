@@ -32,9 +32,10 @@ CUDA rank, the CPU reference topology on a CPU),
 padding (the edge rule and atom slots of rank-uniform capacities), the kernels (each rank's choice, then the first
 option every rank installs: ``agreed_kernels``), the sharded derivative (forces and the strain-leaf stress), the
 execution (model_graph -> eager; under auto the evaluator admits model_graph where every rank's predicted peak
-fits) and the precision; the record of P>1 holds a ``distributed`` block and a fingerprint that adds the shard's
-declaration and source pins (no block at P=1, where the fingerprint follows the other entry points' rule; their
-records and fingerprints are unchanged).
+fits), the precision and, where requested or defaulted, the geometry (as the other entry points: float64 geometry
+adds the ``geometry`` decision and its dtype to the fingerprint); the record of P>1 holds a ``distributed`` block and
+a fingerprint that adds the shard's declaration and source pins (no block at P=1, where the fingerprint follows the
+other entry points' rule; their records and fingerprints are unchanged).
 
 A capability the adapter lacks resolves to the conservative option with a reason, never to an error.
 The errors (:class:`NegotiationError`): P>1 for an adapter without a layer exchange,
@@ -340,7 +341,7 @@ def multi_gpu_decision(adapter, world_size: int, shard=None, skin: float | None 
 
 
 def plan_fingerprint(adapter, *, profile: str, kernels: Mapping[str, str], model_dtype: str,
-                     shard: Mapping[str, Any] | None = None) -> str:
+                     shard: Mapping[str, Any] | None = None, geometry_dtype: str | None = None) -> str:
     """sha256 over the model's weights (``state_dict``: names, dtypes, shapes, bytes), its name and
     upstream package, its static system inputs (tensors by their bytes), the profile, the kernel
     choices and the applied upstream patch records (names and source hashes); at P>1 also ``shard``
@@ -356,6 +357,8 @@ def plan_fingerprint(adapter, *, profile: str, kernels: Mapping[str, str], model
         header["patches"] = pins
     if shard is not None:  # P>1 only
         header["shard"] = dict(shard)
+    if geometry_dtype is not None and geometry_dtype != model_dtype:
+        header["geometry_dtype"] = geometry_dtype
     digest.update(json.dumps(header, sort_keys=True, default=str).encode())
 
     def update(name, value):
@@ -501,13 +504,16 @@ def negotiate(adapter, config, *, entry: str = "gpu_md", device=None, pbc=(True,
     if runtime_planned(adapter):
         raise TypeError("MatRIS is not negotiated: use entry_plan_record(entry point) or dry_run()")
     if config is None or isinstance(config, InferenceConfig):
+        from ..engine.energy_derivative import default_geometry
         config = resolve_config(config, default_execution="auto" if entry in ("gpu_md", "calculator", DISTRIBUTED)
                                 else "eager", default_isolated_atoms="error" if entry == "torchsim" else "reference")
+        config = default_geometry(adapter, config, entry, world_size)
     if not isinstance(config, ResolvedConfig):
         raise TypeError("config must be an InferenceConfig, a ResolvedConfig or None")
     check_profile(adapter, config.optimization_profile)
     if entry == DISTRIBUTED and (shard is None or skin is None):
         raise TypeError("the distributed entry point negotiates a declared shard: pass shard and skin")
+    geometry = geometry_decision(adapter, config, entry)  # reject before installing kernels
     multi_gpu = multi_gpu_decision(adapter, world_size, shard=shard if entry == DISTRIBUTED else None, skin=skin)
     device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
     cuda = device.type == "cuda" and torch.cuda.is_available()
@@ -554,7 +560,7 @@ def negotiate(adapter, config, *, entry: str = "gpu_md", device=None, pbc=(True,
     if entry == DISTRIBUTED:
         return _distributed_plan(adapter, config, cuda, device, world_size, shard, skin, contract, declared, topology,
                                  kernels, kernel_decisions, precision, matmul_precision, state, cublas, restores,
-                                 multi_gpu)
+                                 multi_gpu, geometry)
 
     execution, memory_field = _foreign_execution(
         adapter, config, entry, cuda, contract, full_pbc, builder, capacity, memory, budget, whole_step_trial, device,
@@ -577,19 +583,56 @@ def negotiate(adapter, config, *, entry: str = "gpu_md", device=None, pbc=(True,
     _check_padding(adapter, contract)
     recompute = _foreign_recompute(adapter, config.saved_tensor_recompute)
     classes = [contract.accuracy_class, precision.accuracy_class] + [d.accuracy_class for d in kernel_decisions]
+    if geometry is not None and geometry.accuracy_class is not None:
+        classes.append(geometry.accuracy_class)
     patches = adapter.upstream_patches() if isinstance(adapter, UpstreamPatches) else ()
     return EnginePlanRecord(
         model=adapter.name, upstream=getattr(adapter, "upstream", None),
         fingerprint=plan_fingerprint(adapter, profile=config.optimization_profile, kernels=kernels,
-                                     model_dtype=model_dtype),
+                                     model_dtype=model_dtype,
+                                     geometry_dtype=None if geometry is None else geometry.chosen),
         profile=config.optimization_profile, entry=entry, world_size=int(world_size),
         decisions=[neighbor_list, topology_reuse, padding, *kernel_decisions, derivative_decision(contract, declared),
-                   execution, precision, recompute, multi_gpu],
+                   execution, precision, recompute, multi_gpu, *(() if geometry is None else (geometry,))],
         contract=contract, accuracy_class=loosest_class(*classes),
         isolated_atoms=isolated_atoms_field(adapter, config.handle_isolated_atoms), memory=memory_field,
         precision=_precision_field(precision, state, model_dtype, cuda, cublas),
         matmul_precision=matmul_precision, precision_restores=restores, contract_declared=declared,
         patches=patch_report(patches))
+
+
+def geometry_decision(adapter, config, entry: str) -> Decision | None:
+    """The geometry dtype requested by ``config.geometry_dtype``, or the entry point's default for an unset one
+    (``config.geometry_default``, :func:`~fastmd.engine.energy_derivative.default_geometry`), as a decision (None
+    where neither is set: the model's own geometry, the plans of before the option): "float64" (float64 positions,
+    cell, wrap, edge vectors and strain, cast to the module's dtype at its input) or "float32". A request the
+    model or the entry point cannot serve raises :class:`NegotiationError`
+    (:func:`~fastmd.engine.energy_derivative.geometry_dtype`; the TorchSim entry point refuses "float64")."""
+    from ..engine.energy_derivative import FLOAT64_GEOMETRY_ENTRIES, geometry_dtype, takes_float64_default
+
+    requested = getattr(config, "geometry_dtype", None)
+    default = getattr(config, "geometry_default", None) if requested is None else None
+    if default is not None and (entry not in FLOAT64_GEOMETRY_ENTRIES or not takes_float64_default(adapter)):
+        default = None  # a default applies where it was resolved: never refused
+    if requested is None and default is None:
+        return None
+    if (requested or default) == "float64" and entry == "torchsim":
+        raise NegotiationError("geometry_dtype='float64' runs on the entry points of the models the engine "
+                               "differentiates (one GPU, and ShardedEvaluator at every rank count), not the torchsim "
+                               "entry point")
+    dtype = geometry_dtype(adapter, config)
+    chosen = "float64" if dtype.itemsize == 8 else "float32"
+    model_dtype = adapter.topology_spec().model_dtype
+    source = "requested" if default is None else "default (geometry_dtype None; 'float32' opts out)"
+    reason = (f"{source}: float64 positions, cell, wrap, edge vectors and strain, cast to the module's "
+              f"{model_dtype} at its input" if chosen == "float64" and model_dtype != "float64"
+              else f"{source}: the model's {model_dtype} geometry")
+    # Float64 geometry for a float32 module: another arithmetic of at least FP32 accuracy (no longer held to the
+    # upstream FP32 call's noise floor).
+    return Decision("geometry", chosen, reason, chain=("float64", "float32"),
+                    evidence={"requested": requested, "model_dtype": model_dtype,
+                              **({} if default is None else {"default": default})},
+                    accuracy_class="fp32_equivalent" if chosen == "float64" and model_dtype != "float64" else None)
 
 
 def _graph_decisions(adapter, config, entry, cuda, builder, contract, topology, pbc, mode) -> tuple[Decision, ...]:
@@ -648,6 +691,20 @@ P_GT_1_GATE = {
     "stress": f"max|dsigma| <= max({STRESS_FLOOR:g} eV/Å³, 2 nu_sigma)",
     "fp64": "CPU float64: max|dF| <= 1e-10 eV/Å, |dE| <= 1e-9 eV, max|dsigma| <= 1e-12 eV/Å³",
 }
+# The same contract under TF32 (a model whose ShardSpec allows it, matmul_precision "high" or "medium"): the reference
+# is P=1 in TF32 too, and TF32's own run-to-run noise sets the bounds. Repeated TF32 evaluations of one input differ by
+# up to a few 1e-3 eV/Å in the forces and up to about 1e-5 eV/atom in the energy (likely the scatter atomics' FP32
+# differences moving inputs across TF32 rounding boundaries), so the reference is the mean of the P=1 evaluations and
+# nu their largest pairwise difference.
+P_GT_1_GATE_TF32 = {
+    "reference": "P=1 through the distributed entry point in TF32, same execution mode and kernels: the mean of its "
+                 "evaluations",
+    "forces": "max|dF| <= max(1e-5 eV/Å, 2 nu_F) and RMSE <= max(1e-5 eV/Å, 1.5 RMSE_11) (RMSE_11: the largest "
+              "RMSE between two P=1 evaluations)",
+    "energy": "|dE|/N <= max(1e-6 eV, 2 nu_E/N) (FP64 totals)",
+    "stress": f"max|dsigma| <= max({STRESS_FLOOR:g} eV/Å³, 2 nu_sigma)",
+    "fp64": P_GT_1_GATE["fp64"],
+}
 STRESS_METHOD = ("strain_leaf: a zero [3, 3] strain on each rank deforms its owned rows (before the coordinates' "
                  "COPY: every row strained once, by its owner) and its cell; the energy and the nine strain "
                  "gradients are summed over the ranks in one FP64 all-reduce after the backward; stress = sum / V")
@@ -658,8 +715,9 @@ POOLED_READOUT_METHOD = ("each rank pools its owned real rows only (ghost rows a
 
 def _distributed_plan(adapter, config, cuda, device, world_size, shard, skin, contract, declared, topology, kernels,
                       kernel_decisions, precision, matmul_precision, state, cublas, restores,
-                      multi_gpu) -> EnginePlanRecord:
-    """The plan of one rank of the distributed entry point (``negotiate(entry="distributed")``)."""
+                      multi_gpu, geometry=None) -> EnginePlanRecord:
+    """The plan of one rank of the distributed entry point (``negotiate(entry="distributed")``); ``geometry``: the
+    geometry decision (None: the model's own geometry, the plans of before the option)."""
     name = adapter.name
     tap = isinstance(adapter, ShardedTap) if shard.adapter_called else isinstance(adapter, EnergyTap)
     if contract.force_mode != "engine_autograd" or not tap:
@@ -692,6 +750,8 @@ def _distributed_plan(adapter, config, cuda, device, world_size, shard, skin, co
         recompute = replace(recompute, chosen="off", reason=f"requested {recompute.chosen!r}: the sharded derivative "
                             "runs no saved-tensor recompute")
     classes = [contract.accuracy_class, precision.accuracy_class] + [d.accuracy_class for d in kernel_decisions]
+    if geometry is not None and geometry.accuracy_class is not None:
+        classes.append(geometry.accuracy_class)
     patches = adapter.upstream_patches() if isinstance(adapter, UpstreamPatches) else ()
     block, shard_print = None, None
     if world_size > 1:
@@ -714,7 +774,8 @@ def _distributed_plan(adapter, config, cuda, device, world_size, shard, skin, co
                  **({"ghost_row_trimming": {"owned_slot_inputs": list(shard.owned_slot_inputs),
                                             "zero_ghost_outputs": list(shard.zero_ghost_outputs)}}
                     if shard.owned_slot_inputs or shard.zero_ghost_outputs else {}),
-                 "stress_method": STRESS_METHOD, "source_pins": pins, "p_gt_1_gate": dict(P_GT_1_GATE),
+                 "stress_method": STRESS_METHOD, "source_pins": pins,
+                 "p_gt_1_gate": dict(P_GT_1_GATE_TF32 if precision.chosen == "tf32" else P_GT_1_GATE),
                  "estimate": False}
         if shard.global_reductions:  # (a pooled readout: the sums over the ranks of the owned rows' pooled values)
             block["global_reductions"] = [{"name": point.name, "width": point.width, "dtype": "float64"}
@@ -723,10 +784,11 @@ def _distributed_plan(adapter, config, cuda, device, world_size, shard, skin, co
     return EnginePlanRecord(
         model=name, upstream=getattr(adapter, "upstream", None),
         fingerprint=plan_fingerprint(adapter, profile=config.optimization_profile, kernels=kernels,
-                                     model_dtype=topology.model_dtype, shard=shard_print),
+                                     model_dtype=topology.model_dtype, shard=shard_print,
+                                     geometry_dtype=None if geometry is None else geometry.chosen),
         profile=config.optimization_profile, entry=DISTRIBUTED, world_size=int(world_size),
         decisions=[neighbor_list, topology_reuse, padding, *kernel_decisions, derivative, execution, precision,
-                   recompute, multi_gpu],
+                   recompute, multi_gpu, *(() if geometry is None else (geometry,))],
         contract=contract, accuracy_class=loosest_class(*classes),
         isolated_atoms=isolated_atoms_field(adapter, config.handle_isolated_atoms),
         memory=({"calibration": "measured per rank", "note": "the shard's MemoryPredictor, measured on each rank's "
@@ -837,6 +899,7 @@ def renegotiate_execution(record: EnginePlanRecord, adapter, config, *, entry: s
         adapter, config, entry, cuda, contract, compiled, full_pbc, builder, capacity, memory, budget, device,
         execution, model_graph_pools)
     _check_padding(adapter, contract)
+    geometry = next((decision for decision in plan.decisions if decision.id == "geometry"), None)
     replaced = dict(zip(("neighbor_list", "topology_reuse", "padding"), _graph_decisions(
         adapter, config, entry, cuda, builder, contract, topology, pbc, execution.chosen)), execution=execution,
         derivative=derivative_decision(contract, declared))
@@ -851,9 +914,11 @@ def renegotiate_execution(record: EnginePlanRecord, adapter, config, *, entry: s
         kernels = {d.id.removeprefix("kernels."): d.chosen for d in decided}
         plan.upstream, plan.patches = getattr(adapter, "upstream", None), patches
         plan.fingerprint = plan_fingerprint(adapter, profile=config.optimization_profile, kernels=kernels,
-                                            model_dtype=topology.model_dtype)
+                                            model_dtype=topology.model_dtype,
+                                            geometry_dtype=None if geometry is None else geometry.chosen)
     plan.accuracy_class = loosest_class(contract.accuracy_class, plan.decision("precision").accuracy_class,
-                                        *(d.accuracy_class for d in decided))
+                                        *(d.accuracy_class for d in decided),
+                                        None if geometry is None else geometry.accuracy_class)
     return plan
 
 
@@ -1452,6 +1517,11 @@ def dry_run(adapter, config, *, entry: str = "gpu_md", device=None, atoms, world
     pbc = tuple(bool(axis) for axis in atoms.get_pbc())
     resolved = resolve_config(config, default_execution="auto") if config is None or isinstance(
         config, InferenceConfig) else config
+    if not runtime_planned(adapter):
+        from ..engine.energy_derivative import default_geometry
+        resolved = default_geometry(adapter, resolved, entry, world_size)
+    if runtime_planned(adapter) and getattr(resolved, "geometry_dtype", None) is not None:
+        geometry_decision(adapter, resolved, entry)
     if not runtime_planned(adapter):
         from ..graph.fixed_capacity_builder import _fixed_builder_available
         plan = negotiate(adapter, resolved, entry=entry, device=device, pbc=pbc, world_size=world_size)
