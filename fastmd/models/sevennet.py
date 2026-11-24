@@ -369,6 +369,23 @@ _SHARD_PINS = {
     "sevenn.nn.cue_helper.cueq_fused_scatter_channelwise_conv.forward":
         "dff0d4fbe07b4c73d84684014b76c2e93327b0c115d3ed351bfccd75b7d766b0",
     _INTERACTION_BLOCK: "03b0c38bbe72d0ab8700df21901611dac1f26dcbe3ff6a632a91f75dcec41ff4",
+    # The ghost-row trimming (SevenNetAdapter._trimmed_modules): the sequential model's dict chain and the per-row
+    # modules after the first convolution's message sum.
+    "sevenn.nn.sequential.AtomGraphSequential.forward":
+        "da893bdaf75cd0994ec952986437647f94bf611547995034a5aa59eff7074cce",
+    "sevenn.nn.linear.IrrepsLinear.forward": "0c945953216ac15fe16694bc51ac4ad2fb4c1447a104c38dc0eacdc7722477ab",
+    "sevenn.nn.self_connection.SelfConnectionLinearIntro.forward":
+        "88c723b5478de02328d4e6d99e68bc5ce600e51acd2f70a9753f011e09cfd352",
+    "sevenn.nn.self_connection.SelfConnectionIntro.forward":
+        "59213e71ac7427a8b239b736ca2ae94c63af104e8a4aeab6b2d353dd932988b7",
+    "sevenn.nn.self_connection.SelfConnectionOutro.forward":
+        "55c8560a2fdacf0c29e752ce8a29c6c35a3fa015adf4fc062c75e02ad34925bb",
+    "sevenn.nn.equivariant_gate.EquivariantGate.forward":
+        "388df14cee4575cbce34cfe9f8ca8c31e83ddebb8baee7db454c4faf5e852c7c",
+    "sevenn.nn.scale.SpeciesWiseRescale.forward": "c84be974ffb6beebaff01b8b008bf3f4c0b114401180fe6d8e5e5ecae7dd6764",
+    "sevenn.nn.scale.Rescale.forward": "e479601e0a8e8542424e3f72e1078eed9d43dcf148ad9b6b082763d03414008c",
+    "sevenn.nn.linear.FCN_e3nn.forward": "f5333eec07c35edb34b3fc25f2cccb4a68fe16fe9c84ccfeaea8e8275577392d",
+    "sevenn.nn.linear.AtomReduce.forward": "c8bb7bfac11c572e378ab96f15be1439300eb4be079b4fd303b5c7945a37e639",
 }
 
 
@@ -600,7 +617,6 @@ class SevenNetAdapter:
         self.kernel_reason = ""
 
 
-
     # --- upstream patches ---------------------------------------------------
 
     def upstream_patches(self) -> list:
@@ -611,6 +627,53 @@ class SevenNetAdapter:
         """Revert the one-hot patch (the module copies its table per call again); idempotent."""
         revert_patches(self._patches)
 
+    def _trimmed_modules(self) -> tuple[tuple, tuple]:
+        """The ghost-row trimming at P>1 (``ShardSpec.owned_slot_inputs`` and ``zero_ghost_outputs``, entries of the
+        one dict every module takes and returns): each convolution's output ``x`` is cut to the owned slots by the
+        self-interaction after it, and the cut entry flows on through sevenn's sequential model (the self-connection,
+        the gate, the next layer's self-connection and self-interaction) until the next convolution's input, whose
+        exchange appends the ghost rows again (the COPY of the owners' rows), and through the readout. The layer-0
+        self-connection, computed on every row before the convolution, is cut where it is added
+        (``self_cont_tmp``); a self-connection that also reads the atoms' attributes (sevenn's ``SelfConnectionIntro``)
+        gets them cut after the first layer; a species-wise rescale reads the cut atom types (sevenn's scalar
+        ``Rescale``, for a global shift and scale, reads none), and the rescale's per-atom energies get zero ghost
+        rows (the total's reduction and the energy tap read every row). The ghost rows receive no messages, and what
+        a layer computes on them after its message sum is never read: the embedding, the first layer's
+        self-interaction (its output is the first convolution's senders') and every convolution stay on every row.
+        Nothing is declared when a module after the first convolution has a class without a pin (in
+        ``_SHARD_PINS``): such a checkpoint runs P>1 untrimmed."""
+        if not self._trimming_known():
+            return (), ()
+        owned, padded = [], []
+        for index, (name, module) in enumerate(self.module._modules.items()):
+            if name.endswith("_self_interaction_2"):
+                owned.append((name, (0, module.key_input)))
+            elif name.endswith("_self_connection_outro"):
+                owned.append((name, (0, "self_cont_tmp")))
+            elif name.endswith("_self_connection_intro") and not name.startswith("0_") and \
+                    type(module).__name__ != "SelfConnectionLinearIntro":
+                owned.append((name, (0, "node_attr")))
+            elif name == "rescale_atomic_energy":
+                if getattr(module, "key_indices", None) is not None:
+                    owned.append((name, (0, module.key_indices)))
+                padded.append((name, module.key_output))
+        return tuple(owned), tuple(padded)
+
+    def _trimming_classes(self) -> list[str]:
+        """The forwards the ghost-row trimming relies on: the sequential model's and every module class's after the
+        first convolution but the convolutions'."""
+        modules = list(self.module._modules.items())
+        convolutions = {type(module) for name, module in modules if name.endswith("_convolution")}
+        first = next((index for index, (name, _) in enumerate(modules) if name.endswith("_convolution")), len(modules))
+        trimmed = [type(self.module)] + [type(module) for _, module in modules[first:]
+                                         if type(module) not in convolutions]
+        return list(dict.fromkeys(f"{cls.__module__}.{cls.__qualname__}.forward" for cls in trimmed))
+
+    def _trimming_known(self) -> bool:
+        """Whether every forward of :meth:`_trimming_classes` has a pin: a module class it does not know (another
+        readout, rescale or self-connection) leaves the checkpoint untrimmed rather than refused at P>1."""
+        return all(target in _SHARD_PINS for target in self._trimming_classes())
+
     def shard_spec(self) -> ShardSpec:
         """SevenNet at P>1: each convolution sums its messages at the receiver (the edge's centre) and reads the
         senders' node features, and the other modules the per-atom energies depend on read their own atom's row or
@@ -620,8 +683,11 @@ class SevenNetAdapter:
         layer (480 values for SevenNet-0, as sevenn's own LAMMPS parallel mode exchanges). Unused atom slots get
         the model's smallest atomic number. Pins: the forward of the module's convolution class, of sevenn's
         cuEquivariance fused convolution (it gathers at the senders and scatters at the receivers) where
-        installed, and the interaction block builder; a class without a pin gives a pin that cannot match, so P>1
-        is refused with the reason."""
+        installed, the interaction block builder, and for the ghost-row trimming (:meth:`_trimmed_modules`) the
+        sequential model and every module class after the first convolution but the convolutions (another source
+        of a pinned forward refuses P>1 with the reason; a class without a pin leaves the checkpoint untrimmed).
+        TF32 on request (``matmul_precision="high"``) runs at P>1: SevenNet-0's TF32 P=2 and P=4 forces, energy and
+        stress stay within TF32 P=1's own run-to-run noise."""
         layers = [(name, layer) for name, layer in self.module._modules.items() if name.endswith("_convolution")]
         points = tuple(ExchangePoint(name=f"{name}.{layer.key_x}", module=name,
                                      width=int(layer.convolution_kwargs["irreps_in1"].dim), hook="input",
@@ -638,5 +704,15 @@ class SevenNetAdapter:
         pins += (PatchRecord(name="sevennet.shard.interaction_block", target=_INTERACTION_BLOCK, distribution="sevenn",
                              versions=SEVENN_VERSIONS, source_sha256=_SHARD_PINS[_INTERACTION_BLOCK],
                              reason="the convolutions are the interaction block's only modules that read other atoms"),)
-        return ShardSpec(exchange_points=points, pad_species=int(self._types[0]), source_pins=pins)
+        # The ghost-row trimming relies on the dict chain and on every module after the first convolution's message
+        # sum but the convolutions reading their own atom's row (or summing the per-atom energies).
+        owned_slots, zero_ghosts = self._trimmed_modules()
+        if owned_slots or zero_ghosts:
+            pins += tuple(PatchRecord(name=f"sevennet.shard.{target.rsplit('.', 2)[-2]}", target=target,
+                                      distribution="sevenn", versions=SEVENN_VERSIONS,
+                                      source_sha256=_SHARD_PINS[target],
+                                      reason="the ghost-row trimming relies on this forward reading its own atom's row")
+                          for target in self._trimming_classes())
+        return ShardSpec(exchange_points=points, pad_species=int(self._types[0]), source_pins=pins,
+                         allow_tf32=True, owned_slot_inputs=owned_slots, zero_ghost_outputs=zero_ghosts)
 

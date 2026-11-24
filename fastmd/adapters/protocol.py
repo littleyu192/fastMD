@@ -605,6 +605,20 @@ class ExchangePoint:
                              "pair_merge point) and fuse_from (module, arg)")
 
 
+def _argument_address(address) -> bool:
+    """Whether ``address`` names an argument (a positional index, a keyword name, or (one of them, the key of an entry
+    of that mapping argument)), as ``ExchangePoint.arg``."""
+    if isinstance(address, tuple):
+        return (len(address) == 2 and isinstance(address[1], str) and bool(address[1])
+                and _argument_address(address[0]) and not isinstance(address[0], tuple))
+    return not isinstance(address, bool) and (isinstance(address, int) or isinstance(address, str) and bool(address))
+
+
+def _output_part(part) -> bool:
+    """Whether ``part`` names a part of an output: a mapping key (a non-empty string) or a tuple index."""
+    return not isinstance(part, bool) and (isinstance(part, int) or isinstance(part, str) and bool(part))
+
+
 @dataclass(frozen=True)
 class ShardSpec:
     """How a model runs at P>1 on the runtime's generic node-halo exchange (``fastmd.distributed.node_halo``).
@@ -650,20 +664,33 @@ class ShardSpec:
     after a layer's message sum may run on the owned slots only.
     ``owned_slot_inputs`` names the modules that run on them: inside a P>1
     forward each tensor argument of such a module (positional or keyword)
-    whose rows are the rank's rows (owned slots, then ghost rows) keeps the
-    owned slots only. ``zero_ghost_outputs`` names the modules whose output
-    (a tensor, or each tensor of a tuple or list) holding the owned slots'
-    rows gets zero ghost rows appended, for a consumer that reads every row
-    (e.g. a gather over all rows) and drops the ghost rows itself. A module is
-    a dotted path in ``adapter.module`` (``"layers.0.gate"``) or a class
+    whose rows are the rank's rows (owned slots, then ghost rows, then the
+    ``trailing_rows``) keeps the owned slots only. An entry ``(module,
+    argument)`` cuts that argument only: a positional index, a keyword name,
+    or ``(argument, key)``, the entry ``key`` of a mapping argument, replaced in
+    a shallow copy of the mapping (a module that returns that mapping passes
+    the cut entry on to its successors, as sevenn's sequential model does);
+    such an argument must hold the rank's rows or the owned slots already.
+    ``zero_ghost_outputs`` names the modules whose output (a tensor, or each
+    tensor of a tuple or list) holding the owned slots' rows gets zero ghost
+    rows (and ``trailing_rows`` zero rows) appended, for a consumer that reads
+    every row (e.g. a gather over all rows) and drops the ghost rows itself;
+    an entry ``(module, key)`` pads that entry of a mapping output (in a
+    shallow copy) or that element of a tuple output. A module is a dotted path
+    in ``adapter.module`` (``"layers.0.gate"``) or a class
     (``"package.module.Class"``: every submodule of exactly that class); one
-    that names no module refuses P>1 with the reason. The runtime registers
-    the hooks around each P>1 forward (eager, the captured step, the counting
-    forward) and they act only in that forward's context: another thread
-    (another evaluator's forward included), one CUDA rank and the memory probe
-    see the modules unchanged. An exchange
-    point may then receive its tensor with the owned slots' rows only (its
-    ghost rows are its owners' COPY either way). The generic checks
+    that names no module refuses P>1 with the reason. ``trailing_rows``: rows
+    every per-row tensor of the model carries after the ghost rows (TACE's
+    sink row, 1; an adapter-called exchange point appends it again, so every
+    exchange point is adapter-called), cut and padded with the ghost rows. A
+    module is declared one way: bare or by entries. The runtime registers the
+    hooks around each P>1 forward (eager, the captured step, the counting
+    forward, the memory probe, whose synthetic rows keep the rank's split into
+    owned slots and ghost rows) and they act only in that forward's context:
+    another thread (another evaluator's forward included) and one CUDA rank
+    see the modules unchanged. An exchange point may then receive its tensor
+    with the owned slots' rows only (its ghost rows are its owners' COPY
+    either way). The generic checks
     (``tests/ghost_row_checks.py``) verify a declaration through it: the
     trimmed forward against the untrimmed one, the rows each declared module
     runs on, and NaN in its ghost rows changing no owned result; the candidate
@@ -694,8 +721,9 @@ class ShardSpec:
     line_slot_cutoff: float | None = None  # line_graph: the bonds with triplets are shorter than this (Å)
     # Ghost-row trimming: the modules that run on the owned slots only, and those whose output gets zero ghost rows
     # appended (dotted paths in adapter.module or classes "package.module.Class")
-    owned_slot_inputs: tuple[str, ...] = ()
-    zero_ghost_outputs: tuple[str, ...] = ()
+    owned_slot_inputs: tuple[str | tuple[str, Any], ...] = ()
+    zero_ghost_outputs: tuple[str | tuple[str, int | str], ...] = ()
+    trailing_rows: int = 0  # rows after the ghost rows in every per-row tensor (a sink row), cut and padded with them
 
     def __post_init__(self) -> None:
         if self.message_flow not in ("receiver", "both_ends", "line_graph"):
@@ -728,16 +756,25 @@ class ShardSpec:
         if line and self.adapter_called:
             raise ValueError("ShardSpec: a line-graph shard reads per-atom energies through its hooks (no pooled "
                              "readout, no exchange point without a module)")
-        for field_name in ("owned_slot_inputs", "zero_ghost_outputs"):
+        for field_name, addressed in (("owned_slot_inputs", _argument_address), ("zero_ghost_outputs", _output_part)):
             names = getattr(self, field_name)
-            if (not isinstance(names, tuple) or not all(isinstance(name, str) and name for name in names)
+            if (not isinstance(names, tuple) or not all(
+                    isinstance(name, str) and name or isinstance(name, tuple) and len(name) == 2
+                    and isinstance(name[0], str) and name[0] and addressed(name[1]) for name in names)
                     or len(set(names)) != len(names)):
                 raise ValueError(f"ShardSpec: {field_name} is a tuple of distinct module paths or classes (non-empty "
-                                 "strings)")
+                                 "strings), or (module, " + ("argument" if field_name == "owned_slot_inputs" else
+                                                             "output key or index") + ") pairs")
             if names and line:
                 # The line-partial exchange has rows of its own (line slots, sink atoms): no trimming there.
                 raise ValueError(f"ShardSpec: {field_name} trims the node halo's ghost rows; a line-graph shard has "
                                  "none")
+        if isinstance(self.trailing_rows, bool) or not isinstance(self.trailing_rows, int) or self.trailing_rows < 0:
+            raise ValueError("ShardSpec: trailing_rows must be a nonnegative integer")
+        if self.trailing_rows and any(point.module is not None for point in self.exchange_points):
+            # the runtime's own exchange hooks know the rank's rows only: an adapter-called exchange appends the rows
+            raise ValueError("ShardSpec: trailing_rows needs adapter-called exchange points (module None): the "
+                             "runtime's exchange hooks do not append the trailing rows")
         if line != (self.line_slot_cutoff is not None) or (line and not (
                 isinstance(self.line_slot_cutoff, (int, float)) and math.isfinite(self.line_slot_cutoff)
                 and self.line_slot_cutoff > 0)):
@@ -816,6 +853,8 @@ class ShardSpec:
             declaration["owned_slot_inputs"] = list(self.owned_slot_inputs)
         if self.zero_ghost_outputs:
             declaration["zero_ghost_outputs"] = list(self.zero_ghost_outputs)
+        if self.trailing_rows:
+            declaration["trailing_rows"] = self.trailing_rows
         text = json.dumps(declaration, sort_keys=True, default=str)
         return hashlib.sha256(text.encode()).hexdigest()
 

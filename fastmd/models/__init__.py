@@ -1,5 +1,5 @@
-"""The models: MatRIS (``fastmd.models.matris``), one adapter module per foreign model (MACE, SevenNet, ORB v3,
-CHGNet), and the MatGL M3GNet integration; and the one registry of the models an entry point loads.
+"""The models: MatRIS (``fastmd.models.matris``), one adapter module per foreign model (MACE, MACE-SOYO, SevenNet, ORB v3,
+CHGNet, TACE), and the MatGL M3GNet integration; and the one registry of the models an entry point loads.
 
 :data:`MODELS` has a row per model: the module that loads it and, by name, its functions there (what it claims,
 how it loads, which loading options it rejects). Adding a model means adding a row (and its module).
@@ -49,9 +49,11 @@ MODELS = (
     ModelEntry("nequip", "fastmd.models.nequip", claims="is_nequip_model", load="load_nequip"),
     ModelEntry("esen", "fastmd.models.esen", claims="is_esen_model", load="load_esen"),
     ModelEntry("mace", "fastmd.models.mace", claims="is_mace_model", load="load_mace"),
+    ModelEntry("mace_soyo", "fastmd.models.mace_soyo", claims="is_mace_soyo_model", load="load_mace_soyo"),
     ModelEntry("sevennet", "fastmd.models.sevennet", claims="is_sevennet_model", load="load_sevennet"),
     ModelEntry("orb", "fastmd.models.orb", claims="is_orb_model", load="load_orb"),
     ModelEntry("chgnet", "fastmd.models.chgnet", claims="is_chgnet_model", load="load_chgnet"),
+    ModelEntry("tace", "fastmd.models.tace", claims="is_tace_model", load="load_tace"),
     ModelEntry("matris", "fastmd.models.matris.adapter", claims="is_matris_model", load="load_matris",
                load_options=("enable_compile", "enable_checkpoint"), wrap="MatRISAdapter"),
 )
@@ -94,6 +96,19 @@ def _is_adapter(model) -> bool:
     return all(inspect.getattr_static(model, name, missing) is not missing for name in sorted(members))
 
 
+def model_family(model, model_path: str | None = None) -> str:
+    """The name of the registry row :func:`load_adapter` loads ``model`` (a name or a path, with ``model_path``)
+    with: the first row that claims it, else the default."""
+    return _claiming(model, model_path).name
+
+
+def check_load_options(model, *, model_path: str | None = None, model_dtype: str | None = None,
+                       optimization_profile: str | None = None) -> None:
+    """The check :func:`load_adapter` runs before it loads ``model`` (a name or a path): raises for the loading
+    options the claiming row's model rejects, with its reason. Nothing is loaded."""
+    _claiming(model, model_path).function("check_options")(model_dtype, optimization_profile, model_path)
+
+
 def as_adapter(model) -> ModelAdapter:
     """``model`` if it is an adapter, else the default model's adapter of the model object (duck-typed like
     the runners' ``model`` argument, not checked, never loaded): MatRIS's."""
@@ -118,14 +133,20 @@ def load_adapter(
     loads it: a MACE name (``"mace_mp_0"``, ``"mace_mpa_0"``), ``"mace"`` with a
     ``model_path``, or a path to a ``.model`` file loads MACE
     (:func:`fastmd.models.mace.load_mace`, which needs mace-torch) on
-    ``device``; a SevenNet name (``"sevennet_0"``, ``"7net-0"``) or
+    ``device``; a MACE-SOYO name (``"mace_soyo_oam"``, ``"mace_soyo_mptrj"``)
+    or ``"mace_soyo"`` with a ``model_path`` loads MACE-SOYO
+    (:func:`fastmd.models.mace_soyo.load_mace_soyo`, which needs mace-soyo;
+    CUDA only); a SevenNet name (``"sevennet_0"``, ``"7net-0"``) or
     ``"sevennet"`` with a ``model_path`` loads SevenNet
     (:func:`fastmd.models.sevennet.load_sevennet`, which needs sevenn); an
     ORB name (``"orb_v3"``, with or without a ``model_path``) loads ORB
     (:func:`fastmd.models.orb.load_orb`, which needs orb-models); a CHGNet
     name (``"chgnet_0_3_0"``) loads upstream CHGNet's bundled weights
     (:func:`fastmd.models.chgnet.load_chgnet`, which needs chgnet), float32
-    only. Anything else is loaded with :meth:`MatRIS.load`: the checkpoint
+    only; a TACE name (``"tace_oam_l"``, ``"tece_oam_rra_1_0"``,
+    ``"tace_oam_rra_preview"``) or ``"tace"`` with a ``model_path`` loads
+    TACE (:func:`fastmd.models.tace.load_tace`, which needs the pinned tace
+    package), float32 only. Anything else is loaded with :meth:`MatRIS.load`: the checkpoint
     at ``model_path`` if given, else the pretrained ``model`` name, on
     ``device`` with ``enable_compile`` and ``enable_checkpoint``.
 
@@ -133,9 +154,11 @@ def load_adapter(
     ``optimization_profile`` (None, "topology", "generic"; "legacy" is
     MatRIS's) apply to models loaded here that set their dtype or install
     their kernels at load time, before an entry point binds the module (MACE:
-    float64 or float32, cuEquivariance unless "generic"; SevenNet: float32,
+    float64 or float32, cuEquivariance unless "generic"; MACE-SOYO: float32 or
+    float64, its own cuEquivariance layers under every profile; SevenNet: float32,
     cuEquivariance unless "generic"; ORB: float32, its compiled backbone
-    unless "generic"). MatRIS runs float32
+    unless "generic"; TACE: float32, OpenEquivariance unless "generic", with
+    e3nn as the reference and fallback). MatRIS runs float32
     on the single-GPU runtime and selects its kernels per call from the entry
     point's configuration: it accepts None or "float32", and the profile is
     only checked. Each row's ``check_options`` rejects the options its model

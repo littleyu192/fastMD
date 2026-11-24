@@ -1,0 +1,65 @@
+# The optional TACE model family (fastmd.models.tace): TACE 0.2.0 at upstream commit 81f65a4c (the commit the
+# Matbench Discovery leaderboard pins for TACE-OAM-L and TECE-OAM-RRA-1.0), plus the dependencies of TACE that a
+# PyTorch environment lacks. Exact versions, each with the sha256 of its file.
+#
+# The commit is not a PyPI release (PyPI's TACE 0.2.0 differs from it in its model code): its pin is a direct
+# reference to GitHub's source archive of the commit, built at install (pure Python; --no-binary=tace
+# --no-build-isolation: the base environment's setuptools builds it, nothing is fetched for the build). GitHub
+# generates that archive on request; should it ever serve other bytes for the commit, the install fails at the hash
+# check (compare its files with `git archive 81f65a4c188bd09cec8d1419388f7afdcc1b6fd0` of a clone). The other pins
+# are PyPI files.
+#
+# Platforms: the platform wheels are the Linux aarch64 ones (Grace CPUs, e.g. GB200) for CPython 3.12: matscipy and
+# lmdb (cp312). The others are pure Python. An x86_64 environment needs its own hashes for those two files (PyPI has
+# x86_64 wheels of both; a requirement may list several --hash options).
+#
+# Install over an environment that already runs fastmd, in a virtual environment that sees its packages:
+#
+#   python -m venv --system-site-packages <venv>
+#   <venv>/bin/python -m pip install --no-deps --require-hashes --no-binary=tace --no-build-isolation \
+#       -r requirements-tace.txt
+#
+# This file records the upstream validation environment; FastMD does not ship its original CI installer.
+# Install into a separate environment and check that the base torch version remains unchanged.
+#
+# Deliberately not installed, the base environment provides them: torch, numpy, scipy, ase and pandas (the versions
+# fastmd runs with stay in place), and the other dependencies of these packages: lightning (with its torchmetrics
+# and lightning-utilities, which TACE imports), omegaconf, huggingface-hub, sympy, packaging, setuptools,
+# hydra-core's antlr4-python3-runtime 4.9.3, and torch_geometric's aiohttp, fsspec, Jinja2, psutil, pyparsing,
+# requests, tqdm and xxhash.
+#
+# OpenEquivariance, the adapter's default kernels (upstream's TACE_USE_OEQ), is not listed. openequivariance 0.6.4 is
+# an sdist only (sha256 225a871ce375bca0ea9d96c54c77a54e6b1a8073b10be20378dc24a311400804) whose CMake build downloads
+# an x86_64 LibTorch to link its extension against, so on aarch64 it does not build as published.
+# A platform-specific install can build that hash-checked sdist with CMake's LibTorch source pointed at the base
+# environment's torch, its headers and libraries (`--config-settings
+# cmake.define.FETCHCONTENT_SOURCE_DIR_LIBTORCH=<torch package directory>`); the build needs the CUDA toolkit, a C++
+# compiler and the build tools pip's isolated build fetches from the index (scikit-build-core, nanobind,
+# setuptools-scm). Without OpenEquivariance the adapter runs e3nn (its kernel_reason says why) and the tests'
+# OpenEquivariance comparisons skip; a skip does not establish kernel support.
+# Torch <2.10 lacks the stable-extension headers required by OEQ 0.6.4. Its official legacy JIT loader supports
+# older Torch: install with CMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit=ON and CMAKE_DISABLE_FIND_PACKAGE_hip=ON
+# (no stable extension), FETCHCONTENT_SOURCE_DIR_LIBTORCH set as above, and FETCHCONTENT_FULLY_DISCONNECTED=ON.
+# Set OEQ_JIT_EXTENSION=1 and a CUDA_HOME matching Torch for runtime compilation; verify the actual kernel
+# choice, since adapter fallback to e3nn is not an OpenEquivariance validation.
+#
+# TACE declares e3nn and torch_geometric without versions: the adapter is validated on e3nn 0.5.9 and
+# torch_geometric 2.7.0.
+# e3nn-0.5.9-py3-none-any.whl
+e3nn==0.5.9 --hash=sha256:3af2fe83e8d06d1b28c2f49860afff0e74daed94913bd39c340ac6ffb379df1a
+# opt_einsum-3.4.0-py3-none-any.whl
+opt_einsum==3.4.0 --hash=sha256:69bb92469f86a1565195ece4ac0323943e83477171b91d24c35afe028a90d7cd
+# opt_einsum_fx-0.1.4-py3-none-any.whl
+opt-einsum-fx==0.1.4 --hash=sha256:85f489f4c7c31fd88d5faf9669c09e61ec37a30098809fdcfe2a08a9e42f23c9
+# torch_geometric-2.7.0-py3-none-any.whl
+torch_geometric==2.7.0 --hash=sha256:6e0cd3ad824d484651ef5d308fc66c687bfcf5ba040d56d1e0fe0f81f365e292
+# matscipy-1.3.1-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl
+matscipy==1.3.1 --hash=sha256:7b381897fb4a497dd14fa5dc371a183c852e601b1988011a20cd1d00897d8e18
+# hydra_core-1.3.8-py3-none-any.whl
+hydra-core==1.3.8 --hash=sha256:d5f184c291691cba835c7f04bc4e36270ad88b1d7e394a3712f5af084c30b394
+# configargparse-1.10.2-py3-none-any.whl
+ConfigArgParse==1.10.2 --hash=sha256:926e28ca8262f066dfeb6585e227a78f01bd3d7f3fb63fad1c8045c5da1401ac
+# lmdb-3.0.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+lmdb==3.0.0 --hash=sha256:9d97a9d2349941b89d8ddb054c4a9e5a8e398009e2e838ae1d6f35b858db4fb8
+# 81f65a4c188bd09cec8d1419388f7afdcc1b6fd0.tar.gz (GitHub's source archive of the commit; TACE 0.2.0)
+tace @ https://github.com/xvzemin/tace/archive/81f65a4c188bd09cec8d1419388f7afdcc1b6fd0.tar.gz --hash=sha256:a3158e01313a8649d8be2ee312eb8a40bca051626ee6723b92c3478f149266d2

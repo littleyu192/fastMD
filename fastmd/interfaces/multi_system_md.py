@@ -7,7 +7,7 @@ model the engine differentiates that declares its systems
 may be evaluated as one disjoint union (``SystemBatching`` ``"union"``, or
 ``"segments"`` where the model pools each system over its own atoms) and takes
 the engine's per-edge shifts (``EdgeShiftInput``: MACE's ``ScaleShiftMACE``,
-SevenNet, CHGNet with its line graph, ORB v3). The systems sit in the slots of
+MACE-SOYO, SevenNet, CHGNet with its line graph, ORB v3, TACE). The systems sit in the slots of
 unions (:mod:`fastmd.execution.system_batch`): one graph build (with each
 system's line graph for a model with triplets), one model call and one
 backward pass per step for all systems of a union, ``steps_per_launch`` steps

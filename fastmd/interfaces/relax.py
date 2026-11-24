@@ -176,8 +176,8 @@ class StructOptimizer:
         ``trajectory``, ``restart`` and ``position_reset_callback`` only as None, ``downhill_check`` and
         ``append_trajectory`` only as False); a fixed cell or ``FrechetCellFilter``; a structure periodic in all
         three directions without constraints; no ``crystal_feas_save_path``; a task with energies and forces; a
-        model that the multi-system entry points negotiate (MatRIS, and MACE's ``ScaleShiftMACE``, SevenNet, ORB v3
-        and CHGNet); and trajectory records that fit ``RECORD_MEMORY_FRACTION`` of the device's memory. Anything
+        model that the multi-system entry points negotiate (MatRIS, and MACE's ``ScaleShiftMACE``, MACE-SOYO,
+        SevenNet, ORB v3, CHGNet and TACE); and trajectory records that fit ``RECORD_MEMORY_FRACTION`` of the device's memory. Anything
         else, or a GPU relaxation that cannot start (the model's negotiation, a structure's construction checks),
         stops or fails (a non-finite energy or force), takes ASE's optimizer as before (``engine="gpu"`` raises
         ValueError instead); ``config_summary()["relaxation"]`` and the verbose output name the path and why. On

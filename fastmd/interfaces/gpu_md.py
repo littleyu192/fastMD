@@ -48,6 +48,7 @@ from fastmd.execution.md_protocol import _ERRORS
 from fastmd.execution.md_protocol import HeatingRamp
 from fastmd.execution.md_protocol import MDOutputs
 from fastmd.execution.md_protocol import RestartData
+from fastmd.execution.md_protocol import constant_pressure_error
 from fastmd.execution.md_protocol import read_restart
 from fastmd.execution.md_protocol import resume_mismatch
 from fastmd.execution.whole_step_cuda_graph import FixedCapacityOverflow
@@ -2349,10 +2350,9 @@ class GPUResidentMolecularDynamics:
             if log_stress and context.rank == 0 and trajectory is None:
                 raise ValueError("from_evaluator: log_stress=True writes the stress into the trajectory frames; "
                                  "pass a trajectory (on rank 0)")
-            if isinstance(ensemble, str) and ensemble.lower().startswith(("npt", "nph", "inhomogeneous_npt")):
-                raise ValueError(f"from_evaluator: ensemble {ensemble!r} is not supported: a barostat changes the "
-                                 f"cell, and with it the domain decomposition (constant-pressure MD runs on one "
-                                 f"GPU through fastmd.interfaces.md); the ensembles here are {ENSEMBLES}")
+            refusal = constant_pressure_error(ensemble)
+            if refusal is not None:
+                raise ValueError(f"from_evaluator: {refusal}")
             if ensemble not in ENSEMBLES:
                 raise ValueError(f"ensemble must be one of {ENSEMBLES}")
             if saved is not None and saved.get("ensemble") != ensemble:

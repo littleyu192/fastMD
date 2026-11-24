@@ -5,7 +5,8 @@ fixed cell or ASE's FrechetCellFilter, the structures streaming through the slot
 (``FIRE(atoms).run(fmax, steps)``, or ``FIRE(FrechetCellFilter(atoms))`` for a variable cell; ASE's default
 parameters), for MatRIS and for a model the engine differentiates that declares its systems may be evaluated as one
 disjoint union (or pools each system over its own atoms) and takes the engine's per-edge shifts (MACE's
-``ScaleShiftMACE``, SevenNet, CHGNet and ORB v3, as :class:`~fastmd.interfaces.multi_system_md.MultiSystemMolecularDynamics`). Up to ``slots``
+``ScaleShiftMACE``, MACE-SOYO, SevenNet, CHGNet, ORB v3 and TACE, as
+:class:`~fastmd.interfaces.multi_system_md.MultiSystemMolecularDynamics`). Up to ``slots``
 structures relax at a time in the slots of unions (:mod:`fastmd.execution.system_relax`): one graph build, one model
 call and one backward pass per FIRE step for all the structures of a union, ``steps_per_launch`` steps captured as one
 CUDA graph, the optimizer's state and the convergence of every system on the device. Each window ends with one read of

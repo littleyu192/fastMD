@@ -15,7 +15,15 @@ grid at a quarter and a half of the rank's capacities, on synthetic batches
     bytes = a + b * edges + c * rows
 
 The row term is the ghost term: ghost rows add rows without edges, which a fit
-over edges alone cannot tell apart. The prediction at the rank's capacities
+over edges alone cannot tell apart. The probe's rows keep the rank's split into
+owned slots (the edge centres) and ghost rows, so a declared ghost-row trimming
+runs in the probe as in the step (its modules skip the probe's ghost rows) and
+the fit measures the trimmed rows' cost at the probe's owned share ``f``: the
+fitted cost per row ``c`` blends an owned slot's and a ghost row's. A ghost row
+costs at least nothing, so an owned slot costs at most ``c / f``, and at a
+layout whose owned share ``f'`` is larger the row term is ``c * rows * f' / f``;
+a ghost row costs no more than an owned slot, so at a smaller owned share ``c``
+per row stays a bound (both without measuring again). The prediction at the rank's capacities
 extrapolates the fit by at most ``MAX_EXTRAPOLATION`` (the largest probe is
 half of the capacities, so capacities grown by more than a quarter measure
 again), adds twice the fit's
@@ -80,17 +88,33 @@ def synthetic_batch(adapter, *, rows: int, edges: int, centres: int, cell: torch
                       cutoff=float(adapter.topology_spec().cutoff), padding=None)
 
 
-def _step(adapter, inputs, batch, derivative=None):
+class _ProbeLayout:
+    """The owned slots and ghost rows of a probe batch, for the counting exchanges of a trimmed probe (no COPY)."""
+
+    def __init__(self, n_cap: int, rows: int):
+        self.n_cap, self.rows, self.ghost_rows = int(n_cap), int(rows), int(rows) - int(n_cap)
+        # No process group belongs to a synthetic count-only probe; preserve the P>1 adapter path.
+        self.world_size = None
+
+
+def _step(adapter, inputs, batch, derivative=None, owned_slots: int | None = None):
     """The model's part of one evaluation: the energy tap (per atom, or of the whole system: what one CUDA rank
     runs) and its backward to the coordinates; with ``derivative`` (P>1) for a model whose adapter runs its own
     layer loop (``derivative.tap``), its share of the energy with every row owned and every exchange and global
-    sum the identity (no collective)."""
-    if derivative is not None and derivative.tap:
+    sum the identity (no collective). A declared ghost-row trimming (``derivative.trim``) runs too where
+    ``owned_slots`` (the probe's edge centres) leaves ghost rows: the rows after them are ghost rows, which the
+    declared modules skip, as in the step."""
+    rows = batch.positions.shape[0]
+    trimmed = (derivative is not None and derivative.trim is not None and owned_slots is not None
+               and 0 < owned_slots < rows)
+    if derivative is not None and (derivative.tap or trimmed):
         from .node_halo import ExchangeHooks
 
-        rows, device = batch.positions.shape[0], batch.positions.device
-        owned = torch.ones(rows, dtype=torch.bool, device=device)
-        exchanges = derivative.context(None, owned, torch.full((), float(rows), dtype=torch.float64, device=device),
+        device = batch.positions.device
+        layout = _ProbeLayout(owned_slots, rows) if trimmed else None
+        owned = (torch.arange(rows, device=device) < owned_slots if trimmed
+                 else torch.ones(rows, dtype=torch.bool, device=device))
+        exchanges = derivative.context(layout, owned, torch.full((), float(rows), dtype=torch.float64, device=device),
                                        torch.ones((), dtype=torch.bool, device=device), count_only=True)
         with torch.enable_grad(), ExchangeHooks.exchanging(exchanges):
             leaf = batch.positions.detach().requires_grad_(True)
@@ -107,7 +131,8 @@ def _step(adapter, inputs, batch, derivative=None):
     return energy.detach(), grad
 
 
-def _peaks(adapter, inputs, batch, device, capture: bool, stream, derivative=None) -> tuple[int, int | None]:
+def _peaks(adapter, inputs, batch, device, capture: bool, stream, derivative=None,
+           owned_slots: int | None = None) -> tuple[int, int | None]:
     """The evaluator's procedure from an allocated baseline: a warm-up step on the side ``stream`` (the eager peak),
     then (``capture``) a capture into a private pool, released at return (the capture's peak: the larger of both)."""
     from fastmd.engine._graph_capture import capture_graph
@@ -119,7 +144,7 @@ def _peaks(adapter, inputs, batch, device, capture: bool, stream, derivative=Non
     torch.cuda.reset_peak_memory_stats(device)
     stream.wait_stream(torch.cuda.current_stream(device))
     with torch.cuda.stream(stream):
-        _step(adapter, inputs, batch, derivative)
+        _step(adapter, inputs, batch, derivative, owned_slots)
     torch.cuda.current_stream(device).wait_stream(stream)
     torch.cuda.synchronize(device)
     eager = int(torch.cuda.max_memory_allocated(device) - baseline)
@@ -130,7 +155,7 @@ def _peaks(adapter, inputs, batch, device, capture: bool, stream, derivative=Non
     # Keep the probe on its warmed stream, away from other graph owners'
     # default capture stream and their pool-owned cuBLAS workspaces.
     with capture_graph(graph, pool=torch.cuda.graph_pool_handle(), stream=stream, check_replay=False):
-        _step(adapter, inputs, batch, derivative)
+        _step(adapter, inputs, batch, derivative, owned_slots)
     torch.cuda.synchronize(device)
     del graph
     return eager, int(torch.cuda.max_memory_allocated(device) - baseline)
@@ -148,10 +173,13 @@ class NodeHaloMemoryPredictor:
     strict = True
 
     def __init__(self, points: list[tuple[str, int, int, int]], *, model: str, exchange_points, itemsize: int,
-                 failure: str | None = None):
+                 failure: str | None = None, owned_share: float | None = None):
         self.points = list(points)  # (kind, edges, rows, peak bytes)
         self.model, self.exchange_points, self.itemsize = model, tuple(exchange_points), int(itemsize)
         self.failure = failure
+        # the probe's owned slots per row where it ran a declared ghost-row trimming (else None: every row's cost
+        # is the same at any split)
+        self.owned_share = owned_share
         self.fits = {kind: self._fit(kind) for kind in sorted({point[0] for point in self.points})}
         self.decisions: list = []
 
@@ -173,14 +201,15 @@ class NodeHaloMemoryPredictor:
         grid = [(e, r) for e in (small_edges, max(2 * small_edges, edges // 2))
                 for r in (small_rows, max(2 * small_rows, rows // 2))]
         centres = max(1, int(extents.get("owned_slots", rows)))
+        trimmed = derivative is not None and derivative.trim is not None and centres < rows
         try:
             stream = torch.cuda.Stream(device=device) if stream is None else stream
             for index, (probe_edges, probe_rows) in enumerate([grid[0]] + grid):
-                batch = synthetic_batch(adapter, rows=probe_rows, edges=probe_edges,
-                                        centres=max(1, centres * probe_rows // max(rows, 1)), cell=cell,
+                probe_centres = max(1, centres * probe_rows // max(rows, 1))
+                batch = synthetic_batch(adapter, rows=probe_rows, edges=probe_edges, centres=probe_centres, cell=cell,
                                         species=spec.pad_species, dtype=dtype, device=device)
                 eager, captured = _peaks(adapter, adapter.prepare(batch), batch, device, "capture" in kinds, stream,
-                                         derivative)
+                                         derivative, probe_centres)
                 if index:  # (the first run is the unmeasured warm-up)
                     points += [(kind, probe_edges, probe_rows, peak) for kind, peak in (("eager", eager),
                                                                                          ("capture", captured))
@@ -195,7 +224,8 @@ class NodeHaloMemoryPredictor:
         except Exception as error:  # noqa: BLE001 - as above (a sticky CUDA error raises again in the step)
             failure = failure or f"memory probe failed: {type(error).__name__}: {str(error)[:200]}"
         return cls(points, model=name, exchange_points=spec.exchange_points,
-                   itemsize=torch.finfo(dtype).bits // 8, failure=failure)
+                   itemsize=torch.finfo(dtype).bits // 8, failure=failure,
+                   owned_share=centres / rows if trimmed else None)
 
     def _fit(self, kind: str) -> dict:
         import numpy as np
@@ -243,7 +273,12 @@ class NodeHaloMemoryPredictor:
         if fit is None or not fit["valid"] or extents["edges"] > MAX_EXTRAPOLATION * fit["max_edges"] \
                 or extents["rows"] > MAX_EXTRAPOLATION * fit["max_rows"]:
             return None
-        model = fit["a"] + fit["b"] * extents["edges"] + fit["c"] * extents["rows"]
+        rows_term = fit["c"] * extents["rows"]
+        if self.owned_share and extents["rows"] and extents["owned_slots"] > self.owned_share * extents["rows"]:
+            # a larger owned share than the trimmed probe's: an owned slot costs at most c / owned_share (a ghost row
+            # at least nothing)
+            rows_term = fit["c"] * extents["owned_slots"] / self.owned_share
+        model = fit["a"] + fit["b"] * extents["edges"] + rows_term
         headroom = max(2 * fit["max_residual"], HEADROOM_FLOOR)
         exchange = exchange_bytes(self.exchange_points, rows=extents["rows"], ghost_rows=extents["ghost_rows"],
                                   send_rows=extents["send_rows"], owned_slots=extents["owned_slots"],
@@ -268,11 +303,13 @@ class NodeHaloMemoryPredictor:
 
     def summary(self) -> dict:
         return {"predictor": "node_halo_measured", "model": self.model, "failure": self.failure,
+                "owned_share": self.owned_share,
                 "fits": {kind: dict(fit) for kind, fit in self.fits.items()},
                 "points": [{"kind": kind, "edges": edges, "rows": rows, "peak_bytes": peak}
                            for kind, edges, rows, peak in self.points],
                 "model_form": "peak above the allocated baseline = a + b * edges + c * rows (fitted on this "
-                              "device) + 2 x max residual + the exchange buffers"}
+                              "device; c * owned_slots / owned_share where the owned share is larger than the "
+                              "trimmed probe's) + 2 x max residual + the exchange buffers"}
 
     def bind(self):
         return contextlib.nullcontext()

@@ -39,6 +39,16 @@ RESTART_READ_FORMATS = (RESTART_FORMAT, "matris.distributed.md/1")
 _ERRORS = (TypeError, ValueError, RuntimeError, AttributeError, IndexError, KeyError)
 
 
+def constant_pressure_error(ensemble) -> str | None:
+    """Why the evaluator-driven MD driver does not run ``ensemble``, a constant-pressure one ("npt", "nph" or
+    "inhomogeneous_npt" at the start, any case), or None for any other name."""
+    if isinstance(ensemble, str) and ensemble.lower().startswith(("npt", "nph", "inhomogeneous_npt")):
+        return (f"ensemble {ensemble!r} is not supported: a barostat changes the cell, and with it the domain "
+                f"decomposition (constant-pressure MD runs on one GPU through fastmd.interfaces.md); the ensembles "
+                f"here are {ENSEMBLES}")
+    return None
+
+
 @dataclass(frozen=True)
 class HeatingRamp:
     """md_pyrolysis's linear ramp (``--update-interval U``).

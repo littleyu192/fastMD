@@ -5,7 +5,7 @@ system (the same atoms and cell; each replica its own positions, momenta and
 thermostat) for a model that declares its systems may be evaluated as one
 disjoint union (:class:`~fastmd.adapters.protocol.SystemBatching`): a model
 the engine differentiates (an energy tap; ``"union"``, MACE's
-``ScaleShiftMACE``, SevenNet and CHGNet, whose union carries the line graph;
+``ScaleShiftMACE``, MACE-SOYO, SevenNet, TACE and CHGNet, whose union carries the line graph;
 ``"segments"``, ORB v3, which pools over each system of the union), or MatRIS,
 which differentiates its own energy and evaluates the union one energy per
 replica (``"union"``, its line graph padded with sink atoms). The

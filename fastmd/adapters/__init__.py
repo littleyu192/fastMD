@@ -9,8 +9,8 @@ forwards them:
 * :func:`load_adapter`, for the entry points (calculator, GPU-resident MD,
   torch-sim): an adapter, a MatRIS instance, or a pretrained name or
   checkpoint path, as the entry points accepted before; each model of the
-  registry claims its names and checkpoints (MACE, SevenNet, ORB and CHGNet,
-  each with its optional extra), and MatRIS, the default, loads the rest;
+  registry claims its names and checkpoints (MACE, MACE-SOYO, SevenNet, ORB, CHGNet and TACE,
+  each with its optional dependencies), and MatRIS, the default, loads the rest;
 * :func:`as_adapter`, for the runners: wraps the model object they are given,
   never loads.
 

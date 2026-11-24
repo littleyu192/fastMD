@@ -1,7 +1,7 @@
 """The node-halo exchange of a model that declares its shard (``ShardSpec``): hooks, halo COPY, sharded derivative.
 
 A model whose layers sum their messages at the receiving atom and read only
-per-atom features of the senders (MACE, SevenNet) runs at P>1 on [owned | ghost] rows:
+per-atom features of the senders (MACE, MACE-SOYO, SevenNet, TACE) runs at P>1 on [owned | ghost] rows:
 a rank keeps the edges of its owned centres (the receiver rule of the
 edges-only ghost builder), every atom within the halo (cutoff + skin) of its
 domain is a ghost row holding its owner's wrapped coordinates, and before
@@ -242,12 +242,13 @@ class ShardContext(_Exchanges):
     captured step). ``owned_rows`` and ``ghost_rows``: the layout's owned
     slots (the rows before the ghost rows) and ghost rows, host ints, for a
     layer loop that runs its per-atom work on the owned slots only.
-    ``world_size``: the Python rank count, or None for a memory probe without
-    a layout (which must preserve the P>1 forward).
+    ``world_size``: the Python rank count, or None for a memory probe
+    (including a synthetic layout, which must preserve the P>1 forward).
     ``reverse_sum(x)``: the adjoint of ``exchange`` (one collective), for an
     upstream exchange that is an autograd function of its own, whose forward
     calls ``exchange`` (outside autograd) and whose backward calls this.
-    ``count_only``: the counting forward (and the memory probe): every call
+    ``count_only``: the counting forward (and the memory probe, with a probe
+    layout where a ghost-row trimming is declared): every call
     is counted and returns its input (no collective), except an ``exchange``
     of a tensor that holds the owned slots only (a layout with ghost rows),
     which returns it with zero ghost rows appended. ``exchange(point, x)`` may
@@ -263,8 +264,8 @@ class ShardContext(_Exchanges):
 
     @property
     def owned_rows(self) -> int:
-        """The owned slots (the atoms, then the unused slots): the rows before the ghost rows (without a layout, the
-        memory probe's context, every row)."""
+        """The owned slots (the atoms, then the unused slots): the rows before the ghost rows (without a layout, a
+        memory probe's context without trimming, every row)."""
         return int(self.owned.shape[0]) if self.layout is None else self.layout.n_cap
 
     def reverse_sum(self, grad: Tensor) -> Tensor:
@@ -434,26 +435,44 @@ def qualified_name(cls) -> str:
 
 def declared_modules(module, names) -> list:
     """The submodules of ``module`` that ``names`` declare, in order and each once: a dotted path in ``module``
-    (``"layers.0.gate"``), else a class (``"package.module.Class"``: every submodule of exactly that class). A name
-    that matches no module, or a TorchScript module (which takes no hooks), raises ``ValueError``."""
+    (``"layers.0.gate"``), else a class (``"package.module.Class"``: every submodule of exactly that class); a
+    ``(module, address)`` entry names its module so. A name that matches no module, or a TorchScript module (which
+    takes no hooks), raises ``ValueError``."""
+    return [target for target, _ in _declared_entries(module, names)]
+
+
+def _declared_entries(module, names) -> list:
+    """``[(submodule, addresses)]`` of a declaration, each submodule once in declaration order: ``addresses`` None for
+    a module named bare (every tensor argument, or the whole output), else the tuple of its entries' addresses."""
     found: list = []
     for name in names:
+        selector, address = name if isinstance(name, tuple) else (name, None)
         try:
-            matches = [module.get_submodule(name)]
+            matches = [module.get_submodule(selector)]
         except AttributeError:
-            matches = [submodule for submodule in module.modules() if qualified_name(type(submodule)) == name]
+            matches = [submodule for submodule in module.modules() if qualified_name(type(submodule)) == selector]
         if not matches:
-            raise ValueError(f"ShardSpec ghost-row trimming: {name!r} is neither a module path in the model nor the "
+            raise ValueError(f"ShardSpec ghost-row trimming: {selector!r} is neither a module path in the model nor the "
                              "class of one of its modules")
         if any(isinstance(match, torch.jit.ScriptModule) for match in matches):
-            raise ValueError(f"ShardSpec ghost-row trimming: {name!r} is a TorchScript module, which takes no hooks")
-        found += [match for match in matches if not any(match is other for other in found)]
+            raise ValueError(f"ShardSpec ghost-row trimming: {selector!r} is a TorchScript module, which takes no "
+                             "hooks")
+        for match in matches:
+            index = next((i for i, (target, _) in enumerate(found) if target is match), None)
+            if index is None:
+                found.append((match, None if address is None else (address,)))
+            elif (found[index][1] is None) != (address is None):
+                # a bare name cuts the tensor arguments (pads a tensor or tuple output) only, not a mapping's entries
+                raise ValueError(f"ShardSpec ghost-row trimming: {selector!r} selects a module also declared "
+                                 f"{'by entries' if address is None else 'bare'}; declare each module one way")
+            elif address is not None:
+                found[index] = (match, found[index][1] + (address,))
     return found
 
 def _trimmed_rows(module, target: int, owner: int):
     """(owned slots, every row) of the running P>1 forward for a trimming hook of the module with id ``target``
     registered by the trimming with id ``owner``, or None: outside that forward (another thread's call, a forward
-    whose trimming did not register it, one CUDA rank, the memory probe), on a copy of the module, or a rank without
+    whose trimming did not register it, one CUDA rank), on a copy of the module, or a rank (or memory probe) without
     ghost rows."""
     exchanges, trimming = _ACTIVE.get(), _TRIMMING.get()
     if exchanges is None or trimming is None or id(trimming) != owner or id(module) != target:
@@ -462,60 +481,118 @@ def _trimmed_rows(module, target: int, owner: int):
     if not ghost:
         return None
     owned = exchanges.owned_rows
-    return owned, owned + ghost
+    return owned, owned + ghost + trimming.trailing_rows
+
+
+def _cut(value, owned: int, every: int, where: str):
+    """An addressed argument cut to the owned slots: a tensor with every row (or the owned slots already)."""
+    if isinstance(value, Tensor) and value.ndim > 0 and value.shape[0] in (every, owned):
+        return value[:owned]
+    shape = tuple(value.shape) if isinstance(value, Tensor) else type(value).__name__
+    raise ValueError(f"ghost-row trimming: {where} is {shape}, not a tensor of the rank's {every} rows or its {owned} "
+                     "owned slots")
+
+
+def _padded(value, owned: int, every: int, where: str | None = None):
+    """``value`` with zero rows up to every row where it holds the owned slots (an addressed part: also accepted with
+    every row already; else ``ValueError``)."""
+    if isinstance(value, Tensor) and value.ndim > 0 and value.shape[0] == owned:
+        return torch.cat((value, value.new_zeros((every - owned, *value.shape[1:]))))
+    if where is not None and not (isinstance(value, Tensor) and value.ndim > 0 and value.shape[0] == every):
+        shape = tuple(value.shape) if isinstance(value, Tensor) else type(value).__name__
+        raise ValueError(f"ghost-row trimming: {where} is {shape}, not a tensor of the rank's {owned} owned slots or "
+                         f"its {every} rows")
+    return value
 
 class _OwnedSlotsHook:
     """Forward pre-hook (with kwargs) of a module of ``ShardSpec.owned_slot_inputs``: inside a P>1 forward, each
-    tensor argument (positional or keyword) with the rank's rows (owned slots, then ghost rows) keeps the owned slots
-    only; every other argument passes as it is. Holds the ids of its module and its trimming only (a deep copy's
-    hook passes). Called
-    without kwargs (another thread's call while the forward that registered it removes it: torch then calls it as a
-    plain pre-hook), it returns the arguments only."""
+    tensor argument (positional or keyword) with the rank's rows (owned slots, ghost rows, trailing rows) keeps the
+    owned slots only, every other argument passing as it is; with ``addresses``, only the addressed arguments (a
+    positional index, a keyword name, or (one of them, the key of an entry of that mapping argument: replaced in a
+    shallow copy)), each of which must hold every row or the owned slots already. Holds the ids of its module and its
+    trimming and the addresses only (a deep copy's hook passes). Called without kwargs (another thread's call while
+    the forward that registered it removes it: torch then calls it as a plain pre-hook), it returns the arguments
+    only."""
 
-    __slots__ = ("target", "owner")
+    __slots__ = ("target", "owner", "addresses")
 
-    def __init__(self, target, owner):
-        self.target, self.owner = id(target), id(owner)
+    def __init__(self, target, owner, addresses=None):
+        self.target, self.owner, self.addresses = id(target), id(owner), addresses
 
     def __call__(self, module, args, kwargs=None):
         rows = _trimmed_rows(module, self.target, self.owner)
         if rows is None:
             return None
         owned, every = rows
+        if self.addresses is None:
+            def cut(value):
+                return value[:owned] if isinstance(value, Tensor) and value.ndim > 0 and value.shape[0] == every else value
 
-        def cut(value):
-            return value[:owned] if isinstance(value, Tensor) and value.ndim > 0 and value.shape[0] == every else value
-
-        args = tuple(cut(arg) for arg in args)
-        return args if kwargs is None else (args, {name: cut(value) for name, value in kwargs.items()})
+            args = tuple(cut(arg) for arg in args)
+            return args if kwargs is None else (args, {name: cut(value) for name, value in kwargs.items()})
+        args, named = list(args), dict(kwargs or {})
+        for address in self.addresses:
+            arg, key = address if isinstance(address, tuple) else (address, None)
+            where = f"{type(module).__name__} argument {arg!r}" + ("" if key is None else f"[{key!r}]")
+            if isinstance(arg, str):
+                if arg not in named:
+                    raise ValueError(f"ghost-row trimming: {where} is not a keyword of the call")
+                value = named[arg]
+            else:
+                if not -len(args) <= arg < len(args):
+                    raise ValueError(f"ghost-row trimming: {where}: no positional argument {arg}")
+                value = args[arg]
+            if key is None:
+                value = _cut(value, owned, every, where)
+            else:
+                if not isinstance(value, MutableMapping) or key not in value:
+                    raise ValueError(f"ghost-row trimming: {where} is not an entry of a mutable mapping")
+                value = copy.copy(value)
+                value[key] = _cut(value[key], owned, every, where)
+            if isinstance(arg, str):
+                named[arg] = value
+            else:
+                args[arg] = value
+        return tuple(args) if kwargs is None else (tuple(args), named)
 
 class _ZeroGhostHook:
     """Forward hook of a module of ``ShardSpec.zero_ghost_outputs``: inside a P>1 forward, its output (a tensor, or
-    each tensor of a tuple or list) holding the owned slots' rows gets zero ghost rows appended, for a consumer that
-    reads every row (the ghost rows' values are never used). Holds the ids of its module and its trimming only."""
+    each tensor of a tuple or list) holding the owned slots' rows gets zero rows appended up to every row (ghost rows,
+    trailing rows), for a consumer that reads every row (those rows' values are never used); with ``addresses``, only
+    the addressed parts (a mapping output's entries, in a shallow copy, or a tuple output's elements), each holding
+    the owned slots or every row already. Holds the ids of its module and its trimming and the addresses only."""
 
-    __slots__ = ("target", "owner")
+    __slots__ = ("target", "owner", "addresses")
 
-    def __init__(self, target, owner):
-        self.target, self.owner = id(target), id(owner)
+    def __init__(self, target, owner, addresses=None):
+        self.target, self.owner, self.addresses = id(target), id(owner), addresses
 
     def __call__(self, module, args, output):
         rows = _trimmed_rows(module, self.target, self.owner)
         if rows is None:
             return None
         owned, every = rows
-
-        def pad(value):
-            if isinstance(value, Tensor) and value.ndim > 0 and value.shape[0] == owned:
-                return torch.cat((value, value.new_zeros((every - owned, *value.shape[1:]))))
-            return value
-
-        if isinstance(output, Tensor):
-            return pad(output)
-        if isinstance(output, (tuple, list)):
-            values = [pad(value) for value in output]
-            return type(output)(*values) if hasattr(output, "_fields") else type(output)(values)
-        return None
+        if self.addresses is None:
+            if isinstance(output, Tensor):
+                return _padded(output, owned, every)
+            if isinstance(output, (tuple, list)):
+                values = [_padded(value, owned, every) for value in output]
+                return type(output)(*values) if hasattr(output, "_fields") else type(output)(values)
+            return None
+        for part in self.addresses:
+            where = f"{type(module).__name__} output [{part!r}]"
+            if isinstance(part, str):
+                if not isinstance(output, MutableMapping) or part not in output:
+                    raise ValueError(f"ghost-row trimming: {where} is not an entry of a mutable mapping output")
+                output = copy.copy(output)
+                output[part] = _padded(output[part], owned, every, where)
+            else:
+                if not isinstance(output, (tuple, list)) or not -len(output) <= part < len(output):
+                    raise ValueError(f"ghost-row trimming: {where} is not an element of a tuple or list output")
+                values = list(output)
+                values[part] = _padded(values[part], owned, every, where)
+                output = type(output)(*values) if hasattr(output, "_fields") else type(output)(values)
+        return output
 
 class OwnedSlotHooks:
     """The ghost-row trimming of a ``ShardSpec`` (``owned_slot_inputs``, ``zero_ghost_outputs``) on one module.
@@ -535,8 +612,11 @@ class OwnedSlotHooks:
     """
 
     def __init__(self, module, spec):
-        self.cut = declared_modules(module, spec.owned_slot_inputs)
-        self.pad = declared_modules(module, spec.zero_ghost_outputs)
+        self.trailing_rows = int(spec.trailing_rows)
+        self.cut_entries = _declared_entries(module, spec.owned_slot_inputs)
+        self.pad_entries = _declared_entries(module, spec.zero_ghost_outputs)
+        self.cut = [target for target, _ in self.cut_entries]
+        self.pad = [target for target, _ in self.pad_entries]
         # An input exchange point's module reads the owners' rows in its ghost rows: its inputs are never cut (the
         # exchange's hook runs first, the cut would then drop the COPY).
         for point in spec.exchange_points:
@@ -559,10 +639,11 @@ class OwnedSlotHooks:
         handles = []
         token = _TRIMMING.set(self)
         try:
-            for target in self.cut:
-                handles.append(target.register_forward_pre_hook(_OwnedSlotsHook(target, self), with_kwargs=True))
-            for target in self.pad:
-                handles.append(target.register_forward_hook(_ZeroGhostHook(target, self)))
+            for target, addresses in self.cut_entries:
+                handles.append(target.register_forward_pre_hook(_OwnedSlotsHook(target, self, addresses),
+                                                                with_kwargs=True))
+            for target, addresses in self.pad_entries:
+                handles.append(target.register_forward_hook(_ZeroGhostHook(target, self, addresses)))
             yield self
         finally:
             for handle in handles:
@@ -605,7 +686,8 @@ class ShardedEnergyDerivative:
     gradient on its rows. The declared ghost-row trimming (``trim``, an
     :class:`OwnedSlotHooks` or None) is registered around each forward of
     :meth:`local_energy`: the step's, the counting forward's and the memory
-    probe's (which has no layout, so nothing is trimmed there).
+    probe's (a probe layout of owned slots and ghost rows: the probe measures
+    the trimmed peak).
     """
 
     def __init__(self, adapter, spec):

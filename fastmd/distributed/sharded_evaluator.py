@@ -1,4 +1,4 @@
-"""The distributed evaluator of a declared shard (``ShardSpec``): MACE, SevenNet, ORB and CHGNet on several GPUs.
+"""The distributed evaluator of a declared shard (``ShardSpec``): MACE, MACE-SOYO, SevenNet, ORB, CHGNet and TACE on several GPUs.
 
 :class:`ShardedEvaluator` has the API of ``DistributedMatRISEvaluator``
 (``distribute``, ``evaluate`` returning a ``DistributedPrediction``,

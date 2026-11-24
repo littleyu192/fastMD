@@ -1,0 +1,68 @@
+# The optional MACE-SOYO model family (fastmd.models.mace_soyo): mace-soyo 0.1.0 (the upstream repository at its
+# pinned commit) and cuEquivariance 0.12.0 for CUDA 13, plus the packages `import mace_soyo` needs that a PyTorch
+# environment lacks: its package imports torch-sim, which imports tables (with numexpr, blosc2 and their
+# dependencies) and declares h5py. Exact versions, each with the sha256 of its file.
+# The upstream mace-soyo package requires Python >=3.12,<3.15; do not bypass its Requires-Python metadata.
+#
+# Platforms: the platform wheels are the Linux aarch64 ones (Grace CPUs, e.g. GB200) for CPython 3.12:
+# cuequivariance-ops-torch-cu13, h5py, msgpack, ndindex and numexpr (cp312), tables and blosc2 (abi3), and
+# cuequivariance-ops-cu13 (any Python 3). The others are pure Python. An x86_64 environment needs its own hashes for
+# those files (a requirement may list several --hash options).
+#
+# mace-soyo is not on PyPI: its line is the GitHub source archive of commit 387b5114c974fb04b8aceffac82d1d8f10ea4ac0
+# (the commit Matbench Discovery pins), built without build isolation by the base environment's setuptools
+# (>= 77.0.3, as its pyproject.toml requires).
+#
+# Install over an environment that already runs FastMD, in a virtual environment that sees its packages:
+#
+#   python -m venv --system-site-packages <venv>
+#   <venv>/bin/python -m pip install --no-deps --no-build-isolation --require-hashes -r requirements-mace-soyo.txt
+#
+# This is the upstream MD test-environment manifest, not a portable FastMD installer. Its CI lane is not
+# distributed here. Other Python, architecture or CUDA combinations need separately verified wheels and hashes.
+# Install in an isolated environment; do not replace an existing model environment's PyTorch/cuEquivariance stack.
+#
+# Deliberately not installed, the base environment provides them: torch, numpy, ase, nvalchemi-toolkit-ops,
+# warp-lang and triton (the versions FastMD runs with stay in place; mace-soyo's own pins of torch 2.12.0,
+# warp-lang 1.13.0, numpy >= 2.4.6, the CUDA 12 cuEquivariance kernels and exact scipy, PyYAML, tqdm and cffi
+# versions are not followed), nvidia-cublas, a dependency of cuequivariance-ops-cu13 (the base environment's CUDA 13
+# cuBLAS and NVRTC are used), and the other dependencies of these packages: scipy, sympy, networkx, packaging, tqdm,
+# platformdirs, nvidia-ml-py, PyYAML, pydantic, httpx, rich and typing-extensions. mace-soyo's training dependencies
+# (torch-geometric, torch-ema, lmdb, ase-db-backends, opt_einsum_fx) are not needed to run its model.
+# opt_einsum-3.4.0-py3-none-any.whl (a dependency of cuequivariance)
+opt_einsum==3.4.0 --hash=sha256:69bb92469f86a1565195ece4ac0323943e83477171b91d24c35afe028a90d7cd
+# cuequivariance-0.12.0-py3-none-any.whl
+cuequivariance==0.12.0 --hash=sha256:cdca30e8954fb01ac8f724cc4d59fd6e624e393082fb8a18076602f9ef34d281
+# cuequivariance_torch-0.12.0-py3-none-any.whl
+cuequivariance-torch==0.12.0 --hash=sha256:32a6661343375ac0034af062eb9c3166a4f78af9fc7fa70e0709d03ef1ee4409
+# cuequivariance_ops_cu13-0.12.0-py3-none-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl
+cuequivariance-ops-cu13==0.12.0 --hash=sha256:658066f44a15c9abb274ade6a7b9a0366995badcb477f32eedc2ca011bb6be16
+# cuequivariance_ops_torch_cu13-0.12.0-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl
+cuequivariance-ops-torch-cu13==0.12.0 --hash=sha256:0667057f25a9b3e80467e58f9f7fd645b267ffcbdc6c5d828f028025b45139ac
+# torch_sim_atomistic-0.6.1-py3-none-any.whl
+torch-sim-atomistic==0.6.1 --hash=sha256:05d919cebbdae48baffc9cb701338c0f48eda1b245a2004ed61ac3dc9071c572
+# h5py-3.16.0-cp312-cp312-manylinux_2_28_aarch64.whl
+h5py==3.16.0 --hash=sha256:ff24039e2573297787c3063df64b60aab0591980ac898329a08b0320e0cf2527
+# tables-3.11.1-cp311-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+tables==3.11.1 --hash=sha256:56bf6fb9132ead989b7e76695d7613d6d08f071a8019038d6565ba90c66b9f3e
+# blosc2-4.15.0-cp311-abi3-manylinux_2_28_aarch64.whl
+blosc2==4.15.0 --hash=sha256:32f2d1fff25ec543d978cf6320fdaad67ad6ea9830f8e3a49c9d5ce2a64e9957
+# numexpr-2.14.2-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl
+numexpr==2.14.2 --hash=sha256:327be9ee62251c173236dc620147ff2d0e732a32f5bad918d78a10082f502f63
+# ndindex-1.10.1-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl
+ndindex==1.10.1 --hash=sha256:046c1e88d46b2bd2fd3483e06d27b4e85132b55bc693f2fca2db0bb56eea1e78
+# msgpack-1.2.4-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+msgpack==1.2.4 --hash=sha256:9ca1e78106675f2aed07dc37b842ce19be70010ab22c5c5c04688f0840d48539
+# py_cpuinfo-9.0.0-py3-none-any.whl
+py-cpuinfo==9.0.0 --hash=sha256:859625bc251f64e21f077d099d4162689c762b5d6a4c3c97553d56241c9674d5
+# threadpoolctl-3.8.0-py3-none-any.whl
+threadpoolctl==3.8.0 --hash=sha256:f1b49c82704d50f13ffae019c727b0fa4f6791a58f48f06a09c45face1be66da
+# h2-4.4.1-py3-none-any.whl
+h2==4.4.1 --hash=sha256:0e25f1462b23c9cb82d9eb02e28bc706dac2a68cb457c6a0d74d63c8a2a5d0e6
+# hpack-4.2.0-py3-none-any.whl
+hpack==4.2.0 --hash=sha256:858ac0b02280fa582b5080d68db0899c62a80375e0e5413a74970c5e518b6986
+# hyperframe-6.1.0-py3-none-any.whl
+hyperframe==6.1.0 --hash=sha256:b03380493a519fce58ea5af42e4a42317bf9bd425596f7a0835ffce80f1a42e5
+# MACE-SOYO-387b5114c974fb04b8aceffac82d1d8f10ea4ac0.tar.gz (GitHub source archive of the pinned commit; GitHub
+# does not guarantee that an archive's bytes stay the same: if its sha256 ever changes, re-pin after checking it)
+mace-soyo @ https://github.com/PrincessHakuryu/MACE-SOYO/archive/387b5114c974fb04b8aceffac82d1d8f10ea4ac0.tar.gz --hash=sha256:77087ab1f2b027f39956d4bdbb9015089a0cdae895eb388e2be4e8e22b72ed0d

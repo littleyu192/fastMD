@@ -30,7 +30,9 @@ compared with the clean forward's total energy:
   only ("trimmable"). A module that reads the senders' rows (before the
   message sum) changes the energy here, even where its own ghost-row outputs
   are dead (a whole interaction block). Mapping entries are reported, not
-  counted: the runtime cuts tensor arguments only.
+  counted in "trimmable": a bare module name in ``owned_slot_inputs`` cuts
+  tensor arguments only; a dead entry is declared as ``(module, (argument,
+  key))``.
 
 The report is the starting point of a declaration, which a person still
 reviews: a module that is trimmable on one system may not be on another (a
@@ -96,16 +98,25 @@ def forward_energy(evaluator) -> float:
     return float(total)
 
 
-def _ghost_rows():
-    """(owned slots, every row) of the running P>1 forward, or None outside it (or without ghost rows)."""
+def _ghost_rows(trailing: int = 0):
+    """(owned slots, every row: the ghost rows and ``trailing`` rows after them included) of the running P>1 forward,
+    or None outside it (or without ghost rows)."""
     exchanges = _ACTIVE.get()
     if exchanges is None or not exchanges.ghost_rows:
         return None
-    return exchanges.owned_rows, exchanges.owned_rows + exchanges.ghost_rows
+    return exchanges.owned_rows, exchanges.owned_rows + exchanges.ghost_rows + trailing
 
 
 def _rows(value, every: int) -> bool:
     return isinstance(value, Tensor) and value.ndim > 0 and value.shape[0] == every and value.is_floating_point()
+
+
+def _integer_keys(values, every: int) -> set:
+    """The keys of the mapping entries of ``values`` that are integer tensors with the rank's rows (atom types: no
+    NaN to write, not probed)."""
+    return {key for value in values if isinstance(value, Mapping) for key, entry in value.items()
+            if isinstance(key, str) and isinstance(entry, Tensor) and entry.ndim > 0 and entry.shape[0] == every
+            and not entry.is_floating_point()}
 
 
 def _parts(values, every: int, *, nested: bool) -> set:
@@ -133,17 +144,20 @@ class _Recorder:
     """Forward pre-hook and hook: the calls of a module in a P>1 forward and the probe parts of its inputs and
     outputs."""
 
-    def __init__(self):
-        self.calls, self.inputs, self.outputs = 0, set(), set()
+    def __init__(self, trailing: int = 0):
+        self.calls, self.inputs, self.outputs, self.trailing = 0, set(), set(), trailing
+        self.integers = set()
 
     def before(self, module, args, kwargs=None):
-        rows = _ghost_rows()
+        rows = _ghost_rows(self.trailing)
         if rows is not None:
             self.calls += 1
-            self.inputs |= _parts((*args, *(kwargs or {}).values()), rows[1], nested=False)
+            values = (*args, *(kwargs or {}).values())
+            self.inputs |= _parts(values, rows[1], nested=False)
+            self.integers |= _integer_keys(values, rows[1])
 
     def after(self, module, args, output):
-        rows = _ghost_rows()
+        rows = _ghost_rows(self.trailing)
         if rows is not None:
             self.outputs |= _parts((output,), rows[1], nested=True)
 
@@ -153,11 +167,11 @@ class _PoisonInputs:
     (``part`` None), or of one entry of its mapping arguments (in a shallow copy; the entry the module passes on
     unchanged in its returned mapping gets its clean value back, so that only this module reads the NaN)."""
 
-    def __init__(self, part):
-        self.part, self.swapped = part, []
+    def __init__(self, part, trailing: int = 0):
+        self.part, self.swapped, self.trailing = part, [], trailing
 
     def before(self, module, args, kwargs=None):
-        rows = _ghost_rows()
+        rows = _ghost_rows(self.trailing)
         if rows is None:
             return None
         owned, every = rows
@@ -191,11 +205,11 @@ class _PoisonOutput:
     """Forward hook: NaN in the ghost rows of the module's output (``part`` None: a tensor, each tensor of a tuple or
     list), or of one entry of a mapping output (in a shallow copy)."""
 
-    def __init__(self, part):
-        self.part = part
+    def __init__(self, part, trailing: int = 0):
+        self.part, self.trailing = part, trailing
 
     def __call__(self, module, args, output):
-        rows = _ghost_rows()
+        rows = _ghost_rows(self.trailing)
         if rows is None:
             return None
         owned, every = rows
@@ -230,7 +244,8 @@ def ghost_row_report(evaluator, modules=None, *, tolerance: float = 0.0, repeats
     "delta"}``: "dead" (NaN there leaves the energy finite and within the
     bound), "read" (a non-finite energy) or "changed" (finite, beyond the
     bound), with the energy's change from the first clean forward (None where
-    it is not finite); "trimmable": the probe of its tensor arguments (part "")
+    it is not finite), or "integer" for a mapping argument's integer entry with
+    the rank's rows (atom types), which takes no NaN and is not probed; "trimmable": the probe of its tensor arguments (part "")
     is dead. A module whose inputs and outputs never have the rank's rows has
     empty probes (it does not run, or its inputs hold the owned slots only
     already). TorchScript modules (and their submodules), which take no Python
@@ -242,7 +257,8 @@ def ghost_row_report(evaluator, modules=None, *, tolerance: float = 0.0, repeats
     scripted = [name for name in names if isinstance(module.get_submodule(name), torch.jit.ScriptModule)]
     names = [name for name in names if not any(name == other or name.startswith(other + ".") for other in scripted)]
     targets = {name: module.get_submodule(name) for name in names}
-    recorders = {name: _Recorder() for name in names}
+    trailing = int(getattr(evaluator.spec, "trailing_rows", 0))  # (a sink row after the ghost rows: TACE's)
+    recorders = {name: _Recorder(trailing) for name in names}
     handles = []
     try:
         for name in names:
@@ -256,7 +272,8 @@ def ghost_row_report(evaluator, modules=None, *, tolerance: float = 0.0, repeats
     noise = max(clean) - min(clean)
     bound = max(float(tolerance), 4.0 * noise)
     # Every rank probes the same list: the union of the ranks' parts.
-    local = {name: (_order(recorders[name].inputs), _order(recorders[name].outputs)) for name in names}
+    local = {name: (_order(recorders[name].inputs), _order(recorders[name].outputs), sorted(recorders[name].integers))
+             for name in names}
     gathered = evaluator.context.all_gather_object(local) if evaluator.context.world_size > 1 else [local]
 
     def probe(target, hooks) -> dict:
@@ -276,14 +293,16 @@ def ghost_row_report(evaluator, modules=None, *, tolerance: float = 0.0, repeats
         outputs = _order({part for ranks in gathered for part in ranks[name][1]})
         target = targets[name]
         entry = {"calls": recorders[name].calls // len(clean),
-                 "output": {part or "": probe(target, [(target.register_forward_hook, _PoisonOutput(part))])
+                 "output": {part or "": probe(target, [(target.register_forward_hook, _PoisonOutput(part, trailing))])
                             for part in outputs},
                  "inputs": {}}
         for part in inputs:
-            poison = _PoisonInputs(part)
+            poison = _PoisonInputs(part, trailing)
             entry["inputs"][part or ""] = probe(target, [
                 (lambda hook: target.register_forward_pre_hook(hook, with_kwargs=True), poison.before),
                 (target.register_forward_hook, poison.after)])
+        for key in sorted({key for ranks in gathered for key in ranks[name][2]}):
+            entry["inputs"][key] = {"verdict": "integer", "delta": None}  # (no NaN to write: not probed)
         entry["trimmable"] = entry["inputs"].get("", {}).get("verdict") == "dead"
         report[name] = entry
     return {"energy": energy, "noise": noise, "tolerance": bound, "modules": report, "scripted": scripted}

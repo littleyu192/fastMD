@@ -26,10 +26,11 @@ import torch.distributed as dist
 
 from fastmd.interfaces.gpu_md import GPUResidentMolecularDynamics
 from fastmd.execution.md_protocol import (
-    ENSEMBLES, RESTART_FILE, THERMO_FILE, TRAJECTORY_FILE, HeatingRamp, initialize_momenta,
+    ENSEMBLES, RESTART_FILE, THERMO_FILE, TRAJECTORY_FILE, HeatingRamp, constant_pressure_error, initialize_momenta,
 )
 from fastmd.config import InferenceConfig, resolve_config
 from fastmd.adapters import load_adapter
+from fastmd.models import DEFAULT, MODELS, check_load_options, model_family
 from fastmd.precision import (
     NOISE_FLOOR_SHIFT_A, compute_references, matmul_precision_scope, oracle_report, precision_record,
     warn_implicit_tf32,
@@ -105,6 +106,97 @@ def model_and_checkpoint(args) -> tuple[str, str | None]:
     if args.checkpoint is None and Path(args.model).is_file() and not args.model.endswith(".model"):
         return "matris", args.model
     return args.model, args.checkpoint
+
+
+def model_source(args) -> str:
+    """The registry family used by both preflight and loading, including checkpoint path dispatch."""
+    return model_family(*model_and_checkpoint(args))
+
+
+def ensemble_name(value: str) -> str:
+    """Reject constant-pressure ensembles with the MD driver's fixed-cell explanation."""
+    refusal = constant_pressure_error(value)
+    if refusal is not None:
+        raise argparse.ArgumentTypeError(refusal)
+    return value
+
+
+def matris_only_options(args, parser) -> list[str]:
+    """Explicit MatRIS scheduling options that would have no effect on a declared-shard evaluator."""
+    names = ("auto_eager_triplet_rows", "auto_single_rank_eager_triplet_rows", "saved_tensor_recompute")
+    return ["--" + name.replace("_", "-") for name in names
+            if getattr(args, name) != parser.get_default(name)]
+
+
+def sharded_configs(args) -> tuple[InferenceConfig, ParallelConfig]:
+    """The same declared-shard settings for early validation and evaluator construction."""
+    config = InferenceConfig(execution=args.execution, optimization_profile=args.profile, report=False,
+                             matmul_precision=args.precision, saved_tensor_recompute=args.saved_tensor_recompute,
+                             triton_dot_precision=args.triton_dot_precision, recompute_policy=args.recompute_policy)
+    parallel = ParallelConfig(domain_grid=tuple(args.grid) if args.grid else "auto", local_backend=args.local_backend,
+                              exchange_self_rows=args.exchange_self_rows, payload_transport=args.payload_transport,
+                              legacy_capacity_policy=args.legacy_capacity_policy, exchange_scheme=args.exchange_scheme,
+                              topology_engine=args.topology_engine, topology_skin=args.topology_skin,
+                              grad_mechanism=args.grad_mechanism, debug_replay_check=args.debug_replay_check)
+    return config, parallel
+
+
+def model_options_error(args, family: str, parser) -> str | None:
+    """Reject unsupported loading/evaluation options before binding CPUs or starting ranks and thread pools."""
+    from fastmd.adapters.protocol import NegotiationError
+
+    model_name, checkpoint = model_and_checkpoint(args)
+    if (args.model in {row.name for row in MODELS} - {DEFAULT} and not Path(args.model).exists()
+            and (checkpoint is None or family == DEFAULT)):
+        return (f"--model {args.model}: a model family's name loads the checkpoint file given with --checkpoint "
+                "where its loader reads one; otherwise give a pretrained name of the registry "
+                "(e.g. mace_mp_0, sevennet_0, orb_v3, chgnet_0_3_0)")
+    try:
+        check_load_options(model_name, model_path=checkpoint, model_dtype=args.dtype,
+                           optimization_profile=args.profile)
+    except (ValueError, TypeError, NegotiationError) as exc:
+        return f"--model {args.model} ({family}): {exc}"
+    if family == DEFAULT:
+        return None
+    from fastmd.distributed.sharded_evaluator import check_device, unsupported_settings
+
+    given = matris_only_options(args, parser)
+    if given:
+        return (f"{', '.join(given)}: MatRIS's scheduling options; the {family} model runs on ShardedEvaluator, "
+                "which has no such option")
+    try:
+        config, parallel = sharded_configs(args)
+        if args.dtype == "float64":
+            check_device(torch.device(args.device), torch.float64, int(os.environ.get("WORLD_SIZE", "1")))
+    except (ValueError, TypeError, NegotiationError) as exc:
+        return f"--model {args.model} ({family}): {exc}"
+    if args.topology_engine == "epoch" and args.device == "cpu":
+        return "--topology-engine epoch needs CUDA: CPU ranks rebuild their reference topology every evaluation"
+    unsupported = unsupported_settings(config, parallel)
+    if unsupported:
+        return (f"the {family} model runs on ShardedEvaluator, which does not run {', '.join(unsupported)}: "
+                "leave those options at their defaults")
+    return None
+
+
+def load_on_ranks(load, context, *, root_first: bool):
+    """Load named weights on rank zero first to avoid racing a shared download cache; agree every failure."""
+    adapter = error = None
+    if root_first:
+        if context.rank == 0:
+            try:
+                adapter = load()
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+        collective_check(context, error)
+    error = None
+    if not root_first or context.rank != 0:
+        try:
+            adapter = load()
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+    collective_check(context, error)
+    return adapter
 
 
 def write_report(path: Path, report: dict) -> None:
@@ -330,9 +422,9 @@ def md_thermostat(args, dynamics) -> dict | None:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True,
-                        help="model registry name (MatRIS, CHGNet, MACE, SevenNet, ORB), or MatRIS checkpoint")
+                        help="model registry name (MatRIS, CHGNet, MACE, MACE-SOYO, SevenNet, ORB, TACE), or MatRIS checkpoint")
     parser.add_argument("--checkpoint", help="local weights for the selected model (CHGNet uses bundled weights)")
-    parser.add_argument("--dtype", choices=("float32", "float64"), default=None,
+    parser.add_argument("--dtype", "--weights-dtype", dest="dtype", choices=("float32", "float64"), default=None,
                         help="model dtype; float64 is supported only by models that declare it")
     parser.add_argument("--input", required=True, help="ASE-readable fixed-cell full-PBC structure")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
@@ -410,6 +502,9 @@ def main():
                              "required the rows exchange) and rejected; model_graph uses the single-GPU tiers")
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--steps", type=int, default=3, help="fixed-frame E/F timing repetitions")
+    parser.add_argument("--stress", action="store_true",
+                        help="include stress in initial, warmup and timed fixed-frame evaluations; report the initial "
+                             "stress. MatRIS domain MD may retain the stress capture; native MD evaluates E/F")
     parser.add_argument("--md-steps", type=int, default=0,
                         help="total MD steps of the schedule (the heating ramp's denominator); "
                              "--resume continues from the saved step")
@@ -428,7 +523,7 @@ def main():
     md_options.add_argument("--md-driver", choices=("thin", "nve_legacy"), default="thin",
                             help="GPUResidentMolecularDynamics.from_evaluator, the only driver ('nve_legacy', "
                                  "the pre-3.3 DistributedNVE, was removed and is rejected)")
-    md_options.add_argument("--ensemble", choices=ENSEMBLES, default="nve",
+    md_options.add_argument("--ensemble", type=ensemble_name, choices=ENSEMBLES, default="nve",
                             help="nve (CLI default; the Python API's is nvt), nvt (Berendsen) or nvt_nhc "
                                  "(ASE Nose-Hoover chain, float64 state)")
     md_options.add_argument("--temp-start", type=float,
@@ -496,13 +591,16 @@ def main():
     md_error = removed_choice_error(args) or md_arguments_error(args)
     if md_error:
         parser.error(md_error)
+    family = model_source(args)
+    model_error = model_options_error(args, family, parser)
+    if model_error:
+        parser.error(model_error)
     if args.md_steps:
         try:  # an MD engine the options exclude fails before the model, oracle and E/F timing
             md_engine(args, int(os.environ.get("WORLD_SIZE", "1")), torch.device(args.device))
-            from fastmd.models import DEFAULT, _claiming
             # Only MatRIS has its own exchange strategy; other auto engines use the domain driver.
             if (args.steps_per_launch > 1 and args.md_engine == "auto"
-                    and _claiming(*model_and_checkpoint(args)).name != DEFAULT):
+                    and family != DEFAULT):
                 raise ValueError("declared model shards with the domain driver require --steps-per-launch 1")
         except ValueError as exc:
             parser.error(str(exc))
@@ -515,7 +613,7 @@ def main():
         auto_execution = (AutoExecution(
             eager_min_triplet_rows=args.auto_eager_triplet_rows,
             single_rank_eager_min_triplet_rows=args.auto_single_rank_eager_triplet_rows)
-                          if args.execution == "auto" else None)
+                          if args.execution == "auto" and family == DEFAULT else None)
         # Before thread pools and process groups start; a binding re-executes
         # this rank once so that all of its memory is first touched locally.
         affinity = bind_local_rank(args.cpu_affinity, device=args.device, reexec=True)
@@ -536,11 +634,19 @@ def main():
     evaluator = None
     try:
         device = torch.device("cuda", torch.cuda.current_device()) if args.device == "cuda" else torch.device("cpu")
+        stress_options = {"stress": True} if args.stress else {}
         atoms, metadata, error = None, None, None
         if context.rank == 0:
             try:
                 from ase.io import read
                 atoms = read(args.input)
+                if family != DEFAULT:
+                    from fastmd.distributed.partition import DomainPartition
+                    try:
+                        DomainPartition(torch.as_tensor(atoms.cell.array), 1, "auto",
+                                        tuple(bool(axis) for axis in atoms.pbc))
+                    except ValueError as exc:
+                        raise ValueError(f"--input {args.input} (pbc {atoms.pbc.tolist()}): {exc}") from None
                 # md_pyrolysis: --resume without a restart file is a fresh start.
                 resume = bool(args.md_steps and args.resume and (args.md_output_dir / RESTART_FILE).exists())
                 if args.md_steps and args.seed is not None and not resume:
@@ -563,9 +669,18 @@ def main():
         metadata = _objects(context, metadata)[0]
         started = time.perf_counter()
         model_name, checkpoint = model_and_checkpoint(args)
-        adapter = load_adapter(model_name, model_path=checkpoint, device=str(device), enable_compile=False,
-                               enable_checkpoint=False, model_dtype=args.dtype,
-                               optimization_profile=args.profile)
+        # The report's names, a file (--model or --checkpoint) resolved: a relative path keeps its location.
+        recorded = {key: str(Path(value).resolve()) if value is not None and Path(value).is_file() else value
+                    for key, value in (("model", model_name), ("checkpoint", checkpoint))}
+        def load():
+            return load_adapter(model_name, model_path=checkpoint, device=str(device), enable_compile=False,
+                                enable_checkpoint=False, model_dtype=args.dtype, optimization_profile=args.profile)
+
+        # Named weights can populate a shared cache. Explicit checkpoints and MACE .model paths are local loads.
+        root_first = (context.world_size > 1 and checkpoint is None and not Path(model_name).is_file()
+                      and Path(model_name).parent == Path(".") and not model_name.endswith(".model"))
+        adapter = load_on_ranks(load, context, root_first=root_first)
+        checkpoint_metadata = json.loads(json.dumps(getattr(adapter, "checkpoint", None), default=str))
         from fastmd.adapters.protocol import ShardDeclaration
         custom_strategy = isinstance(adapter, ShardDeclaration) and adapter.custom_strategy() is not None
         model = adapter.module.eval().requires_grad_(False)
@@ -687,23 +802,24 @@ def main():
                     error = str(exc)
                 reference_s = time.perf_counter() - reference_started
             collective_check(context, error)
-        evaluator = DistributedEvaluator(
-            adapter, metadata["cell"], pbc=metadata["pbc"], context=context,
-            config=InferenceConfig(execution=None if auto_execution and custom_strategy else args.execution,
-                                   optimization_profile=args.profile, report=False,
-                                   matmul_precision=args.precision,
-                                   saved_tensor_recompute=args.saved_tensor_recompute,
-                                   triton_dot_precision=args.triton_dot_precision,
-                                   recompute_policy=args.recompute_policy),
-            parallel=parallel)
+        if custom_strategy:
+            evaluation_config = InferenceConfig(
+                execution=None if auto_execution else args.execution, optimization_profile=args.profile, report=False,
+                matmul_precision=args.precision, saved_tensor_recompute=args.saved_tensor_recompute,
+                triton_dot_precision=args.triton_dot_precision, recompute_policy=args.recompute_policy)
+        else:
+            evaluation_config, parallel = sharded_configs(args)
+        evaluator = DistributedEvaluator(adapter, metadata["cell"], pbc=metadata["pbc"], context=context,
+                                         config=evaluation_config, parallel=parallel)
         if custom_strategy and single_engine != (evaluator.engine == "single"):
             raise RuntimeError(f"expected the single-GPU engine={single_engine}, got {evaluator.engine}")
         if custom_strategy and single_engine and evaluator._resolved.optimization_profile != reference_profile:
             raise RuntimeError(f"oracle reference profile {reference_profile!r} differs from the engine's "
                                f"{evaluator._resolved.optimization_profile!r}")
         state = evaluator.distribute(atoms)
-        initial = evaluator.evaluate(state)
+        initial = evaluator.evaluate(state, **stress_options)
         initial_gathered = evaluator.gather(initial)
+        initial_stress = None if not args.stress else initial.stress.detach().cpu().tolist()
         initial_energy = {"energy_eV": float(initial.energy),
                           "energy_eV_per_atom": float(initial.energy_per_atom),
                           "reference_energy_eV": float(initial.reference_energy)}
@@ -787,7 +903,7 @@ def main():
         if device.type == "cuda":
             torch.cuda.empty_cache()
         for _ in range(args.warmup):
-            initial = evaluator.evaluate(initial.state)
+            initial = evaluator.evaluate(initial.state, **stress_options)
             watchdog.beat()
         watchdog.phase("timed", long=False)
         if device.type == "cuda":
@@ -799,7 +915,7 @@ def main():
                 dist.barrier(group=context.group)
             synchronize()
             before = time.perf_counter()
-            initial = evaluator.evaluate(initial.state)
+            initial = evaluator.evaluate(initial.state, **stress_options)
             synchronize()
             elapsed = (time.perf_counter() - before) * 1000
             initial.stats["wall_ms"] = elapsed
@@ -809,6 +925,9 @@ def main():
             samples.append(max(_objects(context, elapsed)))
             per_step.append(_objects(context, initial.stats))
             watchdog.beat()
+        # Native MD and the final oracle release the evaluator. Keep the fixed-frame plan while it is live.
+        record_plan = getattr(evaluator, "plan_record", None)
+        plan_record = record_plan().as_dict() if callable(record_plan) else None
         final = initial
         md = None
         native_final = None
@@ -967,7 +1086,10 @@ def main():
                       "cuda": torch.version.cuda, "configurations": configurations,
                       "requested_execution": args.execution, "cpu_affinity_by_rank": affinities,
                       "precision_record": precision_record(args.precision, device, triton_dot_precision=args.triton_dot_precision),
-                      "model": model_name, "checkpoint": checkpoint,
+                      **recorded,
+                      "model_family": family, "checkpoint_metadata": checkpoint_metadata,
+                      "plan_record": plan_record, "plan_record_scope": "fixed-frame evaluations",
+                      "stress_eV_A3": initial_stress,
                       "adapter": adapter.name, "input": str(Path(args.input).resolve()),
                       "energy_eV": energies["energy_eV"], "energy_eV_per_atom": energies["energy_eV_per_atom"],
                       "reference_energy_eV": energies["reference_energy_eV"],
