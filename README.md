@@ -110,6 +110,10 @@ CHGNet execution controls repeated atomic-sum noise in the strict FP32 checks; t
 Use separate model environments as described in [Installation](#installation). `--profile generic` uses
 reference local operators; `topology` selects the model's optimized operators.
 
+Preview a declared shard's plan with `fastmd-explain --structure input.extxyz --model chgnet_0_3_0
+--device cuda --world-size 2 --json`. This estimates the partition in one process; it does not launch ranks
+or measure memory. For MatRIS, inspect the distributed evaluator's `config_summary()`.
+
 <details>
 <summary>Python API and runtime details</summary>
 
@@ -118,6 +122,9 @@ The public API is `fastmd.DistributedEvaluator` with `fastmd.ParallelConfig`;
 `torchrun --standalone --nproc_per_node=2 example.py`. `initialize()` binds each local GPU and creates the
 data and control groups. Without an initialized process group, the evaluator runs locally with one rank.
 Each rank must call collective methods in the same order.
+Pass a loaded FastMD adapter or an uncompiled MatRIS instance to `DistributedEvaluator`.
+For other models, first use `load_adapter("mace", model_path="/path/to/model", device="cuda")`
+or the appropriate model family; the evaluator does not load model names, paths, or bare upstream modules.
 
 ```python
 from ase.io import read

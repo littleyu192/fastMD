@@ -9,6 +9,11 @@ and every decision is printed with its reason; no entry point is constructed and
 the plan is the one the runtime's rules give (``fastmd.adapters.negotiate.dry_run``); on a CPU
 execution auto resolves to eager, as the entry points do there, and a request the entry point rejects
 (an unsupported execution mode, a CUDA graph without CUDA) fails with the entry point's error.
+
+At ``--world-size N`` greater than one, models with a declared shard instead print the distributed
+entry point's plan, regardless of ``--entry``. Its domain grid, owned atoms, ghost rows and edges are
+estimates computed in this one process; no process group is initialized and no MD or memory measurement
+runs. MatRIS's multi-rank plan is available from its distributed evaluator's ``config_summary()``.
 """
 from __future__ import annotations
 
@@ -46,15 +51,20 @@ def main(argv=None) -> int:
     parser.add_argument("--device", default=None, help="cpu or cuda (default: the entry point's: cuda when "
                         "available for gpu_md, cpu for the calculator)")
     parser.add_argument("--config", default=None, help="InferenceConfig fields as a JSON object")
-    parser.add_argument("--world-size", type=int, choices=(1,), default=1, help="FastMD uses one device")
+    parser.add_argument("--world-size", type=int, default=1,
+                        help="positive rank count (default 1); above 1, estimate a declared shard's distributed "
+                             "plan regardless of --entry; MatRIS uses its evaluator's config_summary()")
     parser.add_argument("--json", action="store_true", help="print the record as JSON")
     args = parser.parse_args(argv)
+    if args.world_size < 1:
+        parser.error("--world-size must be a positive integer")
 
     import ase.io
     import torch
     from fastmd.adapters import load_adapter
     from fastmd.adapters.negotiate import NegotiationError
     from fastmd.adapters.negotiate import dry_run
+    from fastmd.adapters.protocol import ShardSpecDeclaration
 
     default = "cuda" if args.entry == "gpu_md" and torch.cuda.is_available() else "cpu"
     device = torch.device(args.device or default)
@@ -72,9 +82,12 @@ def main(argv=None) -> int:
         adapter.module.eval()
         for parameter in adapter.module.parameters():
             parameter.requires_grad_(False)
-        record = dry_run(adapter, config, entry=args.entry, device=device, atoms=atoms,
-                         world_size=args.world_size)
-
+        if args.world_size > 1 and isinstance(adapter, ShardSpecDeclaration) and adapter.shard_spec() is not None:
+            from fastmd.distributed.sharded_evaluator import dry_run_record
+            record = dry_run_record(adapter, config, atoms=atoms, world_size=args.world_size, device=device)
+        else:
+            record = dry_run(adapter, config, entry=args.entry, device=device, atoms=atoms,
+                             world_size=args.world_size)
     except (NegotiationError, ValueError) as error:
         print(f"{type(error).__name__}: {error}", file=sys.stderr)
         return 2

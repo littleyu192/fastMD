@@ -21,6 +21,7 @@ Hence gates use :func:`fp32_gemm_mode`, never the legacy precision string.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -59,6 +60,11 @@ IMPLEMENTATION_TOLERANCES = {
     "ieee": {"energy_error_eV_per_atom": 1e-4, "force_RMSE_eV_A": 1e-5, "force_max_error_eV_A": 5e-5},
     "tf32": {"energy_error_eV_per_atom": 1e-4, "force_RMSE_eV_A": 5e-3, "force_max_error_eV_A": 5e-2},
 }
+# Rigid translation leaves the physics unchanged but exposes the reference's
+# FP32 rounding error. Only a failed absolute gate may use this measured floor,
+# and the caller must first establish that the tested topology is the reference's.
+NOISE_FLOOR_SHIFT_A = (0.37, 0.21, 0.13)
+NOISE_FLOOR_MULTIPLE = 3.0
 _WARNED: set[str] = set()
 # InferenceConfig.triton_dot_precision of the active scope (triton_dot_precision_scope); None: the
 # MATRIS_TRITON_DOT_PRECISION environment value, default auto.
@@ -399,7 +405,8 @@ def ef_errors(energy_per_atom: float, forces: Tensor, reference) -> dict:
 def oracle_report(energy_per_atom: float, forces: Tensor, references: dict, *,
                   precision_force_rmse_tolerance: float | None = None,
                   implementation_tolerance: dict | None = None,
-                  reference_profile: str = "generic") -> dict:
+                  reference_profile: str = "generic",
+                  noise_floor: Callable[[], dict] | None = None) -> dict:
     """Gate implementation error; report (optionally gate) precision error.
 
     Top-level error keys repeat the gated implementation comparison for
@@ -407,14 +414,44 @@ def oracle_report(energy_per_atom: float, forces: Tensor, references: dict, *,
     maps an fp32 GEMM mode to replacement gates (other modes keep
     IMPLEMENTATION_TOLERANCES). ``reference_profile`` only records which
     optimization profile the caller's eager reference ran.
+
+    ``noise_floor`` (called only when the absolute gate fails) returns the
+    :func:`compute_references` of the same reference on the system shifted
+    by NOISE_FLOOR_SHIFT_A; the implementation then passes within
+    NOISE_FLOOR_MULTIPLE times that reference-vs-reference difference,
+    never below the absolute tolerance. Callers pass it only with positive
+    evidence that the tested topology is the reference's (else a missing
+    edge could hide in the floor). A failed measurement or non-finite floor
+    or resulting tolerance leaves all absolute gates in force.
+    ``implementation`` records the absolute gate, the floor, the gate used
+    ("absolute" or "noise_floor") and its tolerance.
     """
     mode = references["run_fp32_gemm"]
     same = references["same_precision"]
-    implementation = ef_errors(energy_per_atom, forces, same if same is not None else references["highest"])
+    compared = "same_precision" if same is not None else "highest"
+    implementation = ef_errors(energy_per_atom, forces, references[compared])
     tolerance = {**IMPLEMENTATION_TOLERANCES, **(implementation_tolerance or {})}[mode]
-    implementation.update(reference="same_precision" if same is not None else "highest",
-                          tolerance=dict(tolerance),
-                          passed=all(implementation[key] <= limit for key, limit in tolerance.items()))
+    absolute = all(implementation[key] <= limit for key, limit in tolerance.items())
+    gate, floor = dict(tolerance), None
+    if not absolute and noise_floor is not None:
+        try:
+            floor = ef_errors(*noise_floor()[compared], references[compared])
+            if not all(math.isfinite(value) for value in floor.values()):
+                raise ValueError(f"non-finite noise floor {floor}")
+            candidate = {key: max(limit, NOISE_FLOOR_MULTIPLE * floor[key])
+                         for key, limit in tolerance.items()}
+            # Even a finite measured floor can overflow when scaled. Adopt the
+            # whole candidate only after checking it, so no gate becomes infinite.
+            if not all(math.isfinite(value) for value in candidate.values()):
+                raise ValueError(f"non-finite noise-floor tolerance {candidate}")
+            gate = candidate
+        except Exception as exc:  # e.g. OOM beside the evaluator: the absolute verdict stands
+            floor = {"error": f"{type(exc).__name__}: {exc}"}
+        floor.update(shift_A=list(NOISE_FLOOR_SHIFT_A), multiple=NOISE_FLOOR_MULTIPLE)
+    implementation.update(reference=compared, tolerance=gate, absolute_tolerance=dict(tolerance),
+                          absolute_passed=absolute, noise_floor=floor,
+                          gate="noise_floor" if gate != tolerance else "absolute",
+                          passed=all(implementation[key] <= limit for key, limit in gate.items()))
     precision = None
     if same is not None:
         precision = {

@@ -31,7 +31,8 @@ from fastmd.execution.md_protocol import (
 from fastmd.config import InferenceConfig, resolve_config
 from fastmd.adapters import load_adapter
 from fastmd.precision import (
-    compute_references, matmul_precision_scope, oracle_report, precision_record, warn_implicit_tf32,
+    NOISE_FLOOR_SHIFT_A, compute_references, matmul_precision_scope, oracle_report, precision_record,
+    warn_implicit_tf32,
 )
 from fastmd.distributed.affinity import ENVIRONMENT, MODES, bind_local_rank
 from fastmd.distributed.auto_execution import AutoExecution
@@ -39,6 +40,7 @@ from fastmd.distributed.config import ParallelConfig, single_rank_profile
 from fastmd.distributed.evaluator import DistributedMatRISEvaluator, _objects, collective_check, use_single_rank_engine
 from fastmd.distributed.api import DistributedEvaluator
 from fastmd.distributed.launch import fail_fast, initialize, shutdown
+from fastmd.distributed.partition import AtomState
 from fastmd.distributed.watchdog import ProgressWatchdog
 
 # The single-GPU engine builds its graph with the reference's own builder and
@@ -92,6 +94,83 @@ def md_arguments_error(args) -> str | None:
     if off:
         return f"--steps-per-launch {args.steps_per_launch} must divide {', '.join(off)}"
     return None
+
+
+def model_and_checkpoint(args) -> tuple[str, str | None]:
+    """Resolve CLI model arguments using the same spelling for preflight and loading.
+
+    The original ``--model /path/to/matris.pth.tar`` selects MatRIS with that
+    checkpoint; MACE's ``.model`` paths go through the model registry unchanged.
+    """
+    if args.checkpoint is None and Path(args.model).is_file() and not args.model.endswith(".model"):
+        return "matris", args.model
+    return args.model, args.checkpoint
+
+
+def write_report(path: Path, report: dict) -> None:
+    """Write ``report`` as JSON to the new file ``path``, whole or not at all: serialized first (a non-finite
+    float, e.g. in a failed oracle's errors, as its string with a note), then linked from a temporary file
+    (never overwriting)."""
+    try:
+        text = json.dumps(report, indent=2, allow_nan=False)
+    except ValueError:
+        def finite(value):
+            if isinstance(value, float) and not math.isfinite(value):
+                return str(value)
+            if isinstance(value, dict):
+                return {key: finite(item) for key, item in value.items()}
+            return [finite(item) for item in value] if isinstance(value, (list, tuple)) else value
+        text = json.dumps({**finite(report), "non_finite_values": "written as strings ('nan', 'inf')"},
+                          indent=2, allow_nan=False)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(text)
+    try:
+        os.link(temporary, path)
+    finally:
+        temporary.unlink()
+
+
+def neighbor_pairs(atoms, cutoff: float) -> int:
+    """Directed pairs within ``cutoff`` of ``atoms`` (ASE's FP64 neighbour list: an independent edge count)."""
+    from ase.neighborlist import neighbor_list
+    return len(neighbor_list("i", atoms, cutoff))
+
+
+def same_pairs(first, second) -> bool:
+    """Whether two canonical topologies have the same directed atom pairs (with multiplicity, any image) and as
+    many triplets: a rigid shift may rewrap images but must not move a pair across a cutoff."""
+    from collections import Counter
+
+    def pairs(topology):
+        return Counter((key[0], key[1]) for key in topology.directed_keys)
+    return pairs(first) == pairs(second) and len(first.triplet_keys) == len(second.triplet_keys)
+
+
+def sharded_edge_count(evaluator, owned_ids, context) -> int | None:
+    """Directed edges at owned centres of a declared-shard evaluator's last evaluation, summed over the ranks
+    (collective); None where its engine does not list them (one CUDA rank; a CPU line-graph shard)."""
+    count = None
+    try:  # every rank reaches the gather below
+        if evaluator.device.type != "cuda":  # exact rows and edges; a receiver shard lists the owned centres' edges
+            if evaluator.spec.message_flow == "receiver":
+                count = int(evaluator.last_stats["edges"])
+        elif not evaluator.single:
+            keys = evaluator.edge_keys()
+            count = int(torch.isin(keys[:, 0], owned_ids.to(keys.device)).sum())
+    except Exception:  # no count: no evidence, the absolute gate decides
+        count = None
+    counts = _objects(context, count)
+    return None if None in counts else sum(counts)
+
+
+def edge_evidence(distributed: int | None, atoms, cutoff: float) -> dict:
+    """The oracle's topology evidence for an evaluator without canonical topology parity: its edge count against
+    ASE's at the same frame (``parity`` None: the engine does not list its edges)."""
+    if distributed is None:
+        return {"parity": None, "reason": "this engine does not list its edges"}
+    reference = neighbor_pairs(atoms, cutoff)
+    return {"parity": distributed == reference, "distributed_edges": distributed, "reference_edges": reference,
+            "reference": "ASE neighbour list"}
 
 
 def md_engine(args, world_size: int, device) -> tuple[str, str]:
@@ -420,6 +499,11 @@ def main():
     if args.md_steps:
         try:  # an MD engine the options exclude fails before the model, oracle and E/F timing
             md_engine(args, int(os.environ.get("WORLD_SIZE", "1")), torch.device(args.device))
+            from fastmd.models import DEFAULT, _claiming
+            # Only MatRIS has its own exchange strategy; other auto engines use the domain driver.
+            if (args.steps_per_launch > 1 and args.md_engine == "auto"
+                    and _claiming(*model_and_checkpoint(args)).name != DEFAULT):
+                raise ValueError("declared model shards with the domain driver require --steps-per-launch 1")
         except ValueError as exc:
             parser.error(str(exc))
     if args.deterministic:
@@ -464,6 +548,10 @@ def main():
                 metadata = {"cell": atoms.cell.array.tolist(), "pbc": atoms.pbc.tolist(), "resume": resume}
                 if args.output is not None and args.output.exists():
                     raise ValueError(f"refusing to overwrite {args.output}")
+                final_npz = None if args.output is None else args.output.with_suffix(".final.npz")
+                if (args.oracle_final and final_npz is not None
+                        and (final_npz.exists() or final_npz.is_symlink())):
+                    raise ValueError(f"refusing to overwrite {final_npz} (the --oracle-final frame of --output)")
                 # fail_fast never overwrites; a stale record would pass for this run's.
                 stale = [] if args.output is None else sorted(args.output.parent.glob(
                     glob.escape(args.output.name) + ".rank*.error.json"))
@@ -474,11 +562,7 @@ def main():
         collective_check(context, error)
         metadata = _objects(context, metadata)[0]
         started = time.perf_counter()
-        # Retain the original --model /path/to/matris.pth.tar spelling while
-        # accepting every model through the same registry as the calculator.
-        model_name, checkpoint = args.model, args.checkpoint
-        if checkpoint is None and Path(model_name).is_file() and not model_name.endswith(".model"):
-            model_name, checkpoint = "matris", model_name
+        model_name, checkpoint = model_and_checkpoint(args)
         adapter = load_adapter(model_name, model_path=checkpoint, device=str(device), enable_compile=False,
                                enable_checkpoint=False, model_dtype=args.dtype,
                                optimization_profile=args.profile)
@@ -490,8 +574,17 @@ def main():
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
 
-        def adapter_reference():
-            """Unsharded eager E/F on the whole system, before shard allocation."""
+        def shifted(frame):
+            """``frame`` (Atoms or AtomState) rigidly shifted by NOISE_FLOOR_SHIFT_A: an oracle's noise floor."""
+            if isinstance(frame, AtomState):
+                shift = torch.tensor(NOISE_FLOOR_SHIFT_A, dtype=frame.positions.dtype, device=frame.positions.device)
+                return AtomState(frame.ids, frame.positions + shift, frame.numbers)
+            frame = frame.copy()
+            frame.positions += NOISE_FLOOR_SHIFT_A
+            return frame
+
+        def adapter_reference(atoms):
+            """Unsharded eager E/F on the whole system ``atoms``, before shard allocation."""
             from fastmd.interfaces.calculator import MLIPCalculator
             reference_adapter = load_adapter(
                 model_name, model_path=checkpoint, device=str(device), model_dtype=args.dtype,
@@ -509,8 +602,15 @@ def main():
             finally:
                 calculator.close()
 
-        def original_reference(build_graph):
-            """Canonical topology and E/F references of the original model.
+        def calculator_floor(atoms):
+            """The calculator's references on ``atoms`` shifted. Its graph is rebuilt there and not compared (the
+            calculator does not expose it): a pair at the cutoff that rounds across it enters with the model's
+            vanishing cutoff envelope."""
+            return adapter_reference(shifted(atoms))[1]
+
+        def original_reference(build_graph, topology=True):
+            """Canonical topology (``topology``: unless the single-GPU engine) and E/F references of the
+            original model.
 
             Reference numerics are independent of the tested path: eager
             kernels of ``reference_profile`` and 'highest' GEMMs, plus a
@@ -530,7 +630,7 @@ def main():
                                                      checkpoint="off", report=False))
             with resolved.scope():
                 original_topology = None
-                if not single_engine:  # its graph comes from this same builder
+                if topology and not single_engine:  # its graph comes from this same builder
                     with matmul_precision_scope("highest"):
                         original_topology = frozen_topology_from_radius_graph(build_graph())
                 return original_topology, compute_references(predict, args.precision, args.triton_dot_precision)
@@ -550,6 +650,7 @@ def main():
                              else "generic")
 
         original = None
+        noise_floor = None  # the reference on the shifted system, see oracle_report
         reference_s = 0.0
         if args.oracle and (device.type == "cuda" or not custom_strategy):
             # As in benchmark_single_ef, compute and release the single-GPU
@@ -562,10 +663,22 @@ def main():
                 reference_started = time.perf_counter()
                 try:
                     from fastmd.graph.gpu_graph_builder import atoms_to_graph_gpu
-                    original = adapter_reference() if not custom_strategy else original_reference(lambda: atoms_to_graph_gpu(
-                        atoms, atom_graph_cutoff=model.config["pairwise_cutoff"],
-                        line_graph_cutoff=model.config["three_body_cutoff"], device=device,
-                        check_isolated_atoms=False))
+
+                    def gpu_graph(frame):
+                        return lambda: atoms_to_graph_gpu(
+                            frame, atom_graph_cutoff=model.config["pairwise_cutoff"],
+                            line_graph_cutoff=model.config["three_body_cutoff"], device=device,
+                            check_isolated_atoms=False)
+                    original = adapter_reference(atoms) if not custom_strategy else original_reference(gpu_graph(atoms))
+                    if not custom_strategy:
+                        noise_floor = lambda: calculator_floor(atoms)
+                    elif not single_engine:
+                        # Called only if the absolute gate fails (then beside the evaluator's shards).
+                        def noise_floor():
+                            shifted_topology, references = original_reference(gpu_graph(shifted(atoms)))
+                            if not same_pairs(shifted_topology, original[0]):
+                                raise ValueError("the shifted frame's graph has other pairs or triplets")
+                            return references
                     gc.collect()
                     synchronize()
                     if device.type == "cuda":
@@ -599,7 +712,9 @@ def main():
         watchdog.phase("oracle")
         oracle = None
         error = None
-        topology = None
+        topology = edges = None
+        if args.oracle and not custom_strategy:
+            edges = sharded_edge_count(evaluator, initial.state.ids, context)
         if args.oracle and not single_engine and custom_strategy:
             from fastmd.distributed.graph import gather_topology
             topology = gather_topology(evaluator.last_graph, context)
@@ -617,7 +732,7 @@ def main():
                         # gathered system is both the topology parity
                         # reference and the reference model's graph.
                         from fastmd.distributed.graph import build_local_graph
-                        from fastmd.distributed.partition import AtomState, DomainPartition
+                        from fastmd.distributed.partition import DomainPartition
                         # Wrapped, like the engine's halo coordinates: the
                         # frozen images refer to them (forces are unchanged).
                         whole = DomainPartition(evaluator.partition.cell, 1)
@@ -628,21 +743,31 @@ def main():
                         frozen = freeze_topology([local])
                     original = original_reference(lambda: radius_graph_from_frozen(
                         frozen, system, evaluator.partition.cell))
+                    # The same frozen images: a rigid shift needs no rewrap.
+                    noise_floor = lambda: original_reference(lambda: radius_graph_from_frozen(
+                        frozen, shifted(system), evaluator.partition.cell), topology=False)[1]
                 original_topology, references = original
+                evidence = None
                 if single_engine or not custom_strategy:
                     parity = None
                     oracle = {"canonical_graph_parity": None, "canonical_graph_parity_reason": (
                         "E/F compared to unsharded eager model; canonical MatRIS topology comparison "
                         "does not apply to this engine")}
+                    if not custom_strategy:
+                        oracle["edge_count_parity"] = edge_evidence(edges, atoms, adapter.topology_spec().cutoff)
+                        evidence = oracle["edge_count_parity"]["parity"]
                 else:
                     parity = (topology.directed_keys == original_topology.directed_keys
                               and topology.triplet_keys == original_topology.triplet_keys)
                     oracle = {"canonical_graph_parity": parity}
+                    evidence = parity
                 oracle.update(oracle_report(
                     float(initial.energy_per_atom), initial_gathered["forces"], references,
                     precision_force_rmse_tolerance=tolerance,
                     implementation_tolerance=SINGLE_ENGINE_TOLERANCE if single_engine and custom_strategy else None,
-                    reference_profile=reference_profile))
+                    reference_profile=reference_profile,
+                    # The floor only with positive topology evidence (else a missing edge could hide in it).
+                    noise_floor=noise_floor if evidence is True else None))
                 oracle["passed"] = parity is not False and oracle["passed"]
                 # Other ranks wait in collective_check (--timeout) meanwhile.
                 oracle["rank0_seconds"] = reference_s + time.perf_counter() - oracle_started
@@ -655,7 +780,7 @@ def main():
         collective_check(context, error)
         # The independent oracle is diagnostic only. Do not keep its full GPU
         # graph or saved tensors alive during sharded timing or memory reporting.
-        original = original_topology = topology = references = None
+        original = original_topology = topology = references = noise_floor = None
         watchdog.phase("warmup")
         gc.collect()
         synchronize()
@@ -787,6 +912,7 @@ def main():
         configurations = _objects(context, evaluator.config_summary())
         affinities = _objects(context, affinity)
         final_oracle = None
+        final_error = None  # raised after the report is written: a finished run keeps its report
         if args.oracle_final:
             if context.rank == 0 and args.output is not None:
                 # Keep a self-contained snapshot even if the independent
@@ -798,10 +924,19 @@ def main():
                     np.savez_compressed(stream, cell=metadata["cell"], pbc=metadata["pbc"],
                                         **{key: value.cpu().numpy() for key, value in gathered.items()},
                                         **energies)
+            # The final frame's topology evidence (collective, before close): the gathered canonical topology
+            # (MatRIS) or the shards' edges; none for one CUDA rank, whose graph is the reference builder's kind.
+            final_edges = None
+            if native_final is None and custom_strategy and not single_engine:
+                from fastmd.distributed.graph import gather_topology
+                final_topology = gather_topology(evaluator.last_graph, context)
+                final_edges = None if final_topology is None else len(final_topology.directed_keys)
+                final_topology = None
+            elif native_final is None and not custom_strategy:
+                final_edges = sharded_edge_count(evaluator, final.state.ids, context)
             # Release all distributed graphs/hooks collectively before loading
             # the whole-system reference on rank 0. This check is not timed.
             evaluator.close()
-            error = None
             if context.rank == 0:
                 try:
                     atoms = atoms.copy()
@@ -809,15 +944,21 @@ def main():
                     gc.collect()
                     if device.type == "cuda":
                         torch.cuda.empty_cache()
-                    _, final_references = adapter_reference()
+                    _, final_references = adapter_reference(atoms)
+                    evidence = edge_evidence(final_edges, atoms, model.config["pairwise_cutoff"] if custom_strategy
+                                             else adapter.topology_spec().cutoff)
+                    # Two FP32 builders on the same frame: the noise floor applies as in --oracle, with the
+                    # same requirement of positive topology evidence.
                     final_oracle = oracle_report(
                         energies["energy_eV_per_atom"], gathered["forces"], final_references,
-                        precision_force_rmse_tolerance=tolerance, reference_profile="generic")
+                        precision_force_rmse_tolerance=tolerance, reference_profile="generic",
+                        noise_floor=(lambda: calculator_floor(atoms)) if evidence["parity"] is True else None)
+                    final_oracle["edge_count_parity"] = evidence
                     if not final_oracle["passed"]:
-                        raise AssertionError(f"final-frame single-GPU oracle failed: {final_oracle}")
+                        final_error = f"final-frame single-GPU oracle failed: {final_oracle}"
                 except Exception as exc:
-                    error = str(exc)
-            collective_check(context, error)
+                    final_error = str(exc)
+                    final_oracle = {"passed": False, "error": final_error}
         if context.rank == 0:
             from fastmd.distributed.timing import summarize_wall_time
             serial = lambda data: {key: value.tolist() for key, value in data.items()}
@@ -841,9 +982,10 @@ def main():
                       "initial_frame": serial(initial_gathered), "final_frame": serial(gathered)}
             if args.output is not None:
                 args.output.parent.mkdir(parents=True, exist_ok=True)
-                with args.output.open("x") as stream:
-                    json.dump(report, stream, indent=2, allow_nan=False)
+                write_report(args.output, report)
             print(json.dumps({key: report[key] for key in ("world_size", "natoms", "median_ms", "oracle", "md")}), flush=True)
+        if args.oracle_final:
+            collective_check(context, final_error)
         watchdog.phase("teardown")
         if evaluator is not None:
             evaluator.close()
