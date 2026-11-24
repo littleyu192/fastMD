@@ -151,3 +151,14 @@ class MatRISAdapter:
         if self.module.is_intensive:
             return energy * atom_counts
         return energy
+
+    def exchange_strategy(self) -> str:
+        """P>1: the bond-partial exchange of ``fastmd.distributed`` (its own evaluator and driver)."""
+        return "bond_partial"
+
+    def custom_strategy(self):
+        """The distributed evaluator's exchange strategy (at any rank count): the bond-partial exchange of MatRIS's
+        multi-GPU package (imported here)."""
+        from .distributed.strategy import BOND_PARTIAL
+
+        return BOND_PARTIAL

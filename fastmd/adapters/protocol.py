@@ -867,6 +867,14 @@ class EdgeShiftInput(Protocol):
 
 
 @runtime_checkable
+class LayerExchange(Protocol):
+    """Capability: multi-GPU (P>1) evaluation through a layer exchange."""
+
+    def exchange_strategy(self) -> str:
+        ...
+
+
+@runtime_checkable
 class SystemInputs(Protocol):
     """Capability: static per-system inputs (a model head, a task, charge, spin), part of the plan
     fingerprint; a change means a new plan."""

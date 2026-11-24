@@ -80,7 +80,7 @@ import torch
 from torch import Tensor
 
 from fastmd.adapters.patches import PatchRecord, apply_patches, revert_patches
-from fastmd.adapters.protocol import CapacityStep, CaptureContract, GraphBatch, PaddingRule, \
+from fastmd.adapters.protocol import CapacityStep, CaptureContract, ExchangePoint, ShardSpec, GraphBatch, PaddingRule, \
     TopologySpec
 
 # Pretrained weights by name: (CHGNet.load model name, file in the chgnet package, sha256 of the file).
@@ -99,6 +99,30 @@ _SINK_ATOMS = PaddingRule("sink_atoms")
 _CAPACITY_STEP = CapacityStep(u_step=128, min_pad_u=128, t_step=128, min_pad_t=128, u_thermal_factor=1.01,
                               t_thermal_factor=1.06, u_union_headroom=0.10, t_union_headroom=0.25)
 _ELEMENTS = 94  # CHGNet's element tables (AtomRef columns, atom embedding rows): Z = 1..94
+
+
+def _empty_bonds_are_identity(module) -> bool:
+    """Whether every bond convolution preserves its input when its angle sum is zero.
+
+    A bias-free output MLP and an unnormalized residual need no empty-angle
+    guard. In a shard that guard would discard triplet sums received from
+    the other owner of a boundary bond with no locally owned angles.
+    """
+    for layer in module.bond_conv_layers:
+        if layer is None:
+            continue
+        if not layer.resnet or layer.bond_norm is not None:
+            return False
+        if layer.use_mlp_out:
+            for leaf in layer.mlp_out.modules():
+                if any(leaf.children()):
+                    continue
+                if isinstance(leaf, torch.nn.Linear):
+                    if leaf.bias is not None:
+                        return False
+                elif not isinstance(leaf, (torch.nn.Identity, torch.nn.Dropout)):
+                    return False
+    return True
 
 
 def _bond_has_angles(batch: GraphBatch) -> Tensor:
@@ -333,6 +357,14 @@ class CHGNetInput:
     atoms_per_graph: Tensor  # [1] int64: the rows of graph 0
 
 
+_SHARD_PINS = {
+    "chgnet.model.model.CHGNet._compute": "5ae5d9693e397b39fce59ffce181a2ac6513144790ca1dacd4207ee1a70c788a",
+    "chgnet.model.layers.AtomConv.forward": "d161d41a6152c6d7f7db04ec197561c80563a479fbf9bafd88ab2359c8171665",
+    "chgnet.model.layers.BondConv.forward": "163796057c24c12e05ba0bab624d32d8aecf0a41d6c2d9fafd3d7d3a7a000acc",
+    "chgnet.model.layers.AngleUpdate.forward": "4abb95fb3e2a25aa9b0fff4c38e080933637a3b4ff44580c5e868c78597dc10a",
+}
+
+
 class CHGNetAdapter:
     """An upstream CHGNet module as a :class:`~fastmd.adapters.protocol.ModelAdapter` with an
     :class:`~fastmd.adapters.protocol.EnergyTap` (see the module docstring).
@@ -353,6 +385,7 @@ class CHGNetAdapter:
         for parameter in self.module.parameters():
             parameter.requires_grad_(False)
         self.checkpoint = dict(checkpoint or {})
+        self._empty_bond_identity = _empty_bonds_are_identity(self.module)
         # Far self-loops where the smooth cutoffs make them add nothing (the pretrained models); else sink rows.
         self._padding = _FAR_SELF_LOOPS if _loops_add_nothing(self.module) else _SINK_ATOMS
         # Shape constants per (rows, device): built once and never freed, since captured graphs read them.
@@ -458,7 +491,7 @@ class CHGNetAdapter:
         hook = module.mlp.register_forward_hook(tap)
         bond_hooks = []
         try:
-            if batch.padding is not None or batch.systems is not None:
+            if not self._empty_bond_identity and (batch.padding is not None or batch.systems is not None):
                 # CHGNet skips bond convolutions for an empty angle graph. The
                 # biased 0.2.0 layers need this branch per system in a union,
                 # including when a captured graph changes its live triplet count.
@@ -544,5 +577,49 @@ class CHGNetAdapter:
         sync-free)."""
         revert_patches(self._patches)
         self.sync_free = False
+
+    def shard_spec(self) -> ShardSpec:
+        """CHGNet at P>1 (``message_flow="line_graph"``): an atom convolution sums its messages at the centre and
+        reads the senders' atom features, and a bond convolution sums the messages of the triplets at both ends of
+        a bond (``BondConv``'s ``aggregate``, consumed by its ``mlp_out`` alone). So before ``mlp_out`` of every
+        bond convolution the line slots (boundary bonds shorter than the bond-graph cutoff, the bonds with
+        triplets) take the sum of both ends' partials (``pair_merge``, 64 values per slot), and the ghost rows of
+        the next atom convolution's input (64 per ghost atom; the first convolution's features come from the
+        species) are copied in the same collective: the atom features a bond convolution receives are the next
+        atom convolution's input (a COPY of its own where no bond convolution precedes the atom convolution, or
+        where the atom and bond widths differ). Unused atom slots and padded rows are hydrogen (in CHGNet's
+        tables). Pins: the forward and the three layers' forwards (``_SHARD_PINS``); another source refuses P>1
+        with the reason."""
+        from ..adapters.patches import PatchRecord
+
+        if not self._empty_bond_identity:
+            from fastmd.adapters.protocol import NegotiationError
+            raise NegotiationError("CHGNet distributed inference requires bias-free residual bond convolutions "
+                                   "without normalization (the 0.3.0 checkpoint); this variant needs a global "
+                                   "empty-angle branch")
+        module = self.module
+        width = int(module.atom_embedding.embedding.embedding_dim)
+        bond_width = int(module.bond_embedding.out_features)  # BondConv's triplet sum (its mlp_out input)
+        points = []
+        for index in range(1, len(module.atom_conv_layers)):
+            # The bond convolution between atom convolutions index - 1 and index, if the module has one.
+            bond = index - 1 < len(module.bond_conv_layers) and module.bond_conv_layers[index - 1] is not None
+            copy = dict(name=f"atom_conv_layers.{index}.atom_feas", module=f"atom_conv_layers.{index}", width=width,
+                        hook="input", arg="atom_feas")
+            if bond:
+                merge = f"bond_conv_layers.{index - 1}.mlp_out.input"
+                points.append(ExchangePoint(name=merge, module=f"bond_conv_layers.{index - 1}.mlp_out",
+                                            width=bond_width, hook="input", arg=0, kind="pair_merge"))
+            if not bond or bond_width != width:  # (one fused buffer carries one width)
+                points.append(ExchangePoint(**copy))
+                continue
+            points.append(ExchangePoint(**copy, fuse_into=merge,
+                                        fuse_from=(f"bond_conv_layers.{index - 1}", "atom_feas")))
+        pins = tuple(PatchRecord(name=f"chgnet.shard.{target.rsplit('.', 2)[-2]}", target=target,
+                                 distribution="chgnet", versions=CHGNET_VERSIONS, source_sha256=sha256,
+                                 reason="the multi-GPU line-partial hooks rely on this forward unchanged")
+                     for target, sha256 in _SHARD_PINS.items())
+        return ShardSpec(exchange_points=tuple(points), message_flow="line_graph", pad_species=1, source_pins=pins,
+                         line_slot_cutoff=float(module.graph_converter.bond_graph_cutoff))
 
 

@@ -219,7 +219,8 @@ def dry_run_record(adapter, resolved, *, entry: str, device, atoms, pbc, world_s
     rules (:func:`matris_execution_rule`, :func:`_matris_recompute_preview`)."""
     import torch
     if world_size != 1:
-        raise ValueError("FastMD supports one device per simulation")
+        raise ValueError("the dry run covers MatRIS single-GPU entry points; for P>1 use "
+                         "fastmd.distributed.DistributedMatRISEvaluator.config_summary()")
     from fastmd.graph.fixed_capacity_builder import _fixed_builder_available
     # Only a CUDA device reaches a rule that reads the rows (auto runs eager on a CPU).
     cuda = device.type == "cuda" and torch.cuda.is_available()

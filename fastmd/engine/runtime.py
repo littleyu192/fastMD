@@ -1,12 +1,43 @@
-"""Local hooks for MatRIS interaction layers.
+"""The model's runtime hooks, design layer L0<->L6 (docs/unified_engine_design.md §3.2, §5.7 T1).
 
-The layer schedule calls these methods directly; routes are identity and
-there is no communication or distributed gradient backend.
+``EngineRuntime`` is the one implementation of the eight hooks the interaction
+layers call (``attention_rows/route/nodes/edges`` and
+``refinement_rows/route/nodes/edges``, called from
+``matris/models/matris/interaction_block.py``), plus ``for_block``/``for_layer``,
+``select_line_nodes`` (block level) and ``local``. It is parameterized by a ``Communicator`` (``fastmd.engine.comm``),
+a ``GradBackend`` (L3) and the row routes of the layout:
+
+* identity routes (P=1, ``routes=None``, no backend): a hook calls the layer
+  method directly and inserts no stage or exchange (INV-6). Only the layer
+  level is used: ``MatRIS.forward`` and ``Interaction_Block.forward`` keep
+  ``runtime=None`` at block level, so the single-GPU control flow
+  (torch.compile, checkpoint, the ``torch.where`` line-graph selection) is
+  unchanged, and the layers take ``LOCAL_RUNTIME`` where they took the
+  ``LOCAL_FORWARD_RUNTIME`` singleton. The compiled layers trace these hooks,
+  so the identity branch keeps that singleton's bodies and call depth, and
+  holds no closure (see ``fastmd.engine.dispatch`` on torch.compile).
+* exchange routes (P>1, ``BondPartialRuntime`` in MatRIS's multi-GPU package,
+  ``fastmd.models.matris.distributed.runtime``): every local stage runs
+  through ``backend.local`` and every row transport through
+  ``backend.exchange``, in the fixed stage and exchange order of the prepared
+  schedule (G-D4). Since step 4.2 the P>1 backend is
+  ``fastmd.engine.grad.AutogradBackend`` (one autograd backward; the
+  StageTape is gone) and the routes are the bond_partial exchange's
+  (``fastmd.models.matris.distributed.bond_partial.BondPartialRoutes``). The rows
+  exchange's routed hooks of this class (and its routes object) were
+  removed with it: the base class keeps the identity branches, the local
+  stage and the line-graph selection that ``BondPartialRuntime`` inherits.
+
+The pre-3.1b runtimes and their ``MATRIS_RUNTIME_ENGINE=legacy`` rollback
+were removed in step 4.2; for one version setting the variable to anything
+but ``unified`` is an error at import.
+
+This module must not import ``fastmd.models.matris`` or ``fastmd.distributed``.
 """
 from __future__ import annotations
 
 import os
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 import torch
 
@@ -37,6 +68,24 @@ MODEL_FORWARD_METHODS = frozenset({
 })
 
 
+@runtime_checkable
+class GradBackend(Protocol):
+    """Differentiation boundaries of one forward (design §3.2 L3).
+
+    ``input`` registers a leaf, ``local`` runs a rank-local stage on values of
+    this backend, ``exchange`` moves rows along a binding and ``energy_anchor``
+    ties the energy to every exchange of the forward; the owner differentiates
+    that seed once (``AutogradBackend.backward``). The P>1 implementation is
+    ``fastmd.engine.grad.AutogradBackend`` (steps 4.1/4.2).
+    """
+
+    def input(self, x, name: str = ""): ...
+
+    def local(self, fn: Callable, *values, name: str = ""): ...
+
+    def exchange(self, value, binding, name: str = ""): ...
+
+    def energy_anchor(self, energy): ...
 
 
 class EngineRuntime:
@@ -48,9 +97,9 @@ class EngineRuntime:
     layer of an evaluation (as the pre-3.1b block/layer runtimes were).
     """
 
-    def __init__(self, comm: Any = None, backend: Any = None, routes: Any = None):
-        if backend is not None or routes is not None:
-            raise ValueError("FastMD supports local execution only")
+    def __init__(self, comm: Any = None, backend: GradBackend | None = None, routes: Any = None):
+        if (backend is None) != (routes is None):
+            raise ValueError("exchange routes need a GradBackend; identity routes take none")
         # ``comm``: the context's Communicator (Local at P=1, DomainCommunicator at P>1).
         self.comm, self.backend, self.routes = comm, backend, routes
         self.index = self.block = self.name = self.line_layer = None
@@ -70,7 +119,7 @@ class EngineRuntime:
         view = self._view(self.index, self.block, name)
         routes = self.routes
         if routes is not None:
-            raise TypeError("FastMD supports local execution only")
+            raise TypeError("P>1 exchange routes are BondPartialRuntime's")
         return view
 
     def local(self, fn: Callable, *args, name: str = ""):
@@ -93,12 +142,12 @@ class EngineRuntime:
     def attention_rows(self, layer, nodes, edges, graph, directed2undirected):
         if self.routes is None:
             return layer.attention_rows(nodes, edges, graph, directed2undirected)
-        raise TypeError("FastMD supports local execution only")
+        raise TypeError("P>1 exchange routes are BondPartialRuntime's")
 
     def attention_route(self, rows, graph):
         if self.routes is None:
             return rows
-        raise TypeError("FastMD supports local execution only")
+        raise TypeError("P>1 exchange routes are BondPartialRuntime's")
 
     def attention_nodes(self, layer, nodes, rows, graph):
         if self.routes is None:
@@ -107,12 +156,12 @@ class EngineRuntime:
                 nodes, message, source_logits, graph["source_index"],
                 message, target_logits, graph["target_index"], graph,
             )
-        raise TypeError("FastMD supports local execution only")
+        raise TypeError("P>1 exchange routes are BondPartialRuntime's")
 
     def attention_edges(self, layer, edges, rows, graph, directed2undirected):
         if self.routes is None:
             return layer.attention_edges(edges, rows[0], graph, directed2undirected)
-        raise TypeError("FastMD supports local execution only")
+        raise TypeError("P>1 exchange routes are BondPartialRuntime's")
 
     def refinement_rows(self, layer, nodes, edges, radial, graph,
                         directed2undirected, atom_feat):
@@ -126,19 +175,19 @@ class EngineRuntime:
             # Keep weight separate so the local fused weighted-segment reduction
             # never needs to materialize the full weighted message tensor.
             return raw, weight, raw, residual
-        raise TypeError("FastMD supports local execution only")
+        raise TypeError("P>1 exchange routes are BondPartialRuntime's")
 
     def refinement_route(self, rows, graph):
         if self.routes is None:
             return rows
-        raise TypeError("FastMD supports local execution only")
+        raise TypeError("P>1 exchange routes are BondPartialRuntime's")
 
     def refinement_nodes(self, layer, nodes, rows, graph):
         if self.routes is None:
             return layer.refinement_nodes(
                 nodes, rows[0], rows[1], graph["target_index"], graph,
             )
-        raise TypeError("FastMD supports local execution only")
+        raise TypeError("P>1 exchange routes are BondPartialRuntime's")
 
     def refinement_edges(self, layer, edges, rows, graph,
                          directed2undirected, skip_edge_update):
@@ -149,9 +198,7 @@ class EngineRuntime:
             return layer.refinement_edges(
                 residual, rows[2], graph, directed2undirected, skip_edge_update,
             )
-        raise TypeError("FastMD supports local execution only")
-
-
+        raise TypeError("P>1 exchange routes are BondPartialRuntime's")
 
 
 # P=1: the layer-level singleton (identity routes); blocks keep runtime=None.

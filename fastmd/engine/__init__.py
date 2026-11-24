@@ -1,1 +1,1 @@
-"""Single-device execution, kernel selection, capture bookkeeping and memory policy."""
+"""Shared single- and multi-GPU execution, operator selection, and memory policy."""

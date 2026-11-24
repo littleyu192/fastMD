@@ -156,19 +156,25 @@ def neighbor_list_nvidia(
             )
             num_neighbors = torch.zeros(n_atoms, dtype=torch.int32, device=device)
 
-            _nvidia_nl(
-                positions=positions,
-                cutoff=cutoff + 1e-6,
-                cell=cell,
-                pbc=pbc,
-                batch_idx=batch_idx,
-                method="batch_cell_list",
-                neighbor_matrix=neighbor_matrix,
-                neighbor_matrix_shifts=neighbor_shifts,
-                num_neighbors=num_neighbors,
-                half_fill=False,
-                **fixed_cell,
-            )
+            # The nvalchemiops API launches on Warp's current stream. Match
+            # torch's stream so geometry/zero-fill writes precede the query
+            # and the indexing below waits for its neighbour buffers.
+            import warp as wp
+
+            with wp.ScopedStream(wp.stream_from_torch(torch.cuda.current_stream(device))):
+                _nvidia_nl(
+                    positions=positions,
+                    cutoff=cutoff + 1e-6,
+                    cell=cell,
+                    pbc=pbc,
+                    batch_idx=batch_idx,
+                    method="batch_cell_list",
+                    neighbor_matrix=neighbor_matrix,
+                    neighbor_matrix_shifts=neighbor_shifts,
+                    num_neighbors=num_neighbors,
+                    half_fill=False,
+                    **fixed_cell,
+                )
             if return_num_neighbors:
                 break
             max_count = _max_neighbor_count(num_neighbors)

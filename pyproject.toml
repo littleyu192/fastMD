@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fastmd"
 version = "0.1.0"
-description = "Single-device molecular simulation with multiple ML interatomic potentials"
+description = "Single-device and distributed molecular simulation with multiple ML interatomic potentials"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}

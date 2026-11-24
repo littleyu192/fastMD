@@ -1,9 +1,73 @@
-"""Operator selection for single-device MatRIS inference.
+"""Operator dispatcher, design layer L1 (docs/unified_engine_design.md §3.2, §4.3).
 
-OpDispatcher chooses a fused implementation or its PyTorch reference using
-KernelPolicy and certified ExecutionLayout metadata. Layouts requiring
-communication are rejected. Shape and dtype eligibility remain checked at
-each site; the recorder reports the operators actually used."""
+``OpDispatcher(KernelPolicy, ExecutionLayout)`` chooses, per model site, the
+fused kernel or the generic torch lowering that the P=1 model selected inline
+before step 2.3, in the same priority order and with the same recorder
+records and run-time fallbacks. Selection has two parts (§4.3):
+
+* static eligibility depends only on the policy, the layout and the fusion
+  scope. The scope-independent part is computed once per dispatcher (plain
+  attributes); dispatchers are cached per (policy fingerprint, layout
+  fingerprint, strict_errors, backend) in a bounded process-wide LRU, so the
+  cache key of a static decision is (site, policy, layout, fusion scope) and
+  never contains a shape. The fusion scope itself is read live, last, where
+  the inline gates read it (``fusion_scope_active()``), so checkpoint
+  recomputation and dynamo guards see the runner's scope and the compiled
+  program guards the same globals.
+* tensor eligibility (row count >= ``min_rows``, device, rank, width,
+  ``requires_grad``) is checked per call from host metadata only: no
+  synchronization, no allocation.
+
+At P>1 (step 2.4) the distributed runtime attaches a ``DistributedOpDispatcher``
+built from the layout its preparer declares (``ExecutionLayout.from_bond_partial``:
+route "exchange", interleaved pairs, private sink, prepared owner CSR, shared
+value rows) with ``strict_errors=True`` (INV-4) and the local backend
+as cache-key component; the same model sites then select the single-GPU fused
+kernels on the distributed layouts. Step 2.6 removed the P>1 ``ops`` backends
+(``NativeBackend`` / ``torch_reference`` modules) and the ``dispatch_engine``
+rollback switch: this dispatcher is the only operator engine.
+
+A kernel entry may still return None (a cold cache under capture, an entry
+guard). At P=1 that keeps today's fallback and the decline is recorded by the
+entry itself, exactly as before.
+
+Deterministic mode (``fastmd.precision.deterministic_mode``): the atomic
+weighted segment sum declines here (its forward adds with atomics); the
+kernels whose VJP adds with atomics stay selected and order that sum
+themselves (``triton_zero_skip_index.ordered_index_add_``), so their forward
+values are unchanged.
+
+``process_graphs`` attaches the dispatcher to the batch, atom and line graph
+dicts under ``"_ops"``; the model sites select only through it (step 2.6
+removed their inline P=1 branches), so a graph dict without one is an error.
+
+torch.compile (``enable_compile``) traces these methods inside the compiled
+layer modules, and G-S3 requires the compiled program (graph breaks, frames,
+recompiles, resume functions) to stay identical. Hence:
+
+* a method replaced an inline helper (removed in step 2.6) at the helper's
+  call depth and kept its parameter names, body and gate order (the ``use_*``
+  predicates mirror the former ``_use_fused_*`` helpers): with other names
+  dynamo unified a size symbol of ``pair_expand`` differently when the
+  recording pass split that frame, and
+  Inductor failed to codegen. Where the former code called kernels inline and
+  a callee can graph-break (the line envelope's compiled lowering), the site
+  keeps the inline calls under the dispatcher's predicate (``use_line_envelope``);
+* calls into modules whose activations graph-break (``GatedMLP``, ``MLP``, the
+  indexed/merged projections) stay at the model site. For them the
+  dispatcher supplies the policy (``use_gather_cat``, ``sorted_vjp``, the
+  ``dispatcher=`` argument of ``GatedMLP.forward_with_residual``), not a
+  wrapper frame. ``use_threebody_basis`` / ``use_threebody_linear`` do the
+  same for the (uncompiled) three-body embedding.
+
+Transition notes: the policy is ``KernelPolicy.from_globals()`` (step 2.2),
+snapshotted when the graph is processed and cached per raw value of every
+input ``from_globals`` reads; the model's module globals remain the source of
+truth. Gates that live inside modules (``GatedMLP._finish_gate``'s gated
+LayerNorm, the indexed-projection and merged-projection weight caches, the
+compiled lowerings) keep their own guards; the dispatcher decides whether a
+site tries them. This module must not import ``fastmd.models.matris`` at import time.
+"""
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -12,8 +76,7 @@ import sys
 
 import torch
 
-from fastmd.engine import policy as _policy
-from fastmd.engine import recorder as _recorder
+from fastmd.engine import policy as _policy, recorder as _recorder
 from fastmd.engine.layout import ExecutionLayout
 from fastmd.engine.policy import KernelPolicy
 from fastmd.precision import deterministic_mode
@@ -47,8 +110,7 @@ def _policy_key() -> tuple | None:
     environment.
     """
     global _POLICY_OPTIONS
-    from fastmd.config import OPTION_REGISTRY
-    from fastmd.config import current_config
+    from fastmd.config import OPTION_REGISTRY, current_config
 
     if _POLICY_OPTIONS is None:
         _POLICY_OPTIONS = tuple((name, spec.bindings) for name, spec in OPTION_REGISTRY.items()
@@ -104,9 +166,7 @@ def dispatcher_for(policy: KernelPolicy, layout: ExecutionLayout, *,
     if dispatcher is not None:
         _DISPATCHERS.move_to_end(key)
         return dispatcher
-    if layout.route != "identity":
-        raise ValueError("FastMD supports single-device layouts only")
-    cls = OpDispatcher
+    cls = DistributedOpDispatcher if layout.route == "exchange" else OpDispatcher
     dispatcher = cls(policy, layout, strict_errors=strict_errors, backend=backend)
     _DISPATCHERS[key] = dispatcher
     if len(_DISPATCHERS) > _CACHE_SIZE:
@@ -427,7 +487,7 @@ class OpDispatcher:
         Names mirror the former inline ``attention_nodes`` body (see ``pair_expand``).
         """
         if self.use_segment_attention(source_alpha_0, source_rows):
-            from fastmd.models.matris.op.triton_segment_attention import segment_attention
+            from fastmd.models.matris.op.triton_segment_attention import segment_attention, paired_segment_attention
 
             if self.reuse_csr:
                 target_identity_csr = self.identity_csr[
@@ -451,8 +511,6 @@ class OpDispatcher:
                 source_identity = target_identity = False
 
             if self.paired_attention and source_rows is target_rows:
-                from fastmd.models.matris.op.triton_segment_attention import paired_segment_attention
-
                 return paired_segment_attention(
                     source_alpha_0,
                     target_alpha_0,
@@ -599,6 +657,138 @@ class OpDispatcher:
         return self.threebody_basis_eager or _policy.fusion_scope_active()
 
 
+class DistributedOpDispatcher(OpDispatcher):
+    """The P>1 selection (route "exchange", design §4.4 "P>1 需要"): the P=1
+    rules on a distributed layout, plus what that layout declares.
+
+    * ``strict_errors`` (INV-4): an admitted fused implementation that fails
+      raises instead of silently returning None; the indexed projections get
+      a strict ``projection_config`` (the policy's backend and row threshold).
+    * pairs: interleaved (E == 2U with padding) qualifies the pair kernels.
+    * private sink (padded layout): row gathers and unweighted row sums use
+      the zero-skipping kernels, whose atomics omit the zero addends of the
+      padding rows that all target the one sink (deterministic mode: ordered
+      sums); the atomic weighted segment sum is not selected there.
+    * the deterministic CSR segment sum (step 2.5a D6, policy switch
+      ``segment_sum_csr``) reduces the refinement rows over the owner CSR of
+      the local rows (``segment_csr``), skipping the private sink.
+    * segment attention reads the prepared owner CSR (``_owner_{side}_csr``,
+      int64, with the private sink as skipped segment) and never sorts in the
+      model body; paired when the layout shares the kind's value rows and
+      both sides are the same tensor.
+    """
+
+    def __init__(self, policy: KernelPolicy, layout: ExecutionLayout, *,
+                 strict_errors: bool = True, backend: str | None = None):
+        super().__init__(policy, layout, strict_errors=strict_errors, backend=backend)
+        self.private_sink = layout.sink == "private_single"
+        self.owner_csr = {kind: kind in layout.owner_csr for kind in ("atom", "line")}
+        self.shared_value_rows = {kind: kind in layout.shared_value_rows for kind in ("atom", "line")}
+        # D6: the owner reductions have the prepared owner CSR (segment_csr).
+        self.segment_sum_csr_enabled = policy.ops["segment_sum_csr"].enabled_eager and bool(layout.owner_csr)
+        projection = policy.ops["indexed_projection"]
+        if self.strict_errors and projection.enabled_eager:
+            from fastmd.engine.kernels.segment import IndexedProjectionConfig
+
+            self.projection_config = IndexedProjectionConfig(
+                enabled=True, backend=projection.backend, min_rows=projection.min_rows,
+                strict_errors=True, mixed_width=self.mixed_width_cat_enabled)
+
+    def gather(self, value, indices):
+        if self.private_sink:
+            from fastmd.engine.kernels.triton_zero_skip_index import (
+                zero_skip_index_select, zero_skip_index_select_reason,
+            )
+
+            if zero_skip_index_select_reason(value, indices) is None:
+                return zero_skip_index_select(value, indices)
+        return torch.index_select(value, 0, indices)
+
+    def use_weighted_segment_sum(self, weight, value) -> bool:
+        if self.private_sink:
+            return False
+        return super().use_weighted_segment_sum(weight, value)
+
+    def segment_sum(self, value, segment, num_segment, *, weight=None, bin_count=None):
+        if weight is None and self.private_sink:
+            from fastmd.engine.kernels.triton_zero_skip_index import (
+                zero_skip_index_sum, zero_skip_index_sum_reason,
+            )
+
+            if zero_skip_index_sum_reason(value, segment, num_segment) is None:
+                return zero_skip_index_sum(value, segment, num_segment)
+        return super().segment_sum(value, segment, num_segment, weight=weight, bin_count=bin_count)
+
+    def segment_csr(self, graph, side, segment, num_segment):
+        """The owner CSR of this rank's local rows
+        (``graph["_owner_{side}_reduce_csr"]`` = (perm, int64 offsets, skip),
+        the private sink as skipped segment), as (perm, off, False, skip); None
+        without one.
+        """
+        csr = graph.get(f"_owner_{side}_reduce_csr")
+        if csr is None or csr[1].numel() != num_segment + 1:
+            return None
+        perm, off, skip = csr
+        return perm, off, False, skip
+
+    def segment_attention(self, source_alpha_0, source_rows, source_node_index,
+                          target_alpha_0, target_rows, target_node_index, num_segment, graph,
+                          *, return_lse=False):
+        """``return_lse`` (the A2 bond-partial line attention) also returns each
+        side's per-segment log-sum-exp of the logits (-inf where empty):
+        ``(source, target, source_lse, target_lse)``, from the fused kernels'
+        own forward pass when they run."""
+        kind = "atom" if graph.get("_topology_graph_kind") == "atom" else "line"
+        source_csr = graph.get("_owner_source_csr") if self.owner_csr[kind] else None
+        target_csr = graph.get("_owner_target_csr") if self.owner_csr[kind] else None
+        if (source_csr is not None and target_csr is not None
+                and self.use_segment_attention(source_alpha_0, source_rows)):
+            from fastmd.models.matris.op.triton_segment_attention import (
+                paired_segment_attention, segment_attention,
+            )
+
+            source_perm, source_off, source_skip = source_csr
+            target_perm, target_off, target_skip = target_csr
+            if (self.paired_attention and self.shared_value_rows[kind]
+                    and source_rows is target_rows and source_skip == target_skip):
+                return paired_segment_attention(
+                    source_alpha_0, target_alpha_0, source_rows, source_node_index,
+                    target_node_index, num_segment, source_perm, source_off,
+                    target_perm, target_off, False, False, skip_segment=source_skip,
+                    **({"return_lse": True} if return_lse else {}),
+                )
+            if return_lse:
+                source, source_lse = segment_attention(
+                    source_alpha_0, source_rows, source_node_index, num_segment,
+                    source_perm, source_off, False, skip_segment=source_skip, return_lse=True)
+                target, target_lse = segment_attention(
+                    target_alpha_0, target_rows, target_node_index, num_segment,
+                    target_perm, target_off, False, skip_segment=target_skip, return_lse=True)
+                return source, target, source_lse, target_lse
+            return (
+                segment_attention(source_alpha_0, source_rows, source_node_index, num_segment,
+                                  source_perm, source_off, False, skip_segment=source_skip),
+                segment_attention(target_alpha_0, target_rows, target_node_index, num_segment,
+                                  target_perm, target_off, False, skip_segment=target_skip),
+            )
+        from fastmd.engine.kernels.segment import Dimwise_softmax
+
+        source_alpha = Dimwise_softmax(source_alpha_0, source_node_index, num_segment,
+                                       fused=self.segment_softmax_enabled)
+        target_alpha = Dimwise_softmax(target_alpha_0, target_node_index, num_segment,
+                                       fused=self.segment_softmax_enabled)
+        result = (
+            self.segment_sum(source_rows, source_node_index, num_segment, weight=source_alpha,
+                             bin_count=graph["source_bincount"]),
+            self.segment_sum(target_rows, target_node_index, num_segment, weight=target_alpha,
+                             bin_count=graph["target_bincount"]),
+        )
+        if not return_lse:
+            return result
+        from fastmd.engine.kernels.segment import segment_logsumexp
+
+        return (*result, segment_logsumexp(source_alpha_0, source_node_index, num_segment),
+                segment_logsumexp(target_alpha_0, target_node_index, num_segment))
 
 
 def _segment_attention_csr_metadata(graph, key_prefix, segment, num_segment, identity_perm):

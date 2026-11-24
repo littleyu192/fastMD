@@ -1,11 +1,11 @@
 # FastMD
 
-Single-device molecular simulation with machine-learned interatomic potentials.
+Single-device and distributed molecular simulation with machine-learned interatomic potentials.
 Use one model interface for ASE calculations, structure relaxation, and molecular dynamics, with CPU execution
 or GPU-resident integrators and CUDA Graphs.
 
-[Installation](#installation) · [Quick start](#quick-start) · [Relaxation](#structure-relaxation) ·
-[Models](#supported-models) · [Benchmarks](#s01-benchmark-results) · [Development](#development)
+[Installation](#installation) · [Quick start](#quick-start) · [Distributed](#distributed-simulation) ·
+[Relaxation](#structure-relaxation) · [Models](#supported-models) · [Benchmarks](#s01-benchmark-results) · [Development](#development)
 
 ## Installation
 
@@ -21,6 +21,9 @@ python -m pip install -e '.[gpu-graph,mace]'
 
 Choose the model extra you need: `mace`, `sevennet`, `orb`, or `chgnet`. Install `.[gpu-graph]` for MatRIS on
 CUDA, or `.[mace]` for MACE on CPU. Prepare a PyTorch build compatible with your CUDA environment first.
+
+Distributed GPU runs use the same `gpu-graph` and model extras, with NCCL and Gloo support in PyTorch.
+Launch one process per GPU with `torchrun`; no separate distributed extra is needed.
 
 <details>
 <summary>Dependency and acceleration notes</summary>
@@ -81,6 +84,85 @@ fastmd-explain --structure input.extxyz --model chgnet_0_3_0 --device cuda --jso
 `GPUResidentMolecularDynamics.from_restart(...)` also reads compatible MD restart files
 (`matris.distributed.md/1`). Supply the original model and weights; simulation parameters default to the
 saved values. FastMD continues to write its own format (`fastmd.distributed.md/1`).
+
+## Distributed simulation
+
+The experimental runtime partitions one periodic system across GPUs for **MatRIS, CHGNet, MACE,
+SevenNet, and conservative ORB v3**. It requires full periodicity and a fixed, nonsingular cell;
+triclinic cells are supported. Model families and versions without an audited shard declaration are rejected.
+
+Multi-rank ORB keeps all radius-graph edges; when a node exceeds the checkpoint's neighbor cap,
+this differs from single-device nearest-k evaluation.
+
+```bash
+torchrun --standalone --nproc_per_node=2 -m fastmd.distributed \
+  --model matris --checkpoint /path/to/MatRIS_10M_OAM.pth.tar \
+  --input input.extxyz --execution model_graph \
+  --profile topology --precision highest --oracle --oracle-final \
+  --warmup 5 --steps 50 --md-steps 100 --md-engine domain \
+  --temp-start 600 --seed 0 --dt-fs 0.2 --output result.json
+```
+
+Use `--model mace`, `sevennet`, or `orb_v3` with the corresponding `--checkpoint`. For CHGNet, use
+`--model chgnet_0_3_0 --deterministic` and omit `--checkpoint` to load its bundled weights. Deterministic
+CHGNet execution controls repeated atomic-sum noise in the strict FP32 checks; their limits are unchanged.
+Use separate model environments as described in [Installation](#installation). `--profile generic` uses
+reference local operators; `topology` selects the model's optimized operators.
+
+<details>
+<summary>Python API and runtime details</summary>
+
+The public API is `fastmd.DistributedEvaluator` with `fastmd.ParallelConfig`;
+`fastmd.distributed.DistributedMatRISEvaluator` remains available for MatRIS. Run this script with
+`torchrun --standalone --nproc_per_node=2 example.py`. `initialize()` binds each local GPU and creates the
+data and control groups. Without an initialized process group, the evaluator runs locally with one rank.
+Each rank must call collective methods in the same order.
+
+```python
+from ase.io import read
+from fastmd import DistributedEvaluator, InferenceConfig, ParallelConfig, load_adapter
+from fastmd.distributed.launch import fail_fast, initialize, shutdown
+
+context = initialize(device="cuda")
+try:
+    atoms = read("input.extxyz")  # same cell metadata on every rank
+    adapter = load_adapter(model_path="/path/to/MatRIS_10M_OAM.pth.tar", device="cuda")
+    evaluator = DistributedEvaluator(
+        adapter, atoms.cell.array, context=context, parallel=ParallelConfig(),
+        config=InferenceConfig(execution="model_graph", matmul_precision="highest"),
+    )
+    state = evaluator.distribute(atoms if context.rank == 0 else None)
+    prediction = evaluator.evaluate(state)
+    frame = evaluator.gather(prediction)
+    if context.rank == 0:
+        print(float(prediction.energy), frame["forces"])
+    evaluator.close()
+    adapter.close()
+    shutdown()
+except BaseException as error:
+    fail_fast(error, rank=context.rank)
+```
+
+The runtime uses spatial ownership, ghost exchanges and reverse gradient sums, reusable neighbor-list
+epochs, and collective CUDA Graph capture. Model weights are replicated; atom ownership and model work
+are partitioned. MatRIS uses boundary-bond partial exchanges, CHGNet uses line-graph partial exchanges,
+and MACE, SevenNet, and ORB use their declared node-halo exchanges.
+
+`GPUResidentMolecularDynamics.from_evaluator(evaluator, atoms=...)` uses the domain driver at any rank
+count, supporting NVE, Berendsen NVT (`nvt`), and Nose–Hoover chain NVT (`nvt_nhc`), with restart continuation.
+At one CUDA rank, force evaluation uses a single-device path without halo exchange: MatRIS delegates to
+its existing single-GPU engine; the other four models use the fixed-capacity builder and engine-owned
+derivative. This is separate from the MD driver choice.
+
+`--md-engine domain` keeps the domain integrator even at one rank. CLI `auto` selects the native MD driver
+for eligible one-rank MatRIS runs and the domain driver for the other four models. Domain MD advances one
+step per launch. Only MatRIS currently captures the distributed integrator together with the model;
+the other models capture energy and forces and run integration outside that graph.
+
+</details>
+
+See [migration scope and validation coverage](docs/migration.md) for model-specific limitations and
+validation records. Multi-GPU speedups depend on system size.
 
 ## Structure relaxation
 
@@ -175,12 +257,14 @@ for the complete measurements.
 | [Examples and detailed results](examples/README.md) | MatRIS, batch relaxation, and S01 benchmarks |
 | [Model adapters](docs/model_adapters.md) | Model contracts, energies, derivatives, and extension points |
 | [Additional checkpoints](docs/additional_checkpoints.md) | Model-specific loading options |
+| [Distributed migration](docs/migration.md) | Supported models, runtime boundaries, and validation coverage |
 | [Regression tests](tests/README.md) | CPU/GPU checks and test assets |
 | [Validation tools](tools/README.md) | Architecture checks and GPU validation |
 | [Model validation lanes](tools/ci/README.md) | MACE, SevenNet, ORB, and CHGNet environments |
 
 Runtime code is organized into [models](fastmd/models), [engine](fastmd/engine), [execution](fastmd/execution),
-[interfaces](fastmd/interfaces), [graph](fastmd/graph), and [ops](fastmd/ops).
+[interfaces](fastmd/interfaces), [graph](fastmd/graph), [ops](fastmd/ops), and
+[distributed](fastmd/distributed).
 
 ## Contact
 

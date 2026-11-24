@@ -1,8 +1,7 @@
 """Communication interface used by local integrators and output writers.
 
 FastMD provides LocalCommunicator: reductions and broadcasts are local
-operations, and gather_by_id orders this simulation's atoms. No distributed
-transport implementation is included."""
+operations, and gather_by_id orders this simulation's atoms. Multi-rank transport is provided by fastmd.distributed.communicator."""
 from __future__ import annotations
 
 from numbers import Integral

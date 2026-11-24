@@ -51,6 +51,9 @@ _TRITON_WIDE_GEMM = env_value("MATRIS_TRITON_WIDE_GEMM") == "1"
 _MIN_ROWS = int(env_value("MATRIS_TRITON_WIDE_GEMM_MIN_ROWS"))
 # Inside ``rank_uniform`` (a P>1 forward on the topology epoch's layout): its (captured, eager) row thresholds.
 _BAND: tuple[int, int] | None = None
+# Side-stream preparation must execute the kernels capture will select, so
+# their Triton binaries are loaded before CUDA disallows module loading.
+_CAPTURE_WARMUP = False
 # > 0 inside a torch.compile'd block (``compiled_region``): Inductor owns its GEMMs, also in frames that run eagerly.
 _COMPILED_REGION = 0
 # Eager (outside a CUDA graph capture) the threshold is this many times higher: the Python launch path (~30 us per
@@ -353,7 +356,26 @@ def _warmed(w: torch.Tensor, orientations, parts) -> None:
 
 def _thresholds() -> tuple[int, int]:
     """The (captured, eager) row thresholds here."""
-    return _BAND if _BAND is not None else (_MIN_ROWS, _EAGER_FACTOR * _MIN_ROWS)
+    captured, eager = _BAND if _BAND is not None else (_MIN_ROWS, _EAGER_FACTOR * _MIN_ROWS)
+    return captured, captured if _CAPTURE_WARMUP else eager
+
+
+@contextmanager
+def capture_warmup():
+    """Execute capture's GEMM choices eagerly to compile and load their kernels.
+
+    Ordinary eager execution keeps its larger row threshold. Preparation of
+    a captured step needs the smaller capture threshold for both the forward
+    and backward, including the rank-uniform thresholds of distributed rows.
+    This is not a CUDA capture: weight splits and kernel modules may be built.
+    """
+    global _CAPTURE_WARMUP
+    saved = _CAPTURE_WARMUP
+    _CAPTURE_WARMUP = True
+    try:
+        yield
+    finally:
+        _CAPTURE_WARMUP = saved
 
 
 def _decide(a, w, transposed, bias=None, c=None, out=None, rows=None, warm=(), record=True, parts=(),
@@ -368,7 +390,7 @@ def _decide(a, w, transposed, bias=None, c=None, out=None, rows=None, warm=(), r
     (captured, eager) thresholds (a Function's forward state, ``dispatch_on``), default ``_thresholds()``."""
     rows = a.shape[0] if rows is None else rows
     if band is None:
-        band = _BAND if _BAND is not None else (_MIN_ROWS, _EAGER_FACTOR * _MIN_ROWS)
+        band = _thresholds()
     captured, eager = band
     if rows < captured or not a.is_cuda:
         return None

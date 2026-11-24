@@ -1,8 +1,10 @@
-"""FastMD: single-device simulation with multiple machine-learning interatomic potentials."""
+"""FastMD: single-device and distributed simulation with multiple ML interatomic potentials."""
 from importlib import import_module
 
 __version__ = "0.1.0"
 _EXPORTS = {
+    "DistributedEvaluator": ("fastmd.distributed", "DistributedEvaluator"),
+    "ParallelConfig": ("fastmd.distributed.config", "ParallelConfig"),
     "MatRIS": ("fastmd.models.matris", "MatRIS"),
     "ReplicaMolecularDynamics": ("fastmd.interfaces.replica_md", "ReplicaMolecularDynamics"),
     "MultiSystemMolecularDynamics": ("fastmd.interfaces.multi_system_md", "MultiSystemMolecularDynamics"),

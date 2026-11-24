@@ -96,7 +96,10 @@ class GPUMDState:
 
 
 class GPUResidentMolecularDynamics:
-    """Molecular dynamics with simulation state resident on one CUDA device.
+    """Molecular dynamics with simulation state resident on one or several CUDA devices.
+
+    Use ``from_evaluator`` with a distributed evaluator to partition one system
+    across devices while retaining the same integrators, output and restart API.
 
     The adapter supplies topology and energy/derivative capabilities. The
     runtime owns graph construction, topology reuse, integration and logging.
@@ -511,7 +514,7 @@ class GPUResidentMolecularDynamics:
     @classmethod
     def from_restart(cls, path, *, model: torch.nn.Module | ModelAdapter | str = "matris_10m_oam",
                      model_path: str | None = None, **kwargs) -> "GPUResidentMolecularDynamics":
-        """Resume a restart file (a compatible single-device simulation) on one GPU.
+        """Resume a native or distributed restart file on one GPU.
 
         Both FastMD's ``fastmd.distributed.md/1`` and MD's
         ``matris.distributed.md/1`` files are accepted. Supply the same model
@@ -1794,8 +1797,10 @@ class GPUResidentMolecularDynamics:
 
     @scoped_call
     def step(self) -> GPUMDState:
+        if self._domain is not None:
+            return self._domain_step()
         if self.whole_step_runner is None:
-            self._log_staged()
+            self._log_staged()  # a frame staged before an eager fallback
         self._log_initial_if_needed()
         window = self.steps_per_launch
         if self.whole_step_runner is not None:
@@ -1811,6 +1816,8 @@ class GPUResidentMolecularDynamics:
                     raise
                 self._whole_step_to_eager(error)
                 if self._window_targets is not None:
+                    # The eager steps redo the window from its start; a failed capture's warmups may
+                    # have left a later row of the target table on the device.
                     self.set_temperature(start_target)
             else:
                 self.nsteps += window
@@ -1820,12 +1827,12 @@ class GPUResidentMolecularDynamics:
                     else:
                         self._log_current()
                 return self.state
-        for k in range(window):
+        for k in range(window):  # eager / model_graph: one step at a time, the same targets
             if self.ramp is not None:
                 setpoint = self.ramp.setpoint(self.nsteps)
                 if setpoint is not None:
                     self.set_temperature(setpoint)
-            if k == window - 1 and self._stress_due(self.nsteps + 1):
+            if k == window - 1 and self._stress_due(self.nsteps + 1):  # a logged step: its stress too
                 self._dynamic_step(stress=True)
                 self._stress_at = (self.nsteps + 1, self._evaluated_stress)
             else:
@@ -1877,12 +1884,14 @@ class GPUResidentMolecularDynamics:
                              f"steps_per_launch={self.steps_per_launch}")
         windows = int(steps) // self.steps_per_launch
         while windows:
-            if self.whole_step_runner is not None and windows > 1:
+            if self._domain is None and self.whole_step_runner is not None and windows > 1:
                 windows -= self._run_windows(windows)
             else:
                 self.step()
                 windows -= 1
         self._log_staged()
+        if self._domain is not None:  # the from_evaluator driver: the last DistributedPrediction
+            return self.prediction
         return self.state
 
     def _run_windows(self, count: int) -> int:
@@ -1998,6 +2007,8 @@ class GPUResidentMolecularDynamics:
 
     def temperature(self) -> Tensor:
         """2 Ekin / (3N kB), a float64 reduction in every ensemble."""
+        if self._domain is not None:
+            self._require_consistent()
         if self.stateful_integrator is not None:
             return self.stateful_integrator.temperature()
         return 2.0 * self._kinetic_energy() / (self.integrator.degrees_of_freedom * units.kB)
@@ -2006,7 +2017,10 @@ class GPUResidentMolecularDynamics:
         """NHC conserved quantity E_pot + E_kin + E_thermostat (``nvt_nhc``)."""
         if not isinstance(self.integrator, GPUNoseHooverChainNVT):
             raise ValueError("conserved_energy is defined for ensemble='nvt_nhc'")
-        self._ensure_forces()
+        if self._domain is None:  # the domain backend's integrator always holds F and E
+            self._ensure_forces()
+        else:
+            self._require_consistent()
         return self.integrator.conserved_energy()
 
     @scoped_call
@@ -2055,47 +2069,538 @@ class GPUResidentMolecularDynamics:
         return stats
 
     def snapshot_atoms(self) -> Atoms:
+        if self._domain is not None:
+            return self._domain_snapshot_atoms()
         atoms = self.atoms_template.copy()
-        source = self.stateful_integrator if self.stateful_integrator is not None else self.state
+        # the float64 state of a stateful integrator, else the float32 state
+        source = (
+            self.stateful_integrator
+            if self.stateful_integrator is not None
+            else self.state
+        )
         atoms.set_positions(source.positions.detach().cpu().numpy())
         atoms.set_momenta(source.momenta.detach().cpu().numpy())
         return atoms
 
     def flush_log(self) -> None:
-        """Wait for queued trajectory and log frames to reach their files."""
-        self._log_staged()
-        for logger in (self.outputs.logger, self.logger):
-            if logger is not None:
-                logger.flush()
+        """Wait for the queued trajectory/log frames to reach the files.
+
+        from_evaluator: collective (all ranks call it); rank 0's writer error
+        is raised on every rank (one ``collective_check``).
+        """
+        error = None
+        try:
+            self._log_staged()
+            for logger in (self.outputs.logger, self.logger):
+                if logger is not None:
+                    logger.flush()
+        except (OSError, *_ERRORS) as exc:
+            if self._domain is None:
+                raise
+            error = f"trajectory/logfile: {exc}"
+        if self._domain is not None:
+            self.collective_check(error)
 
     def close(self) -> None:
-        """Flush outputs and release the loaded adapter after its last user closes."""
+        """Close the trajectory/log writers and the md_pyrolysis outputs (never a from_evaluator's evaluator),
+        then release the model adapter: one loaded by name (here, or by another entry point) is closed when
+        its last user is (its upstream patches are reverted); an adapter or a model the caller passed in stays
+        open. The driver is not used afterwards. Context exit closes too, and a dropped driver releases its
+        adapter when it is finalised.
+
+        Every rank releases its writers; from_evaluator: collective (all ranks
+        call it) and rank 0's last-write error is raised on every rank (one
+        ``collective_check``).
+        """
         try:
-            self._close()
+            self._close(agree=True)
         finally:
             release_adapter(self)
 
 
-    def _close(self) -> None:
+    def _close(self, agree: bool) -> None:
         self._finalizer.detach()
-        try:
-            if self.logger is not None:
-                self._log_staged()
-                self.logger.close()
-        finally:
-            self.outputs.close()
-        if self._neighbor_count_max is not None:
-            self.neighbor_cap_summary()
+        if self._domain is None:
+            try:
+                if self.logger is not None:
+                    self._log_staged()
+                    self.logger.close()
+            finally:
+                self.outputs.close()
+            if self._neighbor_count_max is not None:
+                self.neighbor_cap_summary()  # warns once if an atom exceeded the model's neighbour cap
+            return
+        error = None
+        for closable in (self.logger, self.outputs):
+            try:
+                if closable is not None:
+                    closable.close()
+            except (OSError, *_ERRORS) as exc:
+                error = error or f"trajectory/logfile: {exc}"
+        if agree:
+            self.collective_check(error)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        # An exception already propagating may be one rank's: no collective then (it could hang).
         try:
-            self._close()
+            self._close(agree=exc_type is None)
         finally:
             release_adapter(self)
         return False
+
+    # ------------------------------------------------------------------
+    # Domain backend (unified step 3.5): the evaluator owns E/F, any P
+    # ------------------------------------------------------------------
+    _domain = None  # the evaluator of a from_evaluator driver; None on the native paths
+    steps_per_launch = 1  # the from_evaluator driver steps one at a time
+    _window_targets = None
+    _DOMAIN_REFUSED = (
+        "enable_model_cuda_graph", "enable_whole_step_cuda_graph", "select_whole_step_cuda_graph",
+        "precapture", "reset_whole_step_graph_pool", "set_activation_checkpoint", "build_graph",
+        "evaluate", "force_fn", "plan_record",
+    )
+
+    @classmethod
+    def from_evaluator(
+        cls,
+        evaluator,
+        state=None,
+        *,
+        atoms=None,
+        restart: dict | None = None,
+        ensemble: str = "nvt",
+        timestep: float = 1.0,
+        temperature: float | None = None,
+        taut: float = 100.0,
+        tdamp: float | None = None,
+        tchain: int = 3,
+        tloop: int = 1,
+        fix_com: bool | None = None,
+        ramp: HeatingRamp | None = None,
+        nhc_scalar_sync: str = "broadcast",
+        nhc_ke2_update: str = "scaled",
+        nhc_backend: str = "auto",
+        output_dir=None,
+        thermo_interval: int = 0,
+        xyz_interval: int = 0,
+        restart_interval: int = 0,
+        total_steps: int | None = None,
+        trajectory=None,
+        logfile=None,
+        loginterval: int = 1,
+        append_trajectory: bool = False,
+        logger_ring: int = 8,
+        slot_headroom: int | None = None,
+        integrator_in_graph: bool = True,
+        log_stress: bool = False,
+    ) -> "GPUResidentMolecularDynamics":
+        """MD on a ``DistributedMatRISEvaluator`` at any P (the domain backend). All ranks call it.
+
+        Every step evaluates E/F exactly once through the evaluator (which
+        owns E/F: its topology, execution mode, precision and CUDA graphs);
+        the integrator owns this rank's atoms in capacity slots
+        (:class:`~fastmd.execution.gpu_integrator.SlotVelocityVerlet` for
+        nve/nvt, ``GPUNoseHooverChainNVT(protocol="decomposed")`` for
+        nvt_nhc) with ``comm = evaluator.context.comm`` at every P (a
+        ``LocalCommunicator`` at one rank). The integrator's collectives:
+        nve without ``fix_com`` none, nve ``fix_com``/nvt one fused
+        ``allreduce_sum_``, nvt_nhc two per half step (+1 for ``fix_com``);
+        no host synchronization.
+
+        ``integrator_in_graph`` (default True): when the evaluator runs the
+        topology epoch's model_graph (P>1 CUDA), each step is ONE replay of a
+        graph that also runs the integrator's halves
+        (``DistributedMatRISEvaluator.md_step``): the integrator's slots are
+        sized to the topology's owned capacity, the epoch refresh (migration
+        of the atoms with their cached forces, the integrator's in-place
+        reorder) runs at the committed positions before the step, and a step
+        that must be redone (capacity overflow, skin violation) is rolled back
+        to them first. Otherwise (False, or eager, the CPU reference and the
+        single-rank engine) the integrator runs outside the evaluator's
+        captured step, around ``evaluate`` (the op sequence and collectives of
+        the removed step 3.3 driver ``DistributedMD``, bitwise); the atoms
+        migrate inside ``evaluate`` and the integrator then reorders its rows
+        in place. The two placements give equal trajectories up to roundoff
+        (refreshes at q_n instead of q_{n+1}, reductions over the padded
+        rows). ``False`` is an opt-out for one version; an evaluator stand-in
+        without ``md_step`` always runs the integrator outside.
+
+        Exactly one start: ``state`` (the owned atoms with payload "masses",
+        "momenta", in ASE units, float32 for nve/nvt, float64 plus
+        "positions64" for nvt_nhc: ``evaluator.distribute(atoms,
+        payload_dtype=...)``), ``atoms`` on root (other ranks pass None; it
+        is distributed here), or ``restart``
+        (``evaluator.distribute_restart(path)``: the cached evaluation is not
+        recomputed; every option must equal the file's except
+        ``total_steps``). Units as the native constructor: ``timestep``,
+        ``taut`` and ``tdamp`` (default 100 time steps) in fs.
+        ``temperature``: the initial target (default ``ramp.start_K``, else
+        300 K for nvt/nvt_nhc). A ``restart`` continues its saved target: with a
+        ramp the ramp continues from it (``temperature`` is not used), without
+        one a ``temperature`` that differs from it is rejected. ``fix_com=None``:
+        on for nve/nvt, off for nvt_nhc. ``nhc_scalar_sync`` /
+        ``nhc_ke2_update`` / ``nhc_backend``: the decomposed chain's options.
+        Outputs (md_pyrolysis files, rank 0, see
+        :class:`~fastmd.execution.md_protocol.MDOutputs`): ``output_dir``,
+        ``thermo_interval``, ``xyz_interval``, ``restart_interval`` and
+        ``total_steps`` (default ``ramp.total_steps``) through
+        :meth:`write_outputs` after each step, :meth:`save_restart`,
+        :meth:`log_frame`. The native engine's trajectory/log
+        (:class:`~fastmd.execution.gpu_logging.AsyncGPUMDLogger`):
+        ``trajectory``, ``logfile``, ``append_trajectory`` and ``logger_ring``
+        are root's (other ranks' are ignored); root's schedule (``loginterval``
+        when it logs, else none) is agreed at construction, and every rank
+        joins each frame's gather inside ``step()`` (the initial frame on the
+        first step, then every ``loginterval`` steps). ``slot_headroom``
+        (testing/tuning): the integrator's initial capacity is at least the
+        owned count plus this many rows, rounded up by the integrator (to a
+        multiple of 4 rows for nve/nvt, to an even count for nvt_nhc; default
+        the integrator's headroom). 0 makes a migration that adds more rows
+        than the rounding left grow the slots.
+
+        ``log_stress=True`` (the same on every rank; root needs a
+        ``trajectory``): every trajectory frame carries the system's stress
+        in eV/Å³, the native engine's frame contract. The steps whose state
+        is logged evaluate it (``evaluate(..., stress=True)``, in the in-graph
+        step ``md_step(..., stress=True)``); under model_graph the captured
+        step then computes it on every later step too (the evaluator's
+        stress graph serves both). The first frame of a restart evaluates
+        its stress once. Constant-pressure ensembles (NPT) are not supported:
+        a barostat changes the cell, and with it the domain decomposition.
+
+        ``step()`` (and ``run()``) returns the step's ``DistributedPrediction``
+        (:attr:`prediction`) whose state holds VIEWS of the integrator's
+        current rows: the next step advances them in place (clone what you
+        keep across steps).
+        :meth:`thermodynamics`, :meth:`temperature`, :meth:`conserved_energy`
+        and :meth:`snapshot_atoms` (Atoms on root, None elsewhere) are
+        collective. The E/F methods of the native paths (CUDA-graph
+        enabling, precapture, ``evaluate``, ...) raise ``ValueError``;
+        ``config_summary()`` is the evaluator's. An exception inside a step
+        leaves a half-advanced state: later steps, outputs and observables
+        raise (resume from a restart file).
+        """
+        self = cls.__new__(cls)
+        self._init_domain(
+            evaluator, state, atoms, restart, ensemble=ensemble, timestep=timestep,
+            temperature=temperature, taut=taut, tdamp=tdamp, tchain=tchain, tloop=tloop, fix_com=fix_com,
+            ramp=ramp, scalar_sync=nhc_scalar_sync, ke2_update=nhc_ke2_update, nhc_backend=nhc_backend,
+            output_dir=output_dir, thermo_interval=thermo_interval, xyz_interval=xyz_interval,
+            restart_interval=restart_interval, total_steps=total_steps, trajectory=trajectory,
+            logfile=logfile, loginterval=loginterval, append_trajectory=append_trajectory,
+            logger_ring=logger_ring, slot_headroom=slot_headroom, integrator_in_graph=integrator_in_graph,
+            log_stress=log_stress)
+        return self
+
+    def _init_domain(self, evaluator, state, atoms, restart, *, ensemble, timestep, temperature, taut, tdamp,
+                     tchain, tloop, fix_com, ramp, scalar_sync, ke2_update, nhc_backend, output_dir,
+                     thermo_interval, xyz_interval, restart_interval, total_steps, trajectory, logfile,
+                     loginterval, append_trajectory, logger_ring, slot_headroom, integrator_in_graph,
+                     log_stress) -> None:
+        # Lazy: fastmd.distributed imports this package.
+        from fastmd.distributed.evaluator import DistributedMatRISEvaluator, _objects, collective_check
+        from fastmd.distributed.partition import AtomState
+
+        context = evaluator.context
+        prediction, start_step, nhc_state, offsets, saved, native_file = None, 0, None, None, None, False
+        saved_temperature = None
+        given = state is not None or restart is not None  # else root's atoms are distributed here
+        if restart is not None:
+            if state is not None:
+                raise ValueError("from_evaluator: pass a state or a restart, not both")
+            prediction, start_step = restart["prediction"], restart["step"]
+            nhc_state, offsets, saved = restart["nhc_state"], restart["offsets"], restart["parameters"]
+            native_file = restart.get("engine", "domain") == "native"
+            saved_temperature = restart["temperature_K"]
+            state = prediction.state
+        elif state is None:
+            state = evaluator.distribute(atoms, payload_dtype=torch.float64 if ensemble == "nvt_nhc" else None)
+        error = None
+        try:  # the step 3.3 driver's checks; every rank raises any rank's error
+            if given and atoms is not None:  # atoms exist on root only: agreed below
+                raise ValueError("from_evaluator: pass exactly one start (state, atoms or restart)")
+            if not isinstance(log_stress, bool):
+                raise TypeError("from_evaluator: log_stress must be a bool")
+            if log_stress and context.rank == 0 and trajectory is None:
+                raise ValueError("from_evaluator: log_stress=True writes the stress into the trajectory frames; "
+                                 "pass a trajectory (on rank 0)")
+            if isinstance(ensemble, str) and ensemble.lower().startswith(("npt", "nph", "inhomogeneous_npt")):
+                raise ValueError(f"from_evaluator: ensemble {ensemble!r} is not supported: a barostat changes the "
+                                 f"cell, and with it the domain decomposition (constant-pressure MD runs on one "
+                                 f"GPU through fastmd.interfaces.md); the ensembles here are {ENSEMBLES}")
+            if ensemble not in ENSEMBLES:
+                raise ValueError(f"ensemble must be one of {ENSEMBLES}")
+            if saved is not None and saved.get("ensemble") != ensemble:
+                raise ValueError(f"the restart file is ensemble {saved.get('ensemble')!r}, requested {ensemble!r}")
+            if saved_temperature is not None:
+                # The saved target continues (with a ramp: its current setpoint); a constant one must match.
+                if ramp is None and temperature is not None and temperature != saved_temperature:
+                    raise ValueError(f"temperature {temperature} K cannot resume a restart file at "
+                                     f"{saved_temperature} K (without a ramp the target is the saved one)")
+                temperature = saved_temperature
+            if not math.isfinite(timestep) or timestep <= 0:
+                raise ValueError("timestep must be finite and positive")
+            if tdamp is None:
+                tdamp = 100.0 * timestep  # 100 time steps
+            if ramp is not None and not isinstance(ramp, HeatingRamp):
+                raise TypeError("ramp must be a HeatingRamp")
+            if temperature is None and ramp is not None:
+                temperature = ramp.start_K
+            elif temperature is None and ensemble != "nve" and saved is None:
+                temperature = 300.0
+            if ensemble == "nve":
+                if ramp is not None:
+                    raise ValueError("a heating ramp needs a thermostat (nvt or nvt_nhc)")
+            elif temperature is None or not math.isfinite(temperature) or temperature <= 0:
+                raise ValueError(f"{ensemble} needs a finite positive temperature or a ramp")
+            if not all(math.isfinite(value) and value > 0 for value in (tdamp, taut)):
+                raise ValueError("tdamp and taut must be finite and positive")
+            if total_steps is None and ramp is not None:
+                total_steps = ramp.total_steps
+            integers = (tchain, tloop, thermo_interval, xyz_interval, restart_interval, start_step,
+                        0 if total_steps is None else total_steps)
+            if any(isinstance(value, bool) or not isinstance(value, int) for value in integers):
+                raise TypeError("tchain, tloop, intervals, the start step and total_steps must be integers")
+            if min(tchain, tloop) < 1 or min(thermo_interval, xyz_interval, restart_interval, start_step) < 0:
+                raise ValueError("tchain/tloop must be positive, intervals and the start step nonnegative")
+            logs = trajectory is not None or logfile is not None
+            if logs and (isinstance(loginterval, bool) or not isinstance(loginterval, int) or loginterval < 1
+                         or isinstance(logger_ring, bool) or not isinstance(logger_ring, int) or logger_ring < 1):
+                raise ValueError("loginterval and logger_ring must be positive integers")
+            if slot_headroom is not None and (isinstance(slot_headroom, bool) or not isinstance(slot_headroom, int)
+                                              or slot_headroom < 0):
+                raise ValueError("slot_headroom must be None or a nonnegative integer")
+            if not isinstance(integrator_in_graph, bool):
+                raise TypeError("integrator_in_graph must be a bool")
+            if scalar_sync not in ("broadcast", "local") or ke2_update not in ("scaled", "recompute"):
+                raise ValueError("nhc_scalar_sync must be 'broadcast'/'local', nhc_ke2_update 'scaled'/'recompute'")
+            payload = state.payload
+            names = ("masses", "momenta", "positions64") if ensemble == "nvt_nhc" else ("masses", "momenta")
+            if any(name not in payload for name in names):
+                raise ValueError(f"{ensemble} requires payload {names}")
+            if set(payload) - set(names):
+                raise ValueError(f"{ensemble} carries only the payload {names} through migration; got "
+                                 f"{sorted(set(payload) - set(names))} as well")
+            masses, momenta = payload["masses"], payload["momenta"]
+            dtype = torch.float64 if ensemble == "nvt_nhc" else state.positions.dtype
+            fields = [masses, momenta] + ([payload["positions64"]] if ensemble == "nvt_nhc" else [])
+            if (masses.shape != state.ids.shape or momenta.shape != state.positions.shape
+                    or any(value.dtype != dtype or value.device != state.positions.device for value in fields)
+                    or not bool(torch.isfinite(masses).all()) or bool((masses <= 0).any())
+                    or not bool(torch.isfinite(momenta).all())):
+                raise ValueError(f"invalid masses or momenta for {ensemble} (shape/device/dtype "
+                                 f"{dtype}/finite values)")
+            if ensemble == "nvt_nhc" and not torch.equal(payload["positions64"].to(state.positions.dtype),
+                                                         state.positions):
+                raise ValueError("positions must match payload positions64 in the evaluator's dtype")
+            if prediction is not None and prediction.forces.shape != state.positions.shape:
+                raise ValueError("cached forces do not match the owned atoms")
+        except _ERRORS as exc:
+            error = str(exc)
+        collective_check(context, error)
+        fix_com = default_fix_com(ensemble) if fix_com is None else bool(fix_com)
+        # The restart file's "parameters" (keys unchanged since step 3.3).
+        self.parameters = {
+            "ensemble": ensemble, "dt_fs": float(timestep), "tdamp_fs": float(tdamp),
+            "taut_fs": float(taut), "tchain": tchain, "tloop": tloop, "fix_com": fix_com,
+            "ramp": None if ramp is None else asdict(ramp), "scalar_sync": scalar_sync,
+            "ke2_update": ke2_update, "total_steps": total_steps}
+        # The GPU-MD log schedule is root's (trajectory/logfile given on root), so every rank
+        # joins the same frame gathers; never a rank-local logger test before a collective.
+        log_interval = loginterval if trajectory is not None or logfile is not None else 0
+        agreed = _objects(context, (self.parameters, temperature, start_step, output_dir is not None,
+                                    (thermo_interval, xyz_interval, restart_interval), saved,
+                                    len(state.ids), log_interval, slot_headroom, integrator_in_graph, log_stress))
+        if any(item[:6] != agreed[0][:6] or item[8:] != agreed[0][8:] for item in agreed):
+            raise ValueError("MD parameters differ between ranks")
+        if saved is not None:  # agreed: every rank raises
+            # The native engine does not honor the decomposed chain's options.
+            ignore = ("scalar_sync", "ke2_update") if native_file else ()
+            changed = resume_mismatch(saved, self.parameters, ignore=ignore)
+            if changed:
+                raise ValueError(f"MD parameters differ from the restart file's (saved, requested): {changed}")
+        natoms = sum(item[6] for item in agreed)
+
+        self._domain = self.evaluator = evaluator
+        self._inference_config = None  # the evaluator keeps its own precision and admission scopes
+        self._failed = False
+        self._atom_state = AtomState
+        for name in self._DOMAIN_REFUSED:
+            setattr(self, name, _refused_in_domain(name))
+        self.config_summary = evaluator.config_summary
+        self.ensemble, self.ramp, self.fix_com = ensemble, ramp, fix_com
+        self.timestep = self.dt_fs = float(timestep)
+        self.total_steps, self.nsteps = total_steps, start_step
+        self.n_atoms = self.natoms = natoms
+        self.dof = 3 * natoms
+        self.comm = comm = context.comm
+        self.device = evaluator.device
+        self.cell = evaluator.partition.cell
+        self.runner = self.whole_step_runner = self.logger = None
+        self._log_interval, self._logged_initial = agreed[0][7], False
+        self.log_stress = log_stress
+        # A restart's cached prediction has no stress: its first frame evaluates it once (_domain_log).
+        self._restart_stress = log_stress and prediction is not None
+        if prediction is None:
+            prediction = evaluator.evaluate(state, **({"stress": True} if log_stress else {}))
+        if prediction.natoms != natoms:
+            raise ValueError("cached prediction's atom count differs from the owned atoms")
+        # The integrator's rows are the evaluated state's (the migrated rows the forces follow).
+        rows = prediction.state
+        payload = rows.payload
+        capacity = None if slot_headroom is None else max(len(rows.ids) + slot_headroom, 1)
+        if ensemble == "nvt_nhc":
+            integrator = GPUNoseHooverChainNVT(
+                payload["masses"], payload["positions64"], payload["momenta"],
+                temperature_K=temperature, timestep=self.dt_fs * units.fs, tdamp=tdamp * units.fs,
+                tchain=tchain, tloop=tloop, forces=prediction.forces, potential_energy=prediction.energy,
+                device=evaluator.device, backend=nhc_backend, force_dtype=prediction.forces.dtype,
+                comm=comm, n_global=natoms, protocol="decomposed", scalar_sync=scalar_sync,
+                ke2_update=ke2_update, fix_com=fix_com, capacity=capacity)
+            integrator.warmup_compile()  # JIT before step 0
+            if nhc_state is not None:
+                integrator.load_state_dict(nhc_state)
+        else:
+            integrator = SlotVelocityVerlet(
+                payload["masses"], rows.positions, payload["momenta"], prediction.forces,
+                prediction.energy.reshape(1), dt_fs=self.dt_fs, ensemble=ensemble, temperature=300.0 if temperature is None else temperature,
+                taut_fs=taut, fix_com=fix_com, comm=comm, n_global=natoms, capacity=capacity)
+        self.integrator = self.stateful_integrator = integrator
+        self._domain_position_dtype = getattr(evaluator, "dtype", rows.positions.dtype)
+        # The integrator inside the evaluator's epoch whole-step graph (used when the evaluator runs it). An
+        # evaluator stand-in without md_step (e.g. a wrapper that checks every evaluate call) keeps it outside.
+        self._in_graph = (_InGraphStep(self) if integrator_in_graph and comm.world_size > 1
+                          and callable(getattr(evaluator, "md_step", None)) else None)
+        # DistributedMatRISEvaluator's one-rank migration returns the atoms in ascending ID order with positions
+        # and payload unchanged (a restart's rows are in that order too), so rows that came from it are the next
+        # refresh's rows: _domain_step skips their (identity) reorder. With any other evaluator the rows are
+        # reordered after every refresh (a stand-in may return another row order at every call, as at P>1).
+        self._id_ordered_outputs = comm.world_size == 1 and type(evaluator) is DistributedMatRISEvaluator
+        self._rows_in_id_order = self._id_ordered_outputs and (restart is not None or rows is not state)
+        # The evaluator's own id/numbers tensors (its whole-step fast path tests their identity).
+        self._ids, self._numbers = rows.ids, rows.numbers
+        self.prediction = replace(prediction, state=self._domain_state())
+        self.outputs = MDOutputs(self, output_dir, thermo_interval, xyz_interval, restart_interval,
+                                 total_steps, offsets)
+        if self._log_interval:
+            try:
+                self._init_domain_logger(atoms, trajectory, logfile, append_trajectory, logger_ring)
+            except BaseException:
+                self.outputs.close_quietly()  # the constructor raises: nobody else closes root's writer
+                raise
+        # A dropped driver (no close()) still stops its loggers' writer threads.
+        self._finalizer = weakref.finalize(self, _close_quietly, self.logger, self.outputs)
+
+    def _init_domain_logger(self, atoms, trajectory, logfile, append_trajectory, logger_ring) -> None:
+        """Root's AsyncGPUMDLogger (collective: one gather of the numbers and masses by ID)."""
+        fields = self.md_fields()
+        frame = self.comm.gather_by_id(0, fields["ids"], numbers=fields["numbers"], masses=fields["masses"])
+        error = None
+        if frame is not None:
+            try:
+                numbers = frame["numbers"].cpu().numpy()
+                if atoms is not None and np.array_equal(atoms.get_atomic_numbers(), numbers):
+                    template = atoms.copy()  # IDs are the input order
+                else:
+                    template = Atoms(numbers=numbers, cell=self.cell.detach().cpu().double().numpy(), pbc=True)
+                    template.set_masses(frame["masses"].double().cpu().numpy())
+                thermostat = self.thermostat
+                self.logger = AsyncGPUMDLogger(
+                    atoms_template=template, device=self.device, trajectory=trajectory, logfile=logfile,
+                    loginterval=self._log_interval, append_trajectory=append_trajectory, ring=logger_ring,
+                    **({"stress": True} if self.log_stress else {}),
+                    **({"state_dtype": torch.float64,
+                        "extras": {"nhc_eta": thermostat.tchain, "nhc_p_eta": thermostat.tchain,
+                                   "nhc_conserved_energy": 1}} if thermostat is not None else {}))
+            except (OSError, *_ERRORS) as exc:
+                error = f"trajectory/logfile: {exc}"
+        self.collective_check(error)
+
+    def _domain_log(self) -> None:
+        """One trajectory/log frame (collective on the agreed schedule: a gather by ID and the kinetic
+        energy's allreduce on every rank; root enqueues, then every rank raises root's logger error).
+        ``log_stress``: the logged state's stress (replicated); a restart's cached prediction has none, so
+        its first frame evaluates it once."""
+        if self.log_stress and self.prediction.stress is None:
+            if not self._restart_stress:  # the same on every rank (a replicated value)
+                raise RuntimeError(f"from_evaluator: no stress was computed for the logged step {self.nsteps}")
+            self.prediction = replace(self.prediction,
+                                      stress=self._domain.evaluate(self._domain_state(), stress=True).stress)
+        self._restart_stress = False
+        fields = self.md_fields()
+        frame = self.comm.gather_by_id(0, fields["ids"], positions=fields["positions"],
+                                       momenta=fields["momenta"], forces=fields["forces"])
+        kinetic = self.integrator.kinetic_energy().reshape(())  # collective
+        error = None
+        if frame is not None:
+            try:
+                energy = fields["energy"].reshape(())
+                thermostat = self.thermostat
+                extras = None if thermostat is None else {
+                    "nhc_eta": thermostat.eta, "nhc_p_eta": thermostat.p_eta,
+                    "nhc_conserved_energy": energy.to(torch.float64) + kinetic + thermostat.thermostat_energy()}
+                self.logger.enqueue(
+                    step=self.nsteps, time_ps=self.nsteps * self.dt_fs / 1000.0, positions=frame["positions"],
+                    momenta=frame["momenta"], forces=frame["forces"], cell=self.cell, potential_energy=energy,
+                    kinetic_energy=kinetic, temperature=2.0 * kinetic / (self.dof * units.kB), extras=extras,
+                    **({"stress": self.prediction.stress} if self.log_stress else {}))
+            except (OSError, *_ERRORS) as exc:  # e.g. the writer thread's failure
+                error = f"trajectory/logfile: {exc}"
+        self.collective_check(error)
+
+    def _domain_state(self):
+        """The evaluator's input in its coordinate dtype, and the migrating payload views."""
+        integrator = self.integrator
+        # NHC integrates FP64 coordinates and keeps an FP32 mirror for FP32
+        # models. FP64 models must read the original state, including on restart.
+        positions = (integrator.positions if self._domain_position_dtype == torch.float64
+                     else integrator.positions32())
+        return self._atom_state(self._ids, positions, self._numbers, integrator.migrating_fields())
+
+    def _domain_step(self):
+        """One step on the integrator's slot rows (exactly one E/F evaluation).
+
+        The evaluator's in-graph MD step (``md_step``) when it runs the epoch
+        model_graph, else the step 3.3 driver's op sequence around ``evaluate``.
+        """
+        self._require_consistent()
+        if self._log_interval and not self._logged_initial:  # agreed schedule: every rank
+            self._logged_initial = True
+            self._domain_log()
+        try:
+            if self.ramp is not None:
+                setpoint = self.ramp.setpoint(self.nsteps)
+                if setpoint is not None:
+                    self.set_temperature(setpoint)  # host numbers, the same on every rank; no sync
+            integrator = self.integrator
+            # The stress where the next state is logged (the agreed schedule).
+            stress = {"stress": True} if self.log_stress and (self.nsteps + 1) % self._log_interval == 0 else {}
+            # None: this evaluator (or this step, after an auto switch to eager) runs E/F only.
+            prediction = None if self._in_graph is None else self._domain.md_step(self._in_graph, **stress)
+            if prediction is None:
+                integrator.step_pre_force()
+                state = self._domain_state()
+                prediction = self._domain.evaluate(state, **stress)  # may migrate the atoms (epoch refresh)
+                if prediction.state is not state:  # refresh; the CPU reference and single engine: every step
+                    # DistributedMatRISEvaluator at one rank returns the atoms in ID order, the order of these
+                    # rows, so the reorder would copy every row onto itself (the single engine's every step).
+                    if not (self._rows_in_id_order and len(prediction.state.ids) == integrator.n_owned):
+                        integrator.reorder_(prediction.state)
+                        self._rows_in_id_order = self._id_ordered_outputs
+                    self._ids, self._numbers = prediction.state.ids, prediction.state.numbers
+                integrator.step_post_force(prediction.forces, energy=prediction.energy.reshape(1))
+        except BaseException:
+            self._failed = True
+            raise
+        # Re-wrapped: the evaluated state's payload holds pre-kick momenta whenever it is not the input.
+        self.prediction = replace(prediction, state=self._domain_state())
+        self.nsteps += 1
+        if self._log_interval and self.nsteps % self._log_interval == 0:
+            self._domain_log()
+        return self.prediction
 
     # --- outputs (MDOutputs: rank 0 owns the files; every rank joins the gathers) ---
     def write_outputs(self) -> dict | None:
@@ -2116,14 +2621,23 @@ class GPUResidentMolecularDynamics:
         ONE gather_by_id; ID-ordered rows, the cached forces and energies (a
         continuation does not re-evaluate), cell, step, ``parameters``, the
         thermostat state, the output files' offsets and ``engine`` ("domain"
-        for historical files, "native" for FastMD with ``ids = arange(N)``).
+        for the from_evaluator driver, "native" at P=1 with ``ids = arange(N)``).
         """
         self.outputs.save_restart(path)
 
 
     def md_fields(self) -> dict:
-        """Views of the current single-device state for output and restart."""
-        return self._native_fields()
+        """The outputs' views of the current state (owned rows; see MDOutputs)."""
+        if self._domain is None:
+            return self._native_fields()
+        self._require_consistent()
+        prediction = self.prediction
+        state = prediction.state
+        payload = state.payload
+        return {"ids": state.ids, "numbers": state.numbers,
+                "positions": payload["positions64"] if self.thermostat is not None else state.positions,
+                "momenta": payload["momenta"], "masses": payload["masses"], "forces": prediction.forces,
+                "energy": prediction.energy, "reference_energy": prediction.reference_energy}
 
     def _native_fields(self) -> dict:
         """md_fields of the native engine: all atoms, ``ids = arange(N)`` (forces evaluated if missing)."""
@@ -2147,16 +2661,23 @@ class GPUResidentMolecularDynamics:
 
     def thermostat_state(self) -> dict:
         """Replicated thermostat state (host values; downloads eta/p_eta for nvt_nhc)."""
+        if self._domain is not None:
+            self._require_consistent()
         if self.thermostat is not None:
             return self.thermostat.state_dict()
-        if self.integrator.ensemble == 'nvt':
-            return {'temperature_K': float(self.integrator.temperature_target)}
+        if self.integrator.ensemble == "nvt":
+            return {"temperature_K": float(self.integrator.temperature_target)}
         return {}
 
     def collective_check(self, error: str | None) -> None:
-        """Local implementation of the output protocol's error check."""
-        if error:
-            raise ValueError(f"GPUResidentMolecularDynamics outputs: {error}")
+        """Every rank raises any rank's error (the evaluator's control group)."""
+        if self._domain is None:  # one rank
+            if error:
+                raise ValueError(f"GPUResidentMolecularDynamics outputs: {error}")
+            return
+        from fastmd.distributed.evaluator import collective_check
+
+        collective_check(self._domain.context, error)
 
     @property
     def thermostat(self) -> GPUNoseHooverChainNVT | None:
@@ -2206,6 +2727,24 @@ class GPUResidentMolecularDynamics:
                           thermostat_energy=energy, conserved_energy=potential + kinetic + energy)
         return result
 
+    def _domain_snapshot_atoms(self) -> Atoms | None:
+        fields = self.md_fields()
+        frame = self.comm.gather_by_id(0, fields["ids"], numbers=fields["numbers"], masses=fields["masses"],
+                                       positions=fields["positions"], momenta=fields["momenta"])
+        if frame is None:
+            return None
+        atoms = Atoms(numbers=frame["numbers"].cpu().numpy(),
+                      positions=frame["positions"].double().cpu().numpy(),
+                      cell=self.cell.detach().cpu().double().numpy(), pbc=True)
+        atoms.set_masses(frame["masses"].double().cpu().numpy())
+        atoms.set_momenta(frame["momenta"].double().cpu().numpy())
+        return atoms
+
+    def _require_consistent(self) -> None:
+        if self._failed:
+            raise RuntimeError("GPUResidentMolecularDynamics: a failed step left a half-advanced state; "
+                               "resume from a restart file")
+
 
 
 
@@ -2247,3 +2786,68 @@ def _close_quietly(*closables) -> None:
             pass
 
 
+
+
+def _refused_in_domain(name: str):
+    """An instance attribute shadowing a native E/F method of a from_evaluator driver (no reference cycle)."""
+    def refused(*args, **kwargs):
+        raise ValueError(f"GPUResidentMolecularDynamics.{name}: the evaluator owns E/F execution "
+                         "(from_evaluator driver)")
+    return refused
+
+
+class _InGraphStep:
+    """The evaluator-driven driver's side of the in-graph P>1 MD step (``DistributedMatRISEvaluator.md_step``).
+
+    The evaluator refreshes at the committed state (``refresh_state``,
+    ``install``) and captures/replays ``pre`` / ``post`` / ``flags`` inside its
+    whole-step graph on ``rows`` = the topology's owned capacity;
+    ``capture_key`` identifies the integrator buffers that graph reads.
+    Holds the driver weakly (the evaluator's runner keeps this object).
+    """
+
+    _serials = itertools.count()
+
+    def __init__(self, driver) -> None:
+        self._driver = weakref.ref(driver)
+        self._serial = next(self._serials)  # never reused (an id() of a freed integrator can be)
+
+    @property
+    def _integrator(self):
+        return self._driver().integrator
+
+    def refresh_state(self):
+        """The committed state q_n: the integrator's rows, the payload with the cached forces F(q_n)."""
+        driver = self._driver()
+        integrator = driver.integrator
+        state = driver._domain_state()
+        return driver._atom_state(state.ids, state.positions, state.numbers,
+                                  {**state.payload, "forces": integrator.forces})
+
+    def install(self, state, rows: int) -> None:
+        """The refreshed rows (forces included) into slots of at least ``rows`` rows."""
+        driver = self._driver()
+        driver.integrator.reserve(rows)
+        driver.integrator.reorder_(state)
+        driver._ids, driver._numbers = state.ids, state.numbers
+
+    def capture_key(self) -> tuple:
+        integrator = self._integrator
+        return (self._serial, integrator.allocations, integrator.capacity)
+
+    def pre(self, rows: int):
+        integrator = self._integrator
+        integrator.backup()
+        return integrator.step_pre_force_rows(rows)
+
+    def post(self, forces, energy, rows: int) -> None:
+        self._integrator.step_post_force_rows(forces, energy.reshape(1), rows)
+
+    def flags(self, rows: int):
+        return self._integrator.nonfinite_rows(rows)
+
+    def restore(self) -> None:
+        self._integrator.restore()
+
+    def state(self):
+        return self._driver()._domain_state()

@@ -53,7 +53,7 @@ import torch
 from torch import Tensor
 
 from fastmd.adapters.protocol import (
-    CapacityStep, CaptureContract, GraphBatch, KernelChoice, PaddingRule, TopologySpec,
+    CapacityStep, CaptureContract, ExchangePoint, ShardSpec, GraphBatch, KernelChoice, PaddingRule, TopologySpec,
 )
 
 # Pretrained checkpoints by name: (mace-torch's download name, sha256 of the file).
@@ -249,6 +249,20 @@ class MACEInput:
     # call reads the node attributes with one lookup of the int32 species
     node_attrs_by_z: Tensor
     minus_one: Tensor  # [1] -1 in the model's dtype: unit_shifts = -edge_image in one kernel
+
+
+_SHARD_PINS = {
+    "mace.modules.models.ScaleShiftMACE.forward":
+        "7f4daea32cb9b55c59db5ee623f8310ef65e41cf0f717278f743ae8bd2782e1d",
+    "mace.modules.blocks.RealAgnosticResidualInteractionBlock.forward":
+        "5148c60b11fd7dcb8fca624aa0447b9e508fcb4d7869a2b3d79e1ac14f768b62",
+    "mace.modules.blocks.RealAgnosticDensityInteractionBlock.forward":
+        "80fd7bc7ea53c17b3212db3ff42ac87b6e42ee8e986c9b408aec06922ad91dad",
+    "mace.modules.blocks.RealAgnosticDensityResidualInteractionBlock.forward":
+        "228610bc97daa842d6ecc8770142d1ad4bce24cc3060fecebc13e3df726a8316",
+    # MACE-MPA-0's pair repulsion: its per-edge energies summed at the receiver
+    "mace.modules.radial.ZBLBasis.forward": "602a7077758ce3682537f5f4c691b2af5750280bc9a7bd771a48a61e57d61cf7",
+}
 
 
 class MACEAdapter:
@@ -475,5 +489,31 @@ class MACEAdapter:
         if hasattr(module, "joint_embedding"):
             return None
         return "union"
+
+    def shard_spec(self) -> ShardSpec:
+        """MACE at P>1: each interaction block sums its messages at the receiver (the edge's centre) and reads
+        the senders' node features, so before every block but the first (whose features come from the
+        species) the ghost rows of its input ``node_feats`` take their owners' rows (one COPY of
+        ``node_feats_irreps`` values per ghost atom and layer; upstream's LAMMPS ML-IAP path exchanges the output
+        of the block's ``linear_up``, the same values one per-atom linear map later). Unused atom slots get the
+        first element of the model's table. Pins: the forward of ``ScaleShiftMACE``, of the interaction block
+        classes in the module and of its pair repulsion if any; a class without a pin (or a model of another
+        class) gives a pin that cannot match, so P>1 is refused with the reason."""
+        from ..adapters.patches import PatchRecord
+
+        interactions = list(self.module.interactions)
+        points = tuple(ExchangePoint(name=f"interactions.{index}.node_feats", module=f"interactions.{index}",
+                                     width=int(block.node_feats_irreps.dim), hook="input", arg="node_feats")
+                       for index, block in enumerate(interactions) if index > 0)
+        classes = [type(self.module)] + [type(block) for block in interactions]
+        if hasattr(self.module, "pair_repulsion_fn"):
+            classes.append(type(self.module.pair_repulsion_fn))
+        targets = dict.fromkeys(f"{cls.__module__}.{cls.__qualname__}.forward" for cls in classes)
+        pins = tuple(PatchRecord(name=f"mace.shard.{target.rsplit('.', 2)[-2]}", target=target,
+                                 distribution="mace-torch", versions=_SHARD_PIN_VERSIONS,
+                                 source_sha256=_SHARD_PINS.get(target, "0" * 64),
+                                 reason="the multi-GPU node-halo hooks rely on this forward unchanged")
+                     for target in targets)
+        return ShardSpec(exchange_points=points, pad_species=int(self.module.atomic_numbers[0]), source_pins=pins)
 
 

@@ -544,8 +544,11 @@ class BucketedGraphRunner:
                 workspace = _PaddedLineGraphWorkspace.create(workspace, sample_g)
                 pg = self.adapter.prepare(workspace.batch)
         with fusion_scope(self.enable_model_fusions):
+            from fastmd.engine.kernels.triton_wide_gemm import capture_warmup
             side = torch.cuda.Stream(); side.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(side):
+            # Select the capture thresholds during preparation as well: the
+            # eager threshold can otherwise leave a Triton binary unloaded.
+            with torch.cuda.stream(side), capture_warmup():
                 if self._derivative is None:
                     self._warm(lambda: self.adapter.evaluate([pg], task=self.task, is_training=False, n_real=n_real))
                 else:

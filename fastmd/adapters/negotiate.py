@@ -21,13 +21,23 @@ decision            chain (fastest first)                             the fastes
 ``execution``       whole_step -> model_graph -> eager                sync-free, CUDA, a memory bound that fits
 ``precision``       ieee (fp64 for an FP64 model); tf32 only asked    (measured, not assumed)
 ``recompute``       the requested level -> off                        the adapter implements the level
-``multi_gpu``       single_gpu (P=1); other sizes rejected            -
+``multi_gpu``       single_gpu (P=1); P>1 needs a layer exchange      -
+                    (or a declared shard: node_halo)
 ==================  ================================================  =========================================
 
-FastMD rejects distributed entry points and any world_size other than 1.
+The distributed entry point (``entry="distributed"``: ``fastmd.distributed.ShardedEvaluator``, a model that declares
+its shard, :class:`~fastmd.adapters.protocol.ShardSpec`) negotiates the same decisions on every rank: the node-halo
+topology (candidates within the skin, re-filtered exactly every step; the single-system builder at one
+CUDA rank, the CPU reference topology on a CPU),
+padding (the edge rule and atom slots of rank-uniform capacities), the kernels (each rank's choice, then the first
+option every rank installs: ``agreed_kernels``), the sharded derivative (forces and the strain-leaf stress), the
+execution (model_graph -> eager; under auto the evaluator admits model_graph where every rank's predicted peak
+fits) and the precision; the record of P>1 holds a ``distributed`` block and a fingerprint that adds the shard's
+declaration and source pins (no block at P=1, where the fingerprint follows the other entry points' rule; their
+records and fingerprints are unchanged).
 
 A capability the adapter lacks resolves to the conservative option with a reason, never to an error.
-The errors (:class:`NegotiationError`): world_size != 1,
+The errors (:class:`NegotiationError`): P>1 for an adapter without a layer exchange,
 ``optimization_profile="legacy"`` for a model other than MatRIS, a kernel site whose reference
 fails to install, runtime rules the runtime does not have, declarations that contradict each other
 (a contract exact at the cutoff only with ``far_self_loops`` padding), and replicas of a model that does not
@@ -63,8 +73,8 @@ import json
 import math
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from fastmd.adapters.patches import applied_pins, patch_report
-from fastmd.adapters.protocol import (
+from .patches import applied_pins, patch_report
+from .protocol import (
     ACCURACY_CLASSES,
     CaptureContract,
     CaptureDeclaration,
@@ -72,10 +82,13 @@ from fastmd.adapters.protocol import (
     EnergyTap,
     KernelBackends,
     KernelChoice,
+    LayerExchange,
     ModelOwnedDerivative,
     NegotiationError,
     RecomputeParticipant,
     SYSTEM_BATCHING_KINDS,
+    ShardSpecDeclaration,
+    ShardedTap,
     SystemBatching,
     SystemEnergyTap,
     SystemInputs,
@@ -184,7 +197,7 @@ class EnginePlanRecord:
         """A deep copy of this record linking an ``OpPlanRecorder`` snapshot (or the recorder) of this
         plan's runs: its schema, sha256 over the canonical JSON, kernel-policy fingerprints and entry
         counts per section."""
-        from fastmd.engine.recorder import canonical_json
+        from ..engine.recorder import canonical_json
         if hasattr(snapshot, "snapshot"):
             snapshot = snapshot.snapshot()
         return replace(copy.deepcopy(self), op_plan={
@@ -201,16 +214,14 @@ class EnginePlanRecord:
         """Run an adapter forward under the plan's precision (``matmul_precision``), and undo any
         global FP32 GEMM precision change made inside (upstream code calling
         ``torch.set_float32_matmul_precision`` or setting ``allow_tf32``), recording each distinct one."""
-        from fastmd.precision import matmul_precision_scope
-        from fastmd.precision import restore_fp32_state
+        from ..precision import matmul_precision_scope, restore_fp32_state
         with matmul_precision_scope(self.matmul_precision), restore_fp32_state(self.precision_restores):
             yield
 
     def check_precision(self, stage: str) -> dict:
         """Measure the cuBLAS FP32 GEMM math the adapter's forwards run with now (``stage``: e.g.
         "before_capture"), record it, and say whether it is still the negotiated one."""
-        from fastmd.precision import fp32_gemm_mode
-        from fastmd.precision import matmul_precision_scope
+        from ..precision import fp32_gemm_mode, matmul_precision_scope
         with matmul_precision_scope(self.matmul_precision):
             mode = fp32_gemm_mode()
         expected = self.precision.get("cublas")
@@ -285,12 +296,47 @@ def can_capture(adapter) -> bool:
 
 
 def multi_gpu_decision(adapter, world_size: int, shard=None, skin: float | None = None) -> Decision:
-    """FastMD supports one device per simulation."""
-    if world_size != 1:
-        raise NegotiationError("FastMD supports one device per simulation")
-    return Decision("multi_gpu", "single_gpu", "world_size=1", evidence={"world_size": world_size})
-
-
+    """P=1 is the identity; P>1 needs a layer exchange (an explicit error without one), or ``shard``, the
+    model's declared shard (:class:`~fastmd.adapters.protocol.ShardSpec`) the distributed entry point runs on its
+    generic node-halo exchange (``skin``: its topology skin, Å)."""
+    if world_size < 1:
+        raise NegotiationError("world_size must be a positive integer")
+    chain = ("single_gpu", "layer_exchange")
+    if world_size == 1:
+        return Decision("multi_gpu", "single_gpu", "P=1: no exchange", chain=chain)
+    if shard is not None:
+        cutoff = adapter.topology_spec().cutoff
+        points = [{"name": point.name, "width": point.width} for point in shard.exchange_points]
+        if shard.message_flow == "line_graph":
+            merges = [point for point in shard.exchange_points if point.kind == "pair_merge"]
+            unfused = [point for point in shard.exchange_points if point.kind == "copy" and point.fuse_into is None]
+            return Decision("multi_gpu", "line_partial", f"P={world_size}: the generic line-partial exchange of the "
+                            f"model's declared shard (edges with an owned end, triplets at owned centres; ghost rows "
+                            f"within {cutoff + skin:g} Å; line slots: boundary bonds shorter than "
+                            f"{shard.line_slot_cutoff:g} Å + the skin; {len(merges)} pair_merge collective(s) per step "
+                            "carrying the fused feature COPYs)", chain=("custom_strategy", "line_partial"),
+                            evidence={"halo_A": cutoff + skin, "skin_A": skin, "exchange_points": [
+                                {**entry, "kind": point.kind, "fuse_into": point.fuse_into}
+                                for entry, point in zip(points, shard.exchange_points)],
+                                "line_slot_cutoff_A": shard.line_slot_cutoff,
+                                "forward_collectives_per_step": 2 + len(merges) + len(unfused)})
+        sums = [{"name": point.name, "width": point.width} for point in shard.global_reductions]
+        return Decision("multi_gpu", "node_halo", f"P={world_size}: the generic node-halo exchange of the model's "
+                        f"declared shard ({shard.message_flow} edges; ghost rows within {cutoff + skin:g} Å; "
+                        f"{len(points)} feature COPY(s) per step after the coordinates'"
+                        + (f"; {len(sums)} FP64 global sum(s) of its pooled readout" if sums else "") + ")",
+                        chain=("custom_strategy", "node_halo"),
+                        evidence={"halo_A": cutoff + skin, "skin_A": skin, "exchange_points": points,
+                                  "forward_copies_per_step": 1 + len(points),
+                                  **({"global_reductions": sums} if sums else {})})
+    if not isinstance(adapter, LayerExchange):
+        declared = isinstance(adapter, ShardSpecDeclaration) and adapter.shard_spec() is not None
+        raise NegotiationError(f"P={world_size} needs a layer exchange; model {adapter.name!r} declares none " + (
+            "here (it declares a shard: its P>1 plan is the distributed entry point's, "
+            "fastmd.distributed.ShardedEvaluator)" if declared else "(no distributed exchange declaration)"))
+    strategy = adapter.exchange_strategy()
+    return Decision("multi_gpu", strategy, f"P={world_size}: the adapter's {strategy} exchange (the other "
+                    "decisions are the single-GPU rules)", chain=chain)
 
 
 def plan_fingerprint(adapter, *, profile: str, kernels: Mapping[str, str], model_dtype: str,
@@ -410,9 +456,7 @@ def precision_decision(state: Mapping[str, Any], requested: str | None, model_dt
 
 def measured_precision(matmul_precision: str | None, triton_dot_precision: str | None = None) -> dict:
     """``precision_state()`` under a configuration's precision scopes (what its calls run with)."""
-    from fastmd.precision import matmul_precision_scope
-    from fastmd.precision import precision_state
-    from fastmd.precision import triton_dot_precision_scope
+    from ..precision import matmul_precision_scope, precision_state, triton_dot_precision_scope
     with matmul_precision_scope(matmul_precision), triton_dot_precision_scope(triton_dot_precision):
         return precision_state()
 
@@ -447,10 +491,13 @@ def negotiate(adapter, config, *, entry: str = "gpu_md", device=None, pbc=(True,
     before the precision is measured; the contract is read again after every kernel installation. Topology
     reuse and padding follow the execution decision (the paths that implement them).
 
-    FastMD supports a single device; distributed-only inputs are rejected.
+    ``entry="distributed"`` (the distributed entry point of a model with a declared shard, ``shard``, and
+    the topology ``skin``): the decisions of each rank (see the module docstring), no collective here;
+    ``agreed_kernels`` ({site: option}) makes each site start its chain at the option the ranks agreed on
+    (the first that installs from there on is kept, so a disagreement shows in the next round).
     """
     import torch
-    from fastmd.config import InferenceConfig, ResolvedConfig, resolve_config
+    from ..config import InferenceConfig, ResolvedConfig, resolve_config
     if runtime_planned(adapter):
         raise TypeError("MatRIS is not negotiated: use entry_plan_record(entry point) or dry_run()")
     if config is None or isinstance(config, InferenceConfig):
@@ -459,8 +506,8 @@ def negotiate(adapter, config, *, entry: str = "gpu_md", device=None, pbc=(True,
     if not isinstance(config, ResolvedConfig):
         raise TypeError("config must be an InferenceConfig, a ResolvedConfig or None")
     check_profile(adapter, config.optimization_profile)
-    if entry == DISTRIBUTED or shard is not None or skin is not None or agreed_kernels is not None:
-        raise NegotiationError("FastMD supports single-device entry points only")
+    if entry == DISTRIBUTED and (shard is None or skin is None):
+        raise TypeError("the distributed entry point negotiates a declared shard: pass shard and skin")
     multi_gpu = multi_gpu_decision(adapter, world_size, shard=shard if entry == DISTRIBUTED else None, skin=skin)
     device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
     cuda = device.type == "cuda" and torch.cuda.is_available()
@@ -470,16 +517,26 @@ def negotiate(adapter, config, *, entry: str = "gpu_md", device=None, pbc=(True,
     full_pbc = all(bool(axis) for axis in pbc)
     restores: list = []
 
-    from fastmd.graph.fixed_capacity_builder import _fixed_builder_available
+    from ..graph.fixed_capacity_builder import _fixed_builder_available
     builder = cuda and _fixed_builder_available
 
     # Kernels are installed for the requested execution, under auto for the first mode of the entry
     # point's chain (what auto aims for); a site that ranks its options per mode follows the decision below.
     target = config.execution if config.execution not in ("auto", None) else _entry_chain(entry)[0]
+    # At P>1 a declared shard may fix the option a site runs (its own layer loop runs, e.g., eager modules).
+    fixed = dict(shard.kernels) if entry == DISTRIBUTED and world_size > 1 else {}
     choices = tuple(adapter.kernel_backends()) if isinstance(adapter, KernelBackends) else ()
+    unknown = sorted(set(fixed) - {choice.site for choice in choices})
+    if unknown:
+        raise NegotiationError(f"model {adapter.name!r}: ShardSpec.kernels names sites the model does not declare "
+                               f"({', '.join(unknown)})")
     kernels, kernel_decisions = {}, []
     for choice in choices:
-        decision = _kernel_decision(adapter, choice, config.optimization_profile, contract, restores, target)
+        if choice.site in fixed:
+            decision = _shard_kernel(adapter, choice, fixed[choice.site], contract, restores, world_size)
+        else:
+            decision = _kernel_decision(adapter, choice, config.optimization_profile, contract, restores, target,
+                                        agreed=None if agreed_kernels is None else agreed_kernels.get(choice.site))
         kernels[choice.site] = decision.chosen
         kernel_decisions.append(decision)
     if not kernel_decisions:
@@ -494,6 +551,11 @@ def negotiate(adapter, config, *, entry: str = "gpu_md", device=None, pbc=(True,
     precision, matmul_precision = precision_decision(state, config.matmul_precision, model_dtype, default_ieee=True,
                                                      cuda=cuda)
     cublas = measured_precision(matmul_precision)["fp32_gemm"] if cuda else None
+    if entry == DISTRIBUTED:
+        return _distributed_plan(adapter, config, cuda, device, world_size, shard, skin, contract, declared, topology,
+                                 kernels, kernel_decisions, precision, matmul_precision, state, cublas, restores,
+                                 multi_gpu)
+
     execution, memory_field = _foreign_execution(
         adapter, config, entry, cuda, contract, full_pbc, builder, capacity, memory, budget, whole_step_trial, device,
         model_graph_pools)
@@ -572,6 +634,172 @@ def _graph_decisions(adapter, config, entry, cuda, builder, contract, topology, 
     return neighbor_list, topology_reuse, padding
 
 
+# --- the distributed entry point (a declared shard) ---------------------------------------------------
+
+# The FP32 stress noise floor (eV/Å³): the largest difference of the stress between two evaluations of one frame at
+# P=1 (MACE-MP-0, IEEE FP32, cuEquivariance; 1,344 and 10,752 atoms, five processes of six evaluations), rounded up.
+STRESS_FLOOR = 4e-8
+# The accuracy contract of a P>1 run (the reference: P=1 through the distributed entry point, in the same execution
+# mode; nu: the largest pairwise difference between repeated P=1 evaluations), recorded in the distributed block.
+P_GT_1_GATE = {
+    "reference": "P=1 through the distributed entry point, same execution mode and kernels",
+    "forces": "max|dF| <= max(1e-5 eV/Å, 2 nu_F) and RMSE <= 1e-5 eV/Å",
+    "energy": "|dE|/N <= max(1e-6 eV, 1.5 nu_E/N) (FP64 totals)",
+    "stress": f"max|dsigma| <= max({STRESS_FLOOR:g} eV/Å³, 2 nu_sigma)",
+    "fp64": "CPU float64: max|dF| <= 1e-10 eV/Å, |dE| <= 1e-9 eV, max|dsigma| <= 1e-12 eV/Å³",
+}
+STRESS_METHOD = ("strain_leaf: a zero [3, 3] strain on each rank deforms its owned rows (before the coordinates' "
+                 "COPY: every row strained once, by its owner) and its cell; the energy and the nine strain "
+                 "gradients are summed over the ranks in one FP64 all-reduce after the backward; stress = sum / V")
+POOLED_READOUT_METHOD = ("each rank pools its owned real rows only (ghost rows and unused slots never), the pooled "
+                         "values are summed over the ranks in FP64 (the sum's backward: the sum over the ranks of "
+                         "their gradients), the head of the summed values is counted on rank 0 only")
+
+
+def _distributed_plan(adapter, config, cuda, device, world_size, shard, skin, contract, declared, topology, kernels,
+                      kernel_decisions, precision, matmul_precision, state, cublas, restores,
+                      multi_gpu) -> EnginePlanRecord:
+    """The plan of one rank of the distributed entry point (``negotiate(entry="distributed")``)."""
+    name = adapter.name
+    tap = isinstance(adapter, ShardedTap) if shard.adapter_called else isinstance(adapter, EnergyTap)
+    if contract.force_mode != "engine_autograd" or not tap:
+        raise NegotiationError(f"model {name!r}: the node-halo exchange differentiates per-atom energies (an energy "
+                               "tap), or the share of a pooled readout of the adapter's own layer loop (ShardedTap), "
+                               f"with the engine-owned derivative; force mode {contract.force_mode!r} runs only on "
+                               "a model's own exchange strategy")
+    if world_size > 1 and precision.chosen == "tf32" and not shard.allow_tf32:
+        raise NegotiationError(f"model {name!r} runs on several GPUs in IEEE FP32 only: its P>1 forward is "
+                               f"validated in IEEE FP32, so TF32 (matmul_precision={config.matmul_precision!r}) is "
+                               "refused at P>1; run TF32 on one GPU, or leave matmul_precision unset at P>1")
+    if not (contract.exact_cutoff or contract.exact_at_cutoff):
+        raise NegotiationError(f"model {name!r}: the node-halo topology reuses candidates within a skin and "
+                               "re-filters them exactly every step, which needs an exact cutoff (CaptureContract "
+                               "exact_cutoff or exact_at_cutoff)")
+    _check_padding(adapter, contract)
+    execution = _distributed_execution(adapter, config, cuda, contract, device)
+    neighbor_list, topology_reuse, padding = _distributed_graph_decisions(adapter, cuda, world_size, topology, shard,
+                                                                          skin)
+    single = world_size == 1 and cuda
+    derivative = derivative_decision(contract, declared) if single else Decision(
+        "derivative", contract.force_mode, "the sharded engine-owned derivative: one backward of the owned rows' "
+        "energies" + (" (the rank's share of the pooled readout, through its global sums)"
+                      if shard.readout == "pooled" else "") + " through the coordinates' and the declared features' "
+        f"COPYs (their reverse SUMs return every ghost row's gradient to its owner); the stress by a strain leaf; "
+        f"stress in {contract.stress_unit}",
+        chain=("engine_autograd",), evidence={"stress_unit": contract.stress_unit, "stress_method": "strain_leaf"})
+    recompute = _foreign_recompute(adapter, config.saved_tensor_recompute)
+    if recompute.chosen != "off":  # (the sharded derivative applies no level)
+        recompute = replace(recompute, chosen="off", reason=f"requested {recompute.chosen!r}: the sharded derivative "
+                            "runs no saved-tensor recompute")
+    classes = [contract.accuracy_class, precision.accuracy_class] + [d.accuracy_class for d in kernel_decisions]
+    patches = adapter.upstream_patches() if isinstance(adapter, UpstreamPatches) else ()
+    block, shard_print = None, None
+    if world_size > 1:
+        outcomes = shard.check_pins(name)
+        pins = [outcome.as_dict() for outcome in outcomes]
+        shard_print = {"spec": shard.digest(), "pins": [(outcome.record.name, outcome.record.source_sha256,
+                                                          outcome.applied) for outcome in outcomes]}
+        line = shard.message_flow == "line_graph"
+        block = {"strategy": "line_partial" if line else "node_halo", "edge_ownership": shard.message_flow,
+                 "readout": shard.readout, "halo_A": topology.cutoff + skin, "skin_A": skin,
+                 "pad_species": shard.pad_species, "shard_spec_sha256": shard.digest(),
+                 "exchange_points": [{"name": point.name, "module": point.module,
+                                      "hook": point.hook if point.module is not None else None,
+                                      "width": point.width,
+                                      **({"kind": point.kind, "fuse_into": point.fuse_into,
+                                          "fuse_from": None if point.fuse_from is None else list(point.fuse_from)}
+                                         if line else {})}
+                                     for point in shard.exchange_points],
+                 **({"line_slot_cutoff_A": shard.line_slot_cutoff} if line else {}),
+                 "stress_method": STRESS_METHOD, "source_pins": pins, "p_gt_1_gate": dict(P_GT_1_GATE),
+                 "estimate": False}
+        if shard.global_reductions:  # (a pooled readout: the sums over the ranks of the owned rows' pooled values)
+            block["global_reductions"] = [{"name": point.name, "width": point.width, "dtype": "float64"}
+                                          for point in shard.global_reductions]
+            block["readout_method"] = POOLED_READOUT_METHOD
+    return EnginePlanRecord(
+        model=name, upstream=getattr(adapter, "upstream", None),
+        fingerprint=plan_fingerprint(adapter, profile=config.optimization_profile, kernels=kernels,
+                                     model_dtype=topology.model_dtype, shard=shard_print),
+        profile=config.optimization_profile, entry=DISTRIBUTED, world_size=int(world_size),
+        decisions=[neighbor_list, topology_reuse, padding, *kernel_decisions, derivative, execution, precision,
+                   recompute, multi_gpu],
+        contract=contract, accuracy_class=loosest_class(*classes),
+        isolated_atoms=isolated_atoms_field(adapter, config.handle_isolated_atoms),
+        memory=({"calibration": "measured per rank", "note": "the shard's MemoryPredictor, measured on each rank's "
+                 "device at the first layout (MemoryAdmission, agreed over the ranks)"} if cuda else
+                {"calibration": "none", "note": "CPU ranks: no memory admission"}),
+        precision=_precision_field(precision, state, topology.model_dtype, cuda, cublas),
+        matmul_precision=matmul_precision, precision_restores=restores, contract_declared=declared,
+        patches=patch_report(patches), distributed=block)
+
+
+def _distributed_execution(adapter, config, cuda, contract, device) -> Decision:
+    """model_graph -> eager at the distributed entry point (the MD integrator runs outside the evaluator's graph:
+    no whole step); under auto model_graph where the model is capturable on CUDA, admitted by the evaluator at
+    each new layout where every rank's predicted capture peak fits (else eager, with the reason)."""
+    import torch
+    from ..engine.entry_config import check_execution
+    chain = _entry_chain(DISTRIBUTED)
+    requested = config.execution
+    dynamic = contract.compiled == "dynamic" or (adapter.compiled and contract.compiled != "capture_safe")
+    unsafe = [why for ok, why in ((contract.sync_free, "not declared sync-free"),
+                                  (not dynamic, "dynamic torch.compile (traced at run time)")) if not ok]
+    if requested not in ("auto", None):
+        check_execution(DISTRIBUTED, requested, device if cuda else torch.device("cpu"))
+        evidence = {"requested": requested}
+        if requested != "eager" and unsafe:
+            return Decision("execution", "eager", f"requested {requested}, but {'; '.join(unsafe)}: eager",
+                            chain=chain, evidence=evidence)
+        return Decision("execution", requested, "explicit request", chain=chain, evidence=evidence)
+    blockers = [why for ok, why in ((cuda, "no CUDA device"),
+                                    (config.checkpoint_enabled is False, "checkpointing (no CUDA graph)")) if not ok]
+    blockers += unsafe
+    if blockers:
+        return Decision("execution", "eager", "; ".join(blockers), chain=chain, evidence={"requested": "auto"})
+    return Decision("execution", "model_graph", "auto: capturable; admitted where every rank's predicted capture "
+                    "peak fits its budget (each new layout, agreed over the ranks)", chain=chain,
+                    evidence={"requested": "auto", "memory": "pending: the first layout"})
+
+
+def _distributed_graph_decisions(adapter, cuda, world_size, topology, shard, skin) -> tuple[Decision, ...]:
+    """The neighbor list, topology reuse and padding of the distributed entry point: the single-system
+    fixed-capacity builder at one CUDA rank, the node-halo topology at P>1 on CUDA (both refresh their candidates
+    within the skin on the device and re-filter them exactly every step), the exact reference topology on a CPU."""
+    rule = getattr(adapter, "padding_rule", None)
+    kind = getattr(rule() if callable(rule) else rule, "kind", None) or "sink_atoms"
+    halo = {"cutoff": topology.cutoff, "skin": skin}
+    if not cuda:
+        why = "the CPU reference topology: exact rows and edges rebuilt every evaluation (tests)"
+        # A line-graph shard's reference pads its line graph: one sink row, one padded pair and one padded triplet.
+        line = shard is not None and shard.message_flow == "line_graph"
+        padding = (Decision("padding", "sink_atoms", why + "; one sink row with one padded pair and one padded "
+                            "triplet (every rank's line graph non-empty); a rank without atoms keeps one unused slot",
+                            chain=("sink_atoms", "none")) if line else
+                   Decision("padding", "none", why + "; a rank without atoms keeps one unused slot",
+                            chain=(kind, "none")))
+        return (Decision("neighbor_list", "reference_topology", why, chain=("reference_topology",), evidence=halo),
+                Decision("topology_reuse", "rebuild", why, chain=("rebuild",), evidence=halo), padding)
+    listed = "fixed_capacity_builder" if world_size == 1 else "node_halo_topology"
+    where = ("one rank: the single-system builder" if world_size == 1 else
+             f"P={world_size}: the owned atoms and the ghost rows within {topology.cutoff + skin:g} Å of the domain, "
+             f"{shard.message_flow} edges")
+    if world_size > 1 and shard.message_flow == "line_graph":
+        # The line graph's padding at P>1: sink atoms (padded triplets keep every rank's line graph non-empty).
+        kind = "sink_atoms"
+        where += " (edges with an owned end, triplets at owned centres)"
+    neighbor_list = Decision("neighbor_list", listed, f"{where}; candidates within cutoff + {skin:g} Å refreshed on "
+                             "the device when the skin is used up", chain=(listed, "reference_topology"), evidence=halo)
+    topology_reuse = Decision("topology_reuse", "exact_skin_refilter", f"exact cutoff: candidates re-filtered to "
+                              f"r < {topology.cutoff} Å every evaluation", chain=("exact_skin_refilter",),
+                              evidence=halo)
+    slots = "" if world_size == 1 else (f"; atom slots in rank-uniform tiers, unused ones species "
+                                        f"{shard.pad_species}, without edges and outside the owned mask")
+    padding = Decision("padding", kind, f"fixed capacities padded by the adapter's rule ({kind}){slots}",
+                       chain=(kind, "none"), evidence={} if world_size == 1 else {"pad_species": shard.pad_species})
+    return neighbor_list, topology_reuse, padding
+
+
 def renegotiate_execution(record: EnginePlanRecord, adapter, config, *, entry: str, device=None,
                           pbc=(True, True, True), capacity: Mapping[str, int] | None = None, memory=None,
                           budget: int | None = None,
@@ -585,14 +813,14 @@ def renegotiate_execution(record: EnginePlanRecord, adapter, config, *, entry: s
     fingerprint) follow the adapter's applied records now; the precision, recompute and multi-GPU decisions
     stay."""
     import torch
-    from fastmd.config import ResolvedConfig
+    from ..config import ResolvedConfig
     if not isinstance(config, ResolvedConfig):
         raise TypeError("config must be a ResolvedConfig")
     device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
     cuda = device.type == "cuda" and torch.cuda.is_available()
     contract, _ = contract_of(adapter)
     topology = adapter.topology_spec()
-    from fastmd.graph.fixed_capacity_builder import _fixed_builder_available
+    from ..graph.fixed_capacity_builder import _fixed_builder_available
     builder = cuda and _fixed_builder_available
     full_pbc = all(bool(axis) for axis in pbc)
     execution, memory_field = _foreign_execution(
@@ -685,7 +913,7 @@ def _kernel_decision(adapter, choice: KernelChoice, profile: str, contract: Capt
     the reference; options of class "reduced" are skipped for a model that is not itself "reduced"
     (reduced accuracy is never a default). The options rank in the site's order under ``execution``
     (``KernelChoice.order``); ``agreed`` (the distributed ranks' agreement): the chain starts there."""
-    from fastmd.precision import restore_fp32_state
+    from ..precision import restore_fp32_state
     site = f"kernels.{choice.site}"
     cls = lambda option: choice.accuracy.get(option, contract.accuracy_class)
     ranked = choice.order(execution)
@@ -726,6 +954,28 @@ def _kernel_decision(adapter, choice: KernelChoice, profile: str, contract: Capt
     raise NegotiationError(f"{site}: no option installed")  # unreachable: the reference raises above
 
 
+def _shard_kernel(adapter, choice: KernelChoice, option: str, contract: CaptureContract, restores: list,
+                  world_size: int) -> Decision:
+    """The option a declared shard fixes for ``choice``'s site at P>1 (``ShardSpec.kernels``), installed; an option
+    the site does not offer, or one that fails to install, refuses P>1."""
+    from ..precision import restore_fp32_state
+    site = f"kernels.{choice.site}"
+    if option not in choice.options:
+        raise NegotiationError(f"{site}: the shard's P>1 option {option!r} is not one of {choice.options}")
+    cls = choice.accuracy.get(option, contract.accuracy_class)
+    if cls == "reduced" and contract.accuracy_class != "reduced":
+        raise NegotiationError(f"{site}: the shard's P>1 option {option!r} has reduced accuracy (never a default)")
+    try:
+        with restore_fp32_state(restores):
+            adapter.select_kernel(choice.site, option)
+    except Exception as error:  # noqa: BLE001 - P>1 runs this option only
+        raise NegotiationError(f"{site}: the shard's P>1 option {option!r} failed to install ({type(error).__name__}: "
+                               f"{str(error).splitlines()[0][:160] if str(error) else ''})") from error
+    return Decision(site, option, f"P={world_size}: the option the model's shard runs on several GPUs "
+                    "(ShardSpec.kernels)", chain=choice.order(), evidence={"shard": True},
+                    accuracy_class=cls if cls != contract.accuracy_class else None)
+
+
 def _foreign_execution(adapter, config, entry, cuda, contract, full_pbc, builder, capacity, memory, budget,
                        trial, device, model_graph_pools: int = 1) -> tuple[Decision, dict]:
     """whole_step -> model_graph -> eager for a model other than MatRIS; K6 has no calibration for it,
@@ -733,7 +983,7 @@ def _foreign_execution(adapter, config, entry, cuda, contract, full_pbc, builder
     whole_step (its windows share one pool), ``model_graph_pools`` captures for model_graph (where it holds
     more than one pool, the trial against it runs only where they fit)."""
     import torch
-    from fastmd.engine.entry_config import check_execution
+    from ..engine.entry_config import check_execution
     requested = config.execution
     chain = _entry_chain(entry)
     memory_field = {"calibration": "uncalibrated", "note": "K6 has no calibration for this model"}
@@ -814,7 +1064,7 @@ def _foreign_execution(adapter, config, entry, cuda, contract, full_pbc, builder
 def _memory_bound(memory, capacity, budget, device, pools: int = 1) -> tuple[bool, str, dict]:
     """Whether the measured bound of ``pools`` captures (one graph pool each) fits the auto share of the
     budget."""
-    from fastmd.engine.saved_recompute import AUTO_THRESHOLD
+    from ..engine.saved_recompute import AUTO_THRESHOLD
     if memory is None:
         return False, "no memory bound: K6 uncalibrated and no measured memory model", {}
     if not memory.valid:
@@ -842,7 +1092,7 @@ def capture_budget(device) -> int:
     """The device bytes a capture may use above what is allocated now (the measured bound is a peak
     above the allocation): free + reserved - allocated, less the admission margin."""
     import torch
-    from fastmd.engine import memory_admission
+    from ..engine import memory_admission
     free, total = torch.cuda.mem_get_info(device)
     return (free + torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
             - memory_admission.margin_bytes(total))
@@ -981,10 +1231,6 @@ def batch_systems(record: EnginePlanRecord, adapter, *, systems: int,
             alone = "the same systems" if evaluated == "two of its systems" else "the same copies"
             cause = ("its atoms see the other system, or it pools a slot's vacant rows" if check.get("vacant_rows")
                      else "its atoms see the other system")
-            cause = "possible causes include " + cause
-            if record.precision.get("chosen") == "tf32":
-                cause += (" or batch-shape-dependent TF32 rounding; retry with "
-                          "InferenceConfig(matmul_precision='highest') and keep self_check=True")
             raise NegotiationError(
                 f"model {name!r} declares {declared!r}, but {evaluated} evaluated as one union differ "
                 f"from {alone} alone {found} (the noise floor of both paths): {cause}")
@@ -1012,7 +1258,7 @@ def size_unions(record: EnginePlanRecord, *, requested: int, memory, union_edges
     measured (a union too small), kept as requested, as without a valid capture fit (a failed measurement).
     Unions that do not fit at one replica raise :class:`NegotiationError`. ``unit`` names what a union holds
     (the multi-system entry point sizes its unions in "rows": the slots' atom ceilings)."""
-    from fastmd.engine.saved_recompute import AUTO_THRESHOLD
+    from ..engine.saved_recompute import AUTO_THRESHOLD
     requested, replicas = int(requested), int(requested if replicas is None else replicas)
     triplets = (lambda size: 0) if union_triplets is None else union_triplets
     evidence: dict = {"requested": requested, "replicas": replicas, "union_edges": int(union_edges(requested)),
@@ -1045,8 +1291,11 @@ def size_unions(record: EnginePlanRecord, *, requested: int, memory, union_edges
             fitted = need(chosen)
             if fitted is None or fitted > limit:
                 smallest = "one replica" if unit == "replicas" else f"{chosen} {unit}"
+                if fitted is None:
+                    raise NegotiationError(f"{replicas} {unit} are not sized: unions of {smallest} are beyond the "
+                                           f"measured range of the memory model ({memory.reason})")
                 raise NegotiationError(f"{replicas} {unit} do not fit: unions of {smallest} need "
-                                       f"{(fitted or 0) / 2**30:.2f} GiB > {AUTO_THRESHOLD:.0%} of the budget "
+                                       f"{fitted / 2**30:.2f} GiB > {AUTO_THRESHOLD:.0%} of the budget "
                                        f"{budget / 2**30:.1f} GiB")
             evidence.update(fitted_need_gib=round(fitted / 2**30, 3), fitted_union_edges=int(union_edges(chosen)))
             if union_triplets is not None:
@@ -1064,7 +1313,7 @@ def size_unions(record: EnginePlanRecord, *, requested: int, memory, union_edges
 
 def entry_plan_record(instance, *, op_plan=None) -> EnginePlanRecord:
     """The plan record of a constructed entry point (``GPUResidentMolecularDynamics``,
-    ``MLIPCalculator``): for MatRIS the decisions the runtime made, read from the instance; for
+    ``MatRISCalculator``): for MatRIS the decisions the runtime made, read from the instance; for
     another model the plan its entry point negotiated (``_engine_plan``: (adapter, record)), else
     one negotiated now and kept, so kernels are installed once. Where the entry point runs otherwise
     since (``_observed``) the record says so. The distributed entry point of a declared shard
@@ -1092,7 +1341,7 @@ def _plan_recorder(adapter):
     (``runtime_planned``): the model registry names one per rule set (MatRIS's: ``fastmd.models.matris.plan_record``,
     with ``entry_record`` and ``dry_run_record``)."""
     import inspect
-    from fastmd.models import plan_recorder
+    from ..models import plan_recorder
     return plan_recorder(inspect.getattr_static(adapter.__class__, "runtime_rules"))
 
 
@@ -1103,7 +1352,7 @@ _MOVED_RULES = frozenset({"matris_execution_rule", "matris_recompute_decision"})
 
 def __getattr__(name):
     if name in _MOVED_RULES:
-        from fastmd.models import plan_recorder
+        from ..models import plan_recorder
         return getattr(plan_recorder("matris"), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
@@ -1113,7 +1362,7 @@ def _observed(instance, record: EnginePlanRecord) -> EnginePlanRecord:
     execution (a fallback after a CUDA OOM, an explicit enable_* call), the calculator's last call's
     topology reuse (a system's first call and the calls after a cell change rebuild), and the neighbor
     list and padding of those paths."""
-    from fastmd.engine.entry_config import config_summary
+    from ..engine.entry_config import config_summary
     effective = config_summary(instance)["effective"]
     execution = effective["execution"]
     observed = {"execution": (execution, effective.get("auto_execution", {}).get("reason"))}
@@ -1182,8 +1431,7 @@ def dry_run(adapter, config, *, entry: str = "gpu_md", device=None, atoms, world
     first evaluation. MatRIS at P>1 runs the distributed evaluator, whose plan this dry run does not cover
     (an error)."""
     import torch
-    from fastmd.config import InferenceConfig
-    from fastmd.config import resolve_config
+    from ..config import InferenceConfig, resolve_config
     if entry not in ("gpu_md", "calculator"):
         raise ValueError("entry must be 'gpu_md' or 'calculator'")
     device = torch.device(device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -1191,7 +1439,7 @@ def dry_run(adapter, config, *, entry: str = "gpu_md", device=None, atoms, world
     resolved = resolve_config(config, default_execution="auto") if config is None or isinstance(
         config, InferenceConfig) else config
     if not runtime_planned(adapter):
-        from fastmd.graph.fixed_capacity_builder import _fixed_builder_available
+        from ..graph.fixed_capacity_builder import _fixed_builder_available
         plan = negotiate(adapter, resolved, entry=entry, device=device, pbc=pbc, world_size=world_size)
         execution = plan.decision("execution")
         # Where the entry point measures: a model it measures with the fixed-capacity builder (the calculator:

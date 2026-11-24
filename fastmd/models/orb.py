@@ -12,9 +12,13 @@ and license. What the adapter declares and does:
   layers, no triplets (the builders run edges only). ORB keeps the nearest
   ``max_neighbors`` (120) neighbours of each centre, as upstream's graph does:
   the engine builds the full radius graph (and flags on the device a build in
-  which an atom has more), and each call keeps the nearest ``max_neighbors``
+  which an atom has more), and each single-device call keeps the nearest ``max_neighbors``
   edges of every centre on the device (``nearest_k_mask``; exact distance ties
-  broken by the edge, not its row); the others become far self-loops.
+  broken by the edge, not its row); the others become far self-loops. At P>1,
+  a rank lacks the full neighbours of its ghost centres, so ``sharded_energy``
+  retains every radius edge with an owned end. The distributed evaluator warns
+  when its CUDA degree counter exceeds the cap; that path does not reproduce
+  upstream's capped graph for an over-cap system.
 * **Padding**: far self-loops. ORB gates every message by an envelope times
   ``r < 6`` and masks its ZBL pair repulsion by the covalent radii, so a loop
   at least twice the cutoff long adds exactly nothing; its length is never 0
@@ -87,7 +91,7 @@ from torch import Tensor
 
 from fastmd.adapters.patches import PatchRecord, apply_patches, revert_patches
 from fastmd.adapters.protocol import (
-    CapacityStep, CaptureContract, GraphBatch, KernelChoice, PaddingRule, TopologySpec,
+    CapacityStep, CaptureContract, ExchangePoint, ShardSpec, GraphBatch, KernelChoice, PaddingRule, TopologySpec,
 )
 
 # Pretrained checkpoints by name: (upstream's ORB_PRETRAINED_MODELS key, download URL, sha256 of the file).
@@ -349,6 +353,34 @@ class ORBInput:
     one_hot: Tensor  # [118, 118] identity in the model's dtype: row Z is the one-hot of atomic number Z
 
 
+_SHARD_PINS = (
+    ("layer_loop", "orb_models.forcefield.gns.MoleculeGNS.forward",
+     "a02ec27dc12566dc38198e09fca6ce486d898895ced0746c7ef4206f2cc6f026",
+     "the P>1 forward restates this layer loop (the ghost rows' node features COPY'd before each layer but the first)"),
+    ("node_features", "orb_models.forcefield.gns.MoleculeGNS.featurize_nodes",
+     "d363324d9c57670610f12755915165f8d549c5914bc5257c6433190595d0218a",
+     "a ghost row's first node features come from its own species"),
+    ("encoder", "orb_models.forcefield.gns.Encoder.forward",
+     "20b2be4793386fbd47c79902ee11fd42417441ef51104f104f6d5ba2732a859f",
+     "the encoder maps each row and each edge on its own"),
+    ("messages", "orb_models.forcefield.gns.AttentionInteractionNetwork.forward",
+     "5c3b6f57cdca3abafc47869a6d363dae2582c26a863d9e5a34507b39074f90d0",
+     "a layer reads an edge's state and its two ends' node features and sums the messages at both ends"),
+    ("energy_head", "orb_models.forcefield.forcefield_heads.EnergyHead.forward",
+     "228928b3e1a2a4dcbbcd4971c816cf061e99fdca433d6dfc12ef99a0f35f6f03",
+     "the readout restates the head's pooling of the node features"),
+    ("denormalize", "orb_models.forcefield.forcefield_heads.EnergyHead.denormalize",
+     "675f61c362a3c16e9574f4f94589c0bc4fedda1d72c19d88627bb54705acdee4",
+     "the readout restates the energy's tail (the atom count, the linear reference)"),
+    ("reference", "orb_models.forcefield.forcefield_heads.LinearReferenceEnergy.forward",
+     "8e9ad1d49d6800bcfc3abbd154e7cb398a143153da2bc6ba5b3838944a1b48ca",
+     "the readout sums the linear reference's weight of each atom"),
+    ("zbl", "orb_models.forcefield.pair_repulsion.ZBLBasis.forward",
+     "88e5f6a3164959d15912686634fecbde0df10e398107ec1ecaa324844a427a19",
+     "the readout restates ZBL's pair terms and sums them by sender"),
+)
+
+
 class ORBAdapter:
     """An upstream ORB v3 ``ConservativeForcefieldRegressor`` as a
     :class:`~fastmd.adapters.protocol.ModelAdapter` with a
@@ -375,6 +407,7 @@ class ORBAdapter:
         self._version = version("orb-models")
         if self._version not in ORB_VERSIONS:
             raise RuntimeError(f"orb-models {self._version} is not supported (validated: {', '.join(ORB_VERSIONS)})")
+        self._shard = None  # Built lazily from the upstream shard contract.
         self._in_use = False  # prepare() was called: the module is bound to a runtime from now on
         head = module.heads[getattr(module, "energy_name", "energy")]
         # The readout restates upstream's poolings (_head_energy): the head's mean exactly when it predicts the
@@ -412,12 +445,12 @@ class ORBAdapter:
         """Whether the backbone runs under torch.compile (capture-safe once warmed up: the contract)."""
         return self.kernel == "inductor"
 
-    # The calls keep the nearest max_neighbors edges of each centre themselves (_atom_graphs).
+    # Single-device calls select nearest neighbours. P>1 keeps the existing full-radius shard contract.
     selects_nearest_neighbors = True
 
     def topology_spec(self) -> TopologySpec:
-        """Directed edges within ORB's radius, five layers, no triplets, at most 120 neighbours (the calls keep
-        the nearest of the radius graph's edges)."""
+        """Directed edges within ORB's radius, five layers, no triplets, at most 120 neighbours (single-device
+        calls keep the nearest; sharded calls retain the radius graph's edges with an owned end)."""
         parameter = next(self.module.parameters())
         return TopologySpec(
             cutoff=self._cutoff,
@@ -489,10 +522,13 @@ class ORBAdapter:
             atoms = graph.n_node if systems is None or systems.atoms is None else systems.atoms
             return self._head_energy(sums, atoms.to(torch.float64)) + reference
 
-    def _atom_graphs(self, inputs: ORBInput, positions: Tensor, cell: Tensor, edge_shifts: Tensor | None = None):
+    def _atom_graphs(self, inputs: ORBInput, positions: Tensor, cell: Tensor, edge_shifts: Tensor | None = None,
+                     *, select_nearest: bool = True):
         """ORB's ``AtomGraphs`` of the engine's edges at ``positions`` and ``cell`` (or the per-edge shifts
         ``edge_shifts``): the graph of every call (one ORB graph per system of a batch of several). Each centre
-        keeps its nearest ``max_neighbors`` edges within the cutoff; the others become far self-loops."""
+        keeps its nearest ``max_neighbors`` edges within the cutoff; the others become far self-loops.
+        ``select_nearest=False`` preserves a P>1 shard: its ghost centres have incomplete neighbourhoods,
+        so local selection could keep a cross-domain edge on one rank but discard it on its owner's rank."""
         from orb_models.forcefield.base import AtomGraphs
 
         batch = inputs.batch
@@ -532,18 +568,19 @@ class ORBAdapter:
         # derivative, as an edge upstream's graph does not have. Distance ties at the cap (perfect crystals) are
         # broken by the edge (neighbour, then image), not by row, so every builder's edge order keeps the same edges
         # (upstream's own choice among tied neighbours is arbitrary).
-        from fastmd.models.orb_graph import nearest_k_mask
+        if select_nearest:
+            from fastmd.models.orb_graph import nearest_k_mask
 
-        rows = torch.arange(senders.shape[0], device=senders.device)
-        keep = nearest_k_mask(senders, vectors, rows, positions.shape[0], self._max_neighbors, self._cutoff,
-                              receivers, image)
-        if batch.n_edges is not None:
-            keep = keep & (rows < batch.n_edges)
-        far = torch.zeros_like(vectors[:1])
-        far[:, 0] = 2 * self._cutoff
-        vectors = torch.where(keep[:, None], vectors, far)
-        receivers = torch.where(keep, receivers, senders)
-        image = torch.where(keep[:, None], image, 0.0)
+            rows = torch.arange(senders.shape[0], device=senders.device)
+            keep = nearest_k_mask(senders, vectors, rows, positions.shape[0], self._max_neighbors, self._cutoff,
+                                  receivers, image)
+            if batch.n_edges is not None:
+                keep = keep & (rows < batch.n_edges)
+            far = torch.zeros_like(vectors[:1])
+            far[:, 0] = 2 * self._cutoff
+            vectors = torch.where(keep[:, None], vectors, far)
+            receivers = torch.where(keep, receivers, senders)
+            image = torch.where(keep[:, None], image, 0.0)
         return AtomGraphs(
             senders=senders, receivers=receivers, n_node=n_node, n_edge=n_edge,
             node_features={"positions": positions, "atomic_numbers": numbers,
@@ -769,3 +806,71 @@ class ORBAdapter:
         revert_patches(self._operator_patches)
         revert_patches(self.patches)
         self._sync_free = False
+
+    def shard_spec(self) -> ShardSpec | None:
+        """ORB at P>1 on the runtime's node-halo exchange (``fastmd.distributed.ShardedEvaluator``): every
+        layer sends its messages to both ends of an edge and carries a 256-wide state per directed edge, so a rank
+        keeps every edge with an owned end (an edge between two domains is computed on both ranks from the same
+        node features: its state is a function of its vector and its two ends' node features, layer by layer), and
+        before each layer but the first (whose node features come from the species) the ghost rows of the node
+        features take their owners' (256 values per ghost row and layer). The energy pools the atoms' features
+        before its head: a rank pools its owned rows only, and the pooled sums (256 + ZBL's 1) are summed over the
+        ranks in FP64 (:meth:`sharded_energy`). The P>1 forward is this adapter's own layer loop, eager (the
+        backbone's site fixed to "eager" at P>1), validated in IEEE FP32 (TF32 refused at P>1). Unused atom slots
+        get hydrogen; the edge capacity follows the adapter's capacity step at P>1 too (a padded edge row costs a
+        full edge-network row in each layer). Pins: the upstream code the layer loop and the readout restate or rely
+        on, row by row. None for a module whose regressor, backbone, layers, energy head or pair repulsion are not
+        upstream's own classes."""
+        if self._shard is not None:
+            return self._shard
+        from ..adapters.patches import PatchRecord
+
+        module = self.module
+        gns = module.model
+        parts = [(module, "conservative_regressor.ConservativeForcefieldRegressor"), (gns, "gns.MoleculeGNS"),
+                 (gns._encoder, "gns.Encoder"), (module.heads[module.energy_name], "forcefield_heads.EnergyHead")]
+        parts += [(layer, "gns.AttentionInteractionNetwork") for layer in gns.gnn_stacks]
+        if module.pair_repulsion:
+            parts.append((module.pair_repulsion_fn, "pair_repulsion.ZBLBasis"))
+        if any(f"{type(part).__module__}.{type(part).__qualname__}" != f"orb_models.forcefield.{name}"
+               for part, name in parts):
+            return None
+        width = int(gns.gnn_stacks[0]._receive_attn.in_features)
+        points = tuple(ExchangePoint(name=f"gnn_stacks.{index}.nodes", module=None, width=width)
+                       for index in range(1, len(gns.gnn_stacks)))
+        reductions = (ExchangePoint(name="readout.pooled_sums", module=None, width=width + 1, kind="global_sum"),)
+        pins = tuple(PatchRecord(name=f"orb.shard.{name}", target=target, distribution="orb-models",
+                                 versions=ORB_VERSIONS, source_sha256=digest, reason=reason)
+                     for name, target, digest, reason in _SHARD_PINS)
+        self._shard = ShardSpec(exchange_points=points, message_flow="both_ends", readout="pooled",
+                                pad_species=1, source_pins=pins, global_reductions=reductions, allow_tf32=False,
+                                kernels=((KERNEL_SITE, "eager"),), capacity_step=_CAPACITY_STEP)
+        return self._shard
+
+    def sharded_energy(self, inputs: ORBInput, positions: Tensor, cell: Tensor, ctx) -> Tensor:
+        """This rank's share of ORB's energy at P>1 (``fastmd.adapters.protocol.ShardedTap``): the backbone's
+        layers on the rank's rows (owned, ghost and unused) with the ghost rows' node features COPY'd from their
+        owners before each layer but the first, the pooled sums of the owned rows summed over the ranks in FP64,
+        the energy head of the sums counted on rank 0 only, plus the linear reference of the owned rows.
+        Keeps every radius edge with an owned end: a ghost centre's partial neighbourhood must not be
+        locally capped, because both ranks must compute the same cross-domain edge's messages."""
+        from orb_models.forcefield.nn_util import get_cutoff
+
+        graph = self._atom_graphs(inputs, positions, cell, select_nearest=False)
+        gns = self.module.model
+        spec = self.shard_spec()
+        # Derived from orb-models 0.5.4, orb_models/forcefield/gns.py:421-461 (MoleculeGNS.forward). Copyright 2024
+        # Orbital Materials, Inc. Licensed under the Apache License, Version 2.0
+        # (http://www.apache.org/licenses/LICENSE-2.0). Changed: before each layer but the first the ghost rows'
+        # node features are their owners' (ctx.exchange); no decoder (its output is not part of the energy).
+        edge_features = gns.featurize_edges(graph)
+        node_features = gns.featurize_nodes(graph)
+        nodes, edges = gns._encoder(node_features, edge_features)
+        cutoff = get_cutoff(graph.edge_features["vectors"].norm(dim=-1))
+        for index, gnn in enumerate(gns.gnn_stacks):
+            if index:
+                nodes = ctx.exchange(spec.exchange_points[index - 1], nodes)
+            nodes, edges = gnn(nodes, edges, graph.senders, graph.receivers, cutoff, cond_nodes=None, cond_edges=None)
+        sums, reference = self._readout_sums(graph, nodes, ctx.owned)
+        total = ctx.global_sum(spec.global_reductions[0], sums[0])
+        return ctx.counted_once(self._head_energy(total[None], ctx.n_total.reshape(1))) + reference

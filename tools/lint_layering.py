@@ -1,7 +1,7 @@
 """Layering lint: the engine reaches models only through the adapter interface, and a layer imports only the layers
 below it.
 
-Ported from MD's architecture checks for the single-device FastMD layout.
+Architecture checks for the single-device and distributed FastMD runtimes.
 Reads a checkout's ``fastmd/`` with ``ast`` (nothing is imported) and reports:
 
 * ``model``: an import statement in the engine (``fastmd.engine``, ``graph``,
@@ -109,7 +109,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWLIST = "tools/lint_layering_allowlist.txt"
-ENGINE = ("applications", "engine", "graph", "execution", "interfaces", "accuracy", "relaxation", "relax_cli")
+ENGINE = ("distributed", "applications", "engine", "graph", "execution", "interfaces", "accuracy", "relaxation", "relax_cli")
 # The packages linted as model adapters, and MatRIS's own packages (the model, which may import itself).
 ADAPTER_PACKAGES = ("adapters", "models")
 MODEL_PACKAGES = ("model", "models/matris")
@@ -121,11 +121,11 @@ PROTOCOL = "fastmd.adapters.protocol"
 INTERFACE = frozenset({"as_adapter", "ModelAdapter", "ModelOwnedDerivative", "TopologySpec"})
 ENTRY_POINTS = frozenset([*(f"fastmd/applications/{name}.py" for name in ("base", "gpu_md", "md", "relax",
                                                                           "torchsim_interface")),
-                          *(f"fastmd/interfaces/{name}.py" for name in ("calculator", "gpu_md", "md",
+                          *(f"fastmd/interfaces/{name}.py" for name in ("calculator", "distributed", "gpu_md", "md",
                                                                         "multi_system_md", "multi_system_relax",
                                                                         "relax", "replica_md", "torchsim_interface",
                                                                         "torchsim_batch", "torchsim_native")),
-                          "fastmd/relaxation.py", "fastmd/relax_cli.py"])
+                          "fastmd/distributed/sharded_evaluator.py", "fastmd/relaxation.py", "fastmd/relax_cli.py"])
 ENTRY_INTERFACE = frozenset({"load_adapter", "entry_plan_record"})
 # The entry points' negotiation of another model's plan, imported from these modules.
 NEGOTIATION_INTERFACE = {"fastmd.adapters.negotiate": frozenset({"negotiated", "negotiate", "renegotiate_execution",
@@ -149,6 +149,7 @@ LAYERS = (("leaf", ("fastmd", "fastmd.config", "fastmd.precision", "fastmd._nvtx
           ("engine", ("fastmd.engine",)),
           ("contract", ("fastmd.adapters.negotiate",)),
           ("execution", ("fastmd.execution",)),
+          ("distributed", ("fastmd.distributed",)),
           ("interfaces", ("fastmd.interfaces", "fastmd.explain", "fastmd.applications", "fastmd.accuracy",
                           "fastmd.relaxation", "fastmd.relax_cli")))
 INIT_ONLY = frozenset({"fastmd", "fastmd.adapters", "fastmd.models", "fastmd.ops"})
@@ -158,11 +159,15 @@ REGISTRY = "fastmd.models"
 MODELS, MODEL_TOP = "models", "engine"
 # MatRIS's plan record fills the negotiation's record with the decisions the runtime makes for MatRIS by its own rules
 # (the negotiation records them, it does not make them): it may also import the contract layer.
+STRATEGY, STRATEGY_LAYER = "fastmd.models.matris.distributed", "distributed"
+RUNTIME_PROTOCOLS = frozenset({"fastmd.engine.runtime.EngineRuntime"})
 PLAN_RECORD, PLAN_RECORD_LAYER = "fastmd.models.matris.plan_record", "contract"
 # The old import paths of moved code (stubs and compatibility packages now) and what each stands for: its layer and,
 # for a model, the family. The facade at FACADE re-exports the entry points; it is not a stub.
 OLD_PATHS = {"fastmd.model": (MODELS, "matris"), "fastmd.integrations": (MODELS, "m3gnet"),
              "fastmd.applications": ("interfaces", None), "fastmd.graph.converter": (MODELS, "matris"),
+             "fastmd.distributed.memory_admission": ("engine", None),
+             "fastmd.distributed.bond_partial": (MODELS, "matris"),
              **{f"fastmd.adapters.{family}": (MODELS, family)
                 for family in ("chgnet", "mace", "matris", "orb", "sevennet", "esen", "orb_graph",
                                "operator_rewrites")}}
@@ -459,7 +464,8 @@ def layer_violations(rel: str, imports: list[ast.Import | ast.ImportFrom], packa
     source, found = layer_of(importer), []
     if source is None:
         return found
-    extra = PLAN_RECORD_LAYER if _under(importer, PLAN_RECORD) else None
+    extra = (STRATEGY_LAYER if _under(importer, STRATEGY) else PLAN_RECORD_LAYER
+             if _under(importer, PLAN_RECORD) else None)
     for statement in imports:
         targets = {}
         for module in loaded(statement, package, modules):
@@ -540,7 +546,8 @@ def lint(root: Path) -> tuple[list[tuple], dict[str, int], dict[str, list[str]]]
             rel = path.relative_to(root)
             source = (rel.as_posix(), parse(path), ".".join(rel.parts[:-1]))
             if package in ADAPTER_PACKAGES:
-                violations += adapter_violations(*source)
+                violations += adapter_violations(
+                    *source, RUNTIME_PROTOCOLS if _under(module_name(rel), STRATEGY) else frozenset())
                 if not model_file(root, path):
                     # The model contract does not import a model either (the registry loads one by name); a foreign
                     # model may import its own family.

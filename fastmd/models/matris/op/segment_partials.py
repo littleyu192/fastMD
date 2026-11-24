@@ -50,21 +50,7 @@ _MERGE_BLOCK = 1024
 _MERGE_NUM_WARPS = 4
 
 
-def segment_logsumexp(values: Tensor, segment: Tensor, count: int) -> Tensor:
-    """Per-channel log-sum-exp of the rows of ``values`` per segment; -inf where empty.
-
-    ``segment[k]`` (int64) is the segment, in ``[0, count)``, of row ``k``.
-    """
-    width = values.shape[1]
-    with torch.no_grad():
-        peak = values.new_full((count, width), float("-inf")).scatter_reduce(
-            0, segment[:, None].expand(-1, width), values, reduce="amax", include_self=False)
-        peak = torch.where(torch.isfinite(peak), peak, torch.zeros_like(peak))
-    total = values.new_zeros((count, width)).index_add(
-        0, segment, torch.exp(values - peak.index_select(0, segment)))
-    positive = total > 0
-    return torch.where(positive, peak + torch.log(torch.where(positive, total, torch.ones_like(total))),
-                       torch.full_like(total, float("-inf")))
+from fastmd.engine.kernels.segment import segment_logsumexp
 
 
 def slot_logsumexp(logits: Tensor, rows: Tensor, segment: Tensor, count: int) -> Tensor:

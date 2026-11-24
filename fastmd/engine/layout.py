@@ -1,8 +1,52 @@
-"""Certified graph layout used for single-device operator selection.
+"""Execution layout: the capability fields the operator dispatcher reads (design §4.1).
 
-Layout metadata records pair indexing, line incidence, sorted relations and
-CSR structure established by the topology lowering plan. Retained layout
-fields have their single-device defaults; exchange layouts are not supported."""
+Step 2.3 carries only the fields today's P=1 sites select on. Each is derived
+from the topology lowering plan that ``process_graphs`` compiles from the graph
+certificate (``fastmd.engine.topology_lowering``), so the layout says what the
+certificate proves, never what a kernel would like:
+
+* ``pair_layout``: ``"pair_index"`` when the plan lowers ``pair_algebra`` to
+  paired rows (every undirected pair has exactly two directed rows), else
+  ``"generic"``. ``"interleaved"`` is the P>1 layout (not used at P=1 yet).
+* ``incidence``: line-graph incidence of the envelope product, ``"strong"``
+  (``line_incidence.direct``), ``"bounded"`` (``line_incidence.direct_bounded``)
+  or ``"none"``; ``compiled_envelope`` when the plan selects the compiled
+  (Inductor) lowering for the envelope site.
+* ``sorted_by``: relations whose indexed-affine VJP may assume sorted rows
+  (``"atom_indexed_affine"`` also needs the contiguous sorted segment VJP).
+  A pure performance hint (DSP-07).
+* ``identity_csr``: graph kinds (``"atom"``, ``"line"``) whose target segment
+  attention CSR is the identity permutation.
+
+Step 2.4 adds the P>1 fields a distributed preparer declares
+(``from_bond_partial``); at P=1 they keep their defaults and stay out of the
+fingerprint, so P=1 fingerprints (and dispatcher cache keys) are unchanged:
+
+* ``route``: ``"exchange"`` (P>1 transport between the model stages).
+* ``pair_layout`` ``"interleaved"``: directed rows 2u and 2u+1 are the two
+  orientations of undirected row u (E == 2U, padding included).
+* ``sink``: ``"private_single"`` when padding rows of every domain are routed
+  to one private sink row/segment (the padded model_graph layout); gathers and
+  sums then use the zero-skipping kernels (their atomics omit the zero
+  cotangents/addends of padding rows), and the weighted atomic segment sum is
+  not selected. ``"none"`` otherwise.
+* ``owner_csr``: graph kinds whose owner segments come as prepared CSR
+  (``graph["_owner_{side}_csr"] = (perm, offsets, skip_segment)``, int64);
+  segment attention reads them instead of sorting in the model body.
+* ``shared_value_rows``: graph kinds whose source and target attention sides
+  read the same value rows (both sides passed as one tensor object) with the
+  prepared CSR over those rows; a necessary condition of the paired segment
+  attention besides tensor identity.
+* ``required_keys``: graph-dict keys the generic lowerings of this layout read
+  (e.g. ``source_bincount``); ``check_required_keys`` rejects a graph dict
+  missing one at construction instead of a KeyError inside the model.
+
+Row counts, dtypes and strides are not layout fields: the dispatcher checks
+them per call from host metadata. Precision is not a layout field (INV-5).
+The fingerprint covers every field; it is stable across steps with the same
+certified topology schema, so the dispatcher cache does not grow with ragged
+shapes.
+"""
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -43,6 +87,30 @@ class ExecutionLayout:
         payload = json.dumps(fields, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
+    @classmethod
+    def from_bond_partial(cls, *, has_line: bool, padded: bool = False) -> ExecutionLayout:
+        """The P>1 layout of the A2 bond-partial scheme (``fastmd.models.matris.distributed.bond_partial``).
+
+        Every rank runs the single-GPU layers on its local graph: interleaved
+        pairs of every local bond, owner CSR of both sides of each kind over
+        the local rows, and both attention sides of each kind read the same
+        message rows (the CSR is over those rows, no folding). Triplet rows
+        index the local bond rows directly (``"bounded"``: base[source] *
+        base[target]). The padded (model_graph) layout routes padding to one
+        private sink per domain (the last owned atom, the last bond). Every
+        generic segment lowering has its bincount keys prepared. The only P>1
+        layout since step 4.2 (the rows exchange's layout was removed with it).
+        """
+        kinds = frozenset(("atom", "line") if has_line else ("atom",))
+        return cls(
+            route="exchange",
+            pair_layout="interleaved",
+            incidence="bounded" if has_line else "none",
+            sink="private_single" if padded else "none",
+            owner_csr=kinds,
+            shared_value_rows=kinds,
+            required_keys=frozenset({"source_bincount", "target_bincount"}),
+        )
 
     def check_required_keys(self, kind: str, graph: dict) -> None:
         """Reject a graph dict that lacks a key a generic lowering will read."""

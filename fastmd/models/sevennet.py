@@ -67,7 +67,7 @@ from torch import Tensor
 
 from fastmd.adapters.patches import PatchRecord, apply_patches, revert_patches
 from fastmd.adapters.protocol import (
-    CapacityStep, CaptureContract, GraphBatch, KernelChoice, PaddingRule, TopologySpec,
+    CapacityStep, CaptureContract, ExchangePoint, ShardSpec, GraphBatch, KernelChoice, PaddingRule, TopologySpec,
 )
 
 # Pretrained checkpoints by name: (sevenn's pretrained name, sha256 of the file).
@@ -361,6 +361,17 @@ class SevenNetInput:
     rows: Tensor  # [edge rows] int64 arange: the rows past batch.n_edges are padding
 
 
+_SHARD_PINS = {
+    "sevenn.nn.convolution.IrrepsConvolution.forward":
+        "5434e8b40ff5d696408c2b10ccf0999d2a416c291c8519cc6a7410feb73bae36",
+    "sevenn.nn.convolution.IrrepsScatterGatterFusedConvolution.forward":
+        "0ba8a0aa9966aa18869896f2d05be9a917d28add49b5fcc860c633bd2aa382a2",
+    "sevenn.nn.cue_helper.cueq_fused_scatter_channelwise_conv.forward":
+        "dff0d4fbe07b4c73d84684014b76c2e93327b0c115d3ed351bfccd75b7d766b0",
+    _INTERACTION_BLOCK: "03b0c38bbe72d0ab8700df21901611dac1f26dcbe3ff6a632a91f75dcec41ff4",
+}
+
+
 class SevenNetAdapter:
     """An upstream SevenNet module (``AtomGraphSequential`` without its force head) as a
     :class:`~fastmd.adapters.protocol.ModelAdapter` with an
@@ -599,4 +610,33 @@ class SevenNetAdapter:
     def close(self) -> None:
         """Revert the one-hot patch (the module copies its table per call again); idempotent."""
         revert_patches(self._patches)
+
+    def shard_spec(self) -> ShardSpec:
+        """SevenNet at P>1: each convolution sums its messages at the receiver (the edge's centre) and reads the
+        senders' node features, and the other modules the per-atom energies depend on read their own atom's row or
+        edge only, so before every convolution but the first (whose features come from the species) the ghost rows
+        of the convolution's input ``x`` (an entry of the one dict the convolution is called with:
+        ``arg=(0, "x")``) take their owners' rows: one COPY of the convolution's input width per ghost atom and
+        layer (480 values for SevenNet-0, as sevenn's own LAMMPS parallel mode exchanges). Unused atom slots get
+        the model's smallest atomic number. Pins: the forward of the module's convolution class, of sevenn's
+        cuEquivariance fused convolution (it gathers at the senders and scatters at the receivers) where
+        installed, and the interaction block builder; a class without a pin gives a pin that cannot match, so P>1
+        is refused with the reason."""
+        layers = [(name, layer) for name, layer in self.module._modules.items() if name.endswith("_convolution")]
+        points = tuple(ExchangePoint(name=f"{name}.{layer.key_x}", module=name,
+                                     width=int(layer.convolution_kwargs["irreps_in1"].dim), hook="input",
+                                     arg=(0, layer.key_x))
+                       for index, (name, layer) in enumerate(layers) if index > 0)
+        classes = [type(layer) for _, layer in layers] + [type(layer.convolution) for _, layer in layers
+                                                         if self._fused]
+        targets = list(dict.fromkeys(f"{cls.__module__}.{cls.__qualname__}.forward" for cls in classes))
+        pins = tuple(PatchRecord(name=f"sevennet.shard.{target.rsplit('.', 2)[-2]}", target=target,
+                                 distribution="sevenn", versions=SEVENN_VERSIONS,
+                                 source_sha256=_SHARD_PINS.get(target, "0" * 64),
+                                 reason="the multi-GPU node-halo hooks rely on this forward unchanged")
+                     for target in targets)
+        pins += (PatchRecord(name="sevennet.shard.interaction_block", target=_INTERACTION_BLOCK, distribution="sevenn",
+                             versions=SEVENN_VERSIONS, source_sha256=_SHARD_PINS[_INTERACTION_BLOCK],
+                             reason="the convolutions are the interaction block's only modules that read other atoms"),)
+        return ShardSpec(exchange_points=points, pad_species=int(self._types[0]), source_pins=pins)
 
