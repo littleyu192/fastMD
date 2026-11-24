@@ -1,9 +1,11 @@
-"""Structure relaxation of many systems in the slots of whole-step CUDA graphs: ASE's FIRE per system, with a
-fixed cell or ASE's FrechetCellFilter, the structures streaming through the slots.
+"""Structure relaxation of many systems in the slots of whole-step CUDA graphs: ASE's FIRE or GoodOldQuasiNewton
+per system, with a fixed cell, ASE's FrechetCellFilter or its ExpCellFilter, the structures streaming through the
+slots.
 
 :class:`MultiSystemRelaxation` relaxes each of a list of structures as ASE would one at a time
-(``FIRE(atoms).run(fmax, steps)``, or ``FIRE(FrechetCellFilter(atoms))`` for a variable cell; ASE's default
-parameters), for MatRIS and for a model the engine differentiates that declares its systems may be evaluated as one
+(``FIRE(atoms).run(fmax, steps)``, or ``FIRE(FrechetCellFilter(atoms))`` / ``FIRE(ExpCellFilter(atoms))`` for a
+variable cell, or ``GoodOldQuasiNewton`` in FIRE's place; ASE's default parameters, or the filter's and optimizer's
+arguments given), for MatRIS and for a model the engine differentiates that declares its systems may be evaluated as one
 disjoint union (or pools each system over its own atoms) and takes the engine's per-edge shifts (MACE's
 ``ScaleShiftMACE``, MACE-SOYO, SevenNet, CHGNet, ORB v3 and TACE, as
 :class:`~fastmd.interfaces.multi_system_md.MultiSystemMolecularDynamics`). Up to ``slots``
@@ -12,7 +14,9 @@ call and one backward pass per FIRE step for all the structures of a union, ``st
 CUDA graph, the optimizer's state and the convergence of every system on the device. Each window ends with one read of
 every system's phase; a structure that converged, reached the step limit or failed leaves its slot, and the next
 structure that fits is written into the slot in place, without a recapture (in-flight batching). The results come back
-per input structure.
+per input structure. GoodOldQuasiNewton's step decomposes each system's Hessian, which a CUDA graph cannot hold: its
+windows hold one step, and every relaxing system's next step is computed eagerly on the device before each window
+(:meth:`~fastmd.execution.system_relax.SystemGOQN.propose`, batched over the union's systems).
 """
 from __future__ import annotations
 
@@ -34,9 +38,12 @@ from ..execution.system_relax import (
     IDLE,
     PENDING,
     PHASES,
+    CellFilter,
     FIREParameters,
+    GOQNParameters,
     SlotRelaxationRunner,
     SystemFIRE,
+    SystemGOQN,
     relaxation_builder,
 )
 from ..adapters.protocol import NegotiationError
@@ -224,8 +231,9 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
         return 1.0 + DRAIN_FRACTION if self._drain else 1.0
 
     def __init__(self, model, systems, *, relaxation: dict, admit_cells, structures=None, planner=None, first=None,
-                 drain: bool = True, in_flight: bool = False, **options) -> None:
+                 drain: bool = True, in_flight: bool = False, optimizer: type = SystemFIRE, **options) -> None:
         self._relaxation = relaxation
+        self._optimizer = optimizer  # SystemFIRE or SystemGOQN
         self._drain = drain
         self._admit_cells = admit_cells
         # With the slots left to the runtime: every structure, the planner of the slots of a union of given rows
@@ -300,14 +308,19 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
         plan.decisions[-1].evidence["slots"] = len(self.ceilings)
         return rows, plan
 
+    def _integrator(self, layout) -> SystemFIRE:
+        """A fresh optimizer of the relaxation (FIRE or GOQN) over ``layout``'s slots."""
+        return self._optimizer(layout, device=self.device, **self._relaxation)
+
+
     def _start_union(self, union, positions: list, momenta: list) -> None:
-        """The FIRE integrator of ``union`` with its systems pending at ``positions``, and its first runner."""
+        """The relaxation integrator of ``union`` with its systems pending at ``positions``, and its first runner."""
         union.atoms = [len(self._numbers[index]) for index in range(union.start, union.stop)]
         union.carried = False
         union.cells = torch.as_tensor(np.stack(self._cells[union.start:union.stop]), dtype=torch.float64,
                                       device=self.device)
         union.numbers, coordinates = self._union_tables(union, positions)
-        integrator = SystemFIRE(union.layout, device=self.device, **self._relaxation)
+        integrator = self._integrator(union.layout)
         for slot, index in enumerate(range(union.start, union.stop)):
             integrator.write_system(slot, positions=positions[slot], cell=self._cells[index])
         integrator.sync()
@@ -340,6 +353,14 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
             validate_isolated_atoms=not self._config.handle_isolated_atoms)
         torch.cuda.synchronize(self.device)
         union.capture_seconds.append(time.perf_counter() - started)
+
+        # the model's automatic recompute state this capture used (MultiSystemRelaxation.build_signature)
+        from ..engine import saved_recompute
+
+        record = saved_recompute.auto_record(self._adapter.module, self._config)
+        union.recompute = None if record is None else (
+            record["mode"], record["single_bwd"], record["gated_tail"], record["threshold"], record["fast_fallback"],
+            record["fast_only"])
 
     @torch.no_grad()
     def write_structure(self, union, slot: int, atoms: Atoms) -> None:
@@ -447,7 +468,7 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
         union.cells = cells.index_select(0, torch.as_tensor(slots, device=self.device)).clone()
         union.numbers = torch.cat([old.numbers[old.layout.starts[slot]:old.layout.starts[slot] + n]
                                    for slot, n in zip(slots, ceilings)])
-        union.integrator = SystemFIRE(union.layout, device=self.device, **self._relaxation)
+        union.integrator = self._integrator(union.layout)
         union.integrator.take_systems(integrator, slots)
         union.integrator.sync()
         positions = union.integrator.positions.to(torch.float32)
@@ -506,10 +527,16 @@ class MultiSystemRelaxation:
         ASE's ``run(fmax, steps)``: a structure converges when its largest force row is below ``fmax`` (eV/Å; with
         a cell filter the filter's rows, its cell's included), and stops unconverged after ``max_steps`` steps.
     cell_filter:
-        None (fixed cell) or ``"frechet"``: ASE's ``FrechetCellFilter`` with its default arguments (the atom count as
-        the cell factor, no pressure, every strain component).
-    fire:
-        :class:`~fastmd.execution.system_relax.FIREParameters`; default ASE's ``FIRE`` defaults.
+        None (fixed cell), ``"frechet"`` (ASE's ``FrechetCellFilter``), ``"exp"`` (ASE's ``ExpCellFilter``), or
+        :class:`~fastmd.execution.system_relax.CellFilter` with scalar pressure, a boolean strain mask,
+        hydrostatic strain, constant volume or Frechet's ``exp_cell_factor``. Masked deformation updates use
+        ASE 3.25 and later semantics; ASE 3.23/3.24 mask only the virial.
+    optimizer:
+        ``"fire"`` (ASE FIRE) or ``"goqn"`` (ASE GoodOldQuasiNewton). GOQN computes its
+        proposal eagerly on the device before each captured one-step window.
+    fire, goqn:
+        :class:`~fastmd.execution.system_relax.FIREParameters` or
+        :class:`~fastmd.execution.system_relax.GOQNParameters`; default ASE's defaults.
     slots:
         The structures relaxed at a time; default (``union_rows`` None too) by the model's measured throughput
         (``THROUGHPUT_MIN_SLOTS``' comment): at least 64 slots in one union where the rows per second stay level and
@@ -522,7 +549,7 @@ class MultiSystemRelaxation:
         early in a relaxation the atoms (and cells) move fast, and a window that outruns the candidates' skin is
         replayed (10-step windows did so in the first windows of variable-cell relaxations), and a capture again
         (draining) captures a whole window (its warmup runs two steps: ``SlotRelaxationRunner``); a window costs the
-        host one read.
+        host one read. GOQN uses one step per window (its default).
     drain:
         Capture a union again with only its relaxing structures where that pays back (``DRAIN_PAYBACK``'s comment;
         before the queue empties only leaving out the slots no queued structure fits); it reads measured times, so
@@ -551,21 +578,33 @@ class MultiSystemRelaxation:
     """
 
     def __init__(self, model, structures: Sequence[Atoms], *, fmax: float = 0.05, max_steps: int = 1000,
-                 cell_filter: str | None = None, fire: FIREParameters | None = None, slots: int | None = None,
-                 steps_per_launch: int = 5, union_rows: int | None = None, capacity_headroom: float | None = None,
-                 drain: bool = True, config=None, model_path: str | None = None, model_dtype: str | None = None,
-                 device=None, self_check: bool = True, trajectory_interval: int | None = None,
-                 trajectory_stress: bool = False) -> None:
+                 cell_filter: "str | CellFilter | None" = None, optimizer: str = "fire",
+                 fire: FIREParameters | None = None, goqn: GOQNParameters | None = None, slots: int | None = None,
+                 steps_per_launch: int | None = None, union_rows: int | None = None,
+                 capacity_headroom: float | None = None, drain: bool = True, config=None,
+                 model_path: str | None = None, model_dtype: str | None = None, device=None, self_check: bool = True,
+                 trajectory_interval: int | None = None, trajectory_stress: bool = False) -> None:
         where = "MultiSystemRelaxation"
         if isinstance(fmax, bool) or not isinstance(fmax, (int, float)) or not math.isfinite(fmax) or fmax <= 0:
             raise ValueError(f"{where}: fmax must be finite and positive")
+        if not isinstance(optimizer, str) or optimizer not in ("fire", "goqn"):
+            raise ValueError(f"{where}: optimizer must be 'fire' or 'goqn', got {optimizer!r}")
+        if steps_per_launch is None:
+            steps_per_launch = 5 if optimizer == "fire" else 1
         for name, value, low in (("max_steps", max_steps, 0), ("steps_per_launch", steps_per_launch, 1)):
             if isinstance(value, bool) or not isinstance(value, int) or value < low:
                 raise ValueError(f"{where}: {name} must be an integer >= {low}")
-        if cell_filter not in (None, "frechet"):
-            raise ValueError(f"{where}: cell_filter must be None or 'frechet', got {cell_filter!r}")
-        if fire is not None and not isinstance(fire, FIREParameters):
-            raise ValueError(f"{where}: fire must be FIREParameters")
+        if optimizer == "goqn" and steps_per_launch != 1:
+            raise ValueError(f"{where}: optimizer 'goqn' runs windows of one step (steps_per_launch=1)")
+        if isinstance(cell_filter, bool) or not (cell_filter is None or isinstance(cell_filter, CellFilter)
+                                                 or isinstance(cell_filter, str) and cell_filter in ("frechet", "exp")):
+            raise ValueError(f"{where}: cell_filter must be None, 'frechet', 'exp' or a CellFilter, got "
+                             f"{cell_filter!r}")
+        cell_filter = CellFilter.of(cell_filter)
+        if fire is not None and (optimizer != "fire" or not isinstance(fire, FIREParameters)):
+            raise ValueError(f"{where}: fire must be FIREParameters, with optimizer 'fire'")
+        if goqn is not None and (optimizer != "goqn" or not isinstance(goqn, GOQNParameters)):
+            raise ValueError(f"{where}: goqn must be GOQNParameters, with optimizer 'goqn'")
         if slots is not None and (isinstance(slots, bool) or not isinstance(slots, int) or slots < 1):
             raise ValueError(f"{where}: slots must be a positive integer")
         if trajectory_interval is not None and (isinstance(trajectory_interval, bool)
@@ -594,15 +633,17 @@ class MultiSystemRelaxation:
         self.fmax, self.max_steps = float(fmax), int(max_steps)
         cells = np.stack([np.asarray(atoms.cell.array, dtype=np.float64) for atoms in structures])
         admit = cells * CELL_FILTER_COMPRESSION if cell_filter else cells
+        self.optimizer = optimizer
         self._engine = _SlotRelaxationEngine(
             model, [self._structures[index] for index in first], slot_atoms=ceilings, union_rows=union_rows,
             steps_per_launch=steps_per_launch, capacity_headroom=capacity_headroom, config=config,
             model_path=model_path, model_dtype=model_dtype, device=device, self_check=self_check,
-            relaxation=dict(fmax=float(fmax), max_steps=int(max_steps), parameters=fire,
-                            cell_filter=cell_filter is not None, record_interval=trajectory_interval,
+            relaxation=dict(fmax=float(fmax), max_steps=int(max_steps),
+                            parameters=fire if optimizer == "fire" else goqn, cell_filter=cell_filter,
+                            record_interval=trajectory_interval,
                             record_stress=bool(trajectory_stress)), admit_cells=torch.as_tensor(admit),
             structures=self._structures if planner is not None else None, planner=planner, first=list(first),
-            drain=bool(drain), in_flight=bool(queues))
+            drain=bool(drain), in_flight=bool(queues), optimizer=SystemGOQN if optimizer == "goqn" else SystemFIRE)
         if self._engine.slot_plan is not None:
             ceilings, first, queues = self._engine.slot_plan
         try:
@@ -748,6 +789,7 @@ class MultiSystemRelaxation:
                 for union in live:  # each live union runs one window; an overflow grows and captures it again
                     started = time.perf_counter()
                     self.row_steps += union.layout.rows * engine.steps_per_launch
+                    union.integrator.propose()  # GOQN eager proposal; FIRE steps in the graph.
                     engine._window(union)
                     # the last few windows' wall times (their minimum: a window that grew or refreshed costs more)
                     self._window_seconds.setdefault(union, []).append(time.perf_counter() - started)
@@ -1012,3 +1054,217 @@ class MultiSystemRelaxation:
     def __exit__(self, exc_type, exc, tb):
         self.close()
         return False
+
+
+    def _restart_refusal(self) -> str | None:
+        """Why this relaxation cannot relax another structure (:meth:`restart`), None where it can: it relaxes one
+        structure in one slot of that structure's atoms, without draining and without the self-check (whose
+        construction would check the model on the new structure), in the union it was built with (not split)."""
+        engine = self._engine
+        batching = next((decision for decision in engine._plan.decisions if decision.id == "system_batching"), None)
+        if len(self.results) != 1 or self.drain or (batching is not None and "self_check" in batching.evidence):
+            return "only a relaxation of one structure without draining and without the self-check restarts"
+        if len(engine._unions) != 1 or engine._unions[0].layout.count != 1:
+            return "its union is not the one slot it was built with"
+        return None
+
+
+    def _recompute_state(self) -> tuple | None:
+        """The model's automatic recompute state its next evaluations of this configuration use (MatRIS:
+        ``saved_recompute.auto_record``'s level, its C3 and C2 decisions and its policy share; None for a model
+        without one). A state that checks the free memory at every uncaptured evaluation (recompute_policy "fast"
+        keeping a cheaper level than "safe" would) may change at any evaluation: ValueError."""
+        from ..engine import saved_recompute
+
+        engine = self._engine
+        record = saved_recompute.auto_record(engine._adapter.module, engine._config)
+        if record is None:
+            return None
+        if record["fast_only"]:
+            raise ValueError("the model's automatic recompute level re-checks the free memory at every evaluation "
+                             "(recompute_policy 'fast' near the memory limit)")
+        return (record["mode"], record["single_bwd"], record["gated_tail"], record["threshold"],
+                record["fast_fallback"])
+
+
+    def fresh_signature(self, structure: Atoms) -> tuple:
+        """What a construction of this relaxation's arguments for ``structure`` alone would build that depends on
+        more than the arguments and the atom count: ``(atoms, pair capacity, triplet capacity, sort key dtype, sort
+        key image bound, recompute state)``: the union's capacities at the structure's demand with the model's tiers
+        (``_set_demand_capacities``), the pair sort keys of its builder (its cell and the cells it admits: the cell
+        compressed by ``CELL_FILTER_COMPRESSION`` with a cell filter) and the model's automatic recompute state
+        (:meth:`_recompute_state`). Everything else a construction builds follows from its arguments, the atom count
+        and the model (the slot layout, the negotiated configuration, the capacity tiers and headrooms of one
+        system, the integrator, the records, the windows), or is written in place by :meth:`restart` (the species,
+        the cell and its tables, the cell list, the optimizer's state). The structure's host checks (periodic in all
+        three directions, finite coordinates, a non-singular cell) raise ValueError, as does a relaxation that
+        cannot restart (``_restart_refusal``)."""
+        refusal = self._restart_refusal()
+        if refusal is not None:
+            raise ValueError(f"MultiSystemRelaxation.fresh_signature: {refusal}")
+        engine = self._engine
+        cell = MultiSystemMolecularDynamics._check_system(structure, "MultiSystemRelaxation.fresh_signature")
+        n = len(structure)
+        scratch = _SlotUnion(0, 1, [n])  # the union a construction starts (``_start_union``), not captured
+        scratch.atoms = [n]
+        scratch.cells = torch.as_tensor(cell[None], dtype=torch.float64, device=engine.device)
+        scratch.numbers = torch.as_tensor(np.asarray(structure.get_atomic_numbers(), dtype=np.int32),
+                                          device=engine.device)
+        coordinates = torch.as_tensor(np.asarray(structure.get_positions(), dtype=np.float64), dtype=torch.float32,
+                                      device=engine.device)
+        admit = cell[None] * CELL_FILTER_COMPRESSION if self.cell_filter else cell[None]
+        with engine._config.scope():  # as ``_start_union`` and ``_capture`` compute them
+            engine._set_capacities(scratch, coordinates, pair_headroom=engine.in_flight)
+            builder = relaxation_builder(
+                engine._adapter, cell_filter=engine._unions[0].integrator.cell_filter, layout=scratch.layout,
+                cells=scratch.cells, atomic_numbers=scratch.numbers, atoms=scratch.atoms,
+                u_capacity=scratch.u_capacity, t_capacity=scratch.t_capacity, candidate_skin=engine.candidate_skin,
+                device=engine.device, admit_cells=torch.as_tensor(admit), config=engine._config)
+            keys = str(builder.sort_key_dtype), int(builder.sort_key_max_image)
+            del builder
+        return (n, int(scratch.u_capacity), int(scratch.t_capacity), *keys, self._recompute_state())
+
+
+    def build_signature(self) -> tuple:
+        """:meth:`fresh_signature`'s quantities of this relaxation as captured: its slot's atom count, its builder's
+        capacities and sort keys (a capacity growth captures another builder), and the model's automatic recompute
+        state its last capture used, recorded at that capture (another entry point of the model and configuration
+        may change the state since: a new relaxation would then capture another). A state that re-checks the free
+        memory at every evaluation raises ValueError, as :meth:`_recompute_state`."""
+        refusal = self._restart_refusal()
+        if refusal is not None:
+            raise ValueError(f"MultiSystemRelaxation.build_signature: {refusal}")
+        union = self._engine._unions[0]
+        builder = union.runner.builder
+        recompute = getattr(union, "recompute", None)
+        if recompute is not None and recompute[5]:
+            raise ValueError("the model's automatic recompute level re-checks the free memory at every evaluation "
+                             "(recompute_policy 'fast' near the memory limit)")
+        return (union.layout.ceilings[0], int(builder.u_capacity), int(builder.t_capacity),
+                str(builder.sort_key_dtype), int(builder.sort_key_max_image),
+                None if recompute is None else recompute[:5])
+
+
+    @torch.no_grad()
+    def restart(self, structure: Atoms, signature: tuple | None = None) -> None:
+        """Relax ``structure`` next, in this relaxation's captured slot (:meth:`run` then returns its one result), as
+        a new relaxation of it with this one's arguments would: bit for bit the same results and trajectory records,
+        where its :meth:`fresh_signature` (``signature``, computed if not given) equals :meth:`build_signature`.
+
+        First the checks, which raise ValueError and change nothing: the signatures, the construction's host checks
+        (periodic, finite coordinates, a non-singular cell, no constraints) and the model's check of the elements
+        this relaxation has not taken yet (``_check_elements``: a structure written into a slot, whose builder's
+        ``prepare`` ran on another structure's species). Then, in place: the model in eval mode with frozen weights
+        (as a construction leaves it), the structure's species, cell, admitted cells and atoms in the union
+        (``write_structure``), a new builder's cell list, a pending system with a fresh optimizer, the runner reset
+        with its counters and its refresh history as a new runner's (``forget_history``: the candidates refresh and
+        windows fall back where a new runner's would), the checks of a new runner's first refresh and build (the
+        candidate buffer, and isolated atoms where the configuration rejects them), and the run's results and
+        counters as a new relaxation's. An error from there on raises RuntimeError and leaves the relaxation
+        unusable (:meth:`release` it). The captured graphs, the capacities and the sort keys stay. (StructOptimizer
+        restarts only a relaxation whose last run finished: one that raised may hold a union whose growth
+        failed.)"""
+        where = "MultiSystemRelaxation.restart"
+        cell = MultiSystemMolecularDynamics._check_system(structure, where)
+        if structure.constraints:
+            raise ValueError(f"{where}: the structure has constraints, which the relaxation does not apply")
+        if signature is None:
+            signature = self.fresh_signature(structure)
+        built = self.build_signature()
+        if tuple(signature) != built:
+            raise ValueError(f"{where}: the structure's build {tuple(signature)} differs from the relaxation's {built}")
+        from ..engine import saved_recompute
+        from ..graph.validation import raise_if_isolated_atoms
+
+        engine = self._engine
+        union = engine._unions[0]
+        atoms = structure.copy()
+        atoms.calc = None
+        # The elements the model took in this relaxation (its construction's and earlier restarts' structures): the
+        # model's check of a structure written into a slot is of its elements (``_check_elements``), once each.
+        accepted = getattr(self, "_accepted_elements", None)
+        if accepted is None:
+            accepted = {int(z) for numbers in engine._numbers for z in numbers}
+        elements = {int(z) for z in atoms.get_atomic_numbers()}
+        if not elements <= accepted:
+            previous = self._structures
+            self._structures = [atoms]
+            try:  # with the slot's species still the last structure's: the elements it lacks are checked
+                self._check_elements({0})
+            finally:
+                self._structures = previous
+        try:
+            torch.cuda.set_device(engine.device)
+            module = engine._adapter.module
+            parts = [module]  # every submodule, from their own tables (MatRIS: thousands; the generators cost ms)
+            for part in parts:
+                parts.extend(child for child in part._modules.values() if child is not None)
+            if any(part.training for part in parts):
+                module.eval()
+            for part in parts:
+                for parameter in part._parameters.values():
+                    if parameter is not None and parameter.requires_grad:
+                        parameter.requires_grad_(False)
+            saved_recompute.note_entry_point(module)
+            engine._admit_cells = torch.as_tensor(cell[None] * CELL_FILTER_COMPRESSION if self.cell_filter
+                                                  else cell[None])
+            runner, integrator = union.runner, union.integrator
+            with engine._config.scope():
+                engine.write_structure(union, 0, atoms)
+                runner.builder.fresh_cell_list()
+                integrator.sync()
+                runner.reset(positions=integrator.positions.to(torch.float32),
+                             momenta=integrator.momenta.to(torch.float32),
+                             forces=integrator.forces.to(runner.forces.dtype),
+                             potential_energy=integrator.potential_energy, reset_counters=True)
+                runner.forget_history()
+                # A new runner's checks of its first candidate refresh and its first build (its construction).
+                runner.builder.assert_candidate_capacity()
+                if runner.validate_isolated_atoms:
+                    _, status = runner.builder.build(integrator.positions, rebuild_candidates=False)
+                    raise_if_isolated_atoms(status.isolated_atom_count)
+        except Exception as error:
+            why = str(error).splitlines()[0][:300] if str(error) else ""
+            raise RuntimeError(f"{where}: {type(error).__name__}: {why} (the relaxation is not usable any more)") \
+                from error
+        self._structures = [atoms]
+        self._accepted_elements = accepted | elements
+        runner.phases = tuple(integrator.phase.tolist())
+        union.accumulated = dict.fromkeys(_COUNTERS, 0)
+        union.max_edge_count = union.max_triplet_count = 0
+        self._occupant = {(union, 0): 0}
+        self.results = [None]
+        self.windows = self.writes = self.compactions = self.row_steps = 0
+        self.drain_failures, self.drains = [], []
+        self._kept, self._window_seconds, self._waste = set(), {}, {}
+        self.turnover_seconds = 0.0
+
+
+    def graph_pool_bytes(self) -> int | None:
+        """The device memory of the CUDA graph pool the unions' captures share: the caching allocator's segments
+        of that private pool (``torch.cuda.memory_snapshot``), which only :meth:`release` gives back (MatRIS 10M
+        OAM, one structure: about 1.1 GiB at 8 atoms, 4.1 GiB at 64 and 38 GiB at 256 atoms of fcc Cu, against
+        tens of MiB of buffers); None where the CUDA allocator has no such pools to measure (another backend than
+        the native one, e.g. ``backend:cudaMallocAsync``)."""
+        pool = self._engine._graph_pool
+        if pool is None:
+            return 0
+        if torch.cuda.memory.get_allocator_backend() != "native":
+            return None
+        device = self._engine.device.index
+        return sum(int(segment["total_size"]) for segment in torch.cuda.memory_snapshot()
+                   if segment.get("device") == device and tuple(segment.get("segment_pool_id", ())) == tuple(pool))
+
+
+    def release(self) -> None:
+        """:meth:`close`, then drop the captured unions (their graphs, builders and optimizer state) so that their
+        CUDA memory goes back to the caching allocator now rather than at the garbage collector's next pass (the
+        engine's ``moved`` callback refers back to this relaxation). The relaxation is not used afterwards; its
+        ``results`` stay."""
+        try:
+            self.close()
+        finally:
+            engine = self._engine
+            engine.moved = lambda old, parts: None
+            engine._unions = []
+            self._occupant, self._kept, self._window_seconds, self._waste = {}, set(), {}, {}

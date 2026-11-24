@@ -367,6 +367,15 @@ class SlotUnionGraphBuilder(FixedCapacityGraphBuilder):
         self._set_occupancy()
 
     # ------------------------------------------------------------------ candidates and builds
+    def fresh_cell_list(self) -> None:
+        """The cell list allocated for the current cells as a new builder of them allocates it (eager only: no
+        recapture). A write keeps a larger cell list of an earlier system, and its size bounds the cells per
+        dimension (nvalchemiops halves them until they fit): after this, a refresh finds the candidates in a new
+        builder's order (the edge order of a model whose edges are not sorted)."""
+        self._cell_list_cells = 0
+        self._set_occupancy()
+
+
     def _wrap(self, positions: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """(fractional coordinates in [0, 1), integer wraps, wrapped Cartesian coordinates) of float32
         ``positions``, each row with its own system's cell: the single-system arithmetic row by row."""

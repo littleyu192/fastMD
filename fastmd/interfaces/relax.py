@@ -24,6 +24,8 @@ from .calculator import (
     CrystalFeasObserver
 )
 
+from .relaxation_cache import RelaxationCache
+
 # The relaxation engines: "gpu" relaxes in whole-step CUDA graphs (FIRE and the cell filter on the device,
 # fastmd.interfaces.multi_system_relax), "ase" runs ASE's optimizer on the host with the calculator, "auto" takes the
 # GPU path wherever it computes what ASE's would.
@@ -33,6 +35,14 @@ ENGINES = ("auto", "gpu", "ase")
 GPU_FIRE_ARGUMENTS = ("dt", "maxstep", "dtmax", "Nmin", "finc", "fdec", "astart", "fa", "a")
 GPU_NO_OP_ARGUMENTS = {"logfile": None, "trajectory": None, "restart": None, "downhill_check": False,
                        "position_reset_callback": None, "append_trajectory": False}
+# GoodOldQuasiNewton's (GOQNParameters; radius and maxradius None are its defaults), and those at the values that
+# change nothing it computes (ASE's BFGS update and initial Hessian, no transition-state search, no printed Hessian).
+GPU_GOQN_ARGUMENTS = ("diagonal", "radius", "maxradius", "forcemin")
+GPU_GOQN_NO_OP_ARGUMENTS = {"logfile": None, "trajectory": None, "restart": None, "append_trajectory": False,
+                            "hessianupdate": "BFGS", "hessian": None, "verbosity": False, "transitionstate": False,
+                            "fmax": None, "converged": None}
+# The ASE filters accepted on the GPU path, with their default arguments.
+GPU_CELL_FILTERS = {"FrechetCellFilter": "frechet", "ExpCellFilter": "exp"}
 # The GPU path's trajectory records are preallocated on the device for every step a structure may take (48 bytes per
 # atom and 160 per structure per record, SystemRecords): at most this fraction of the device's memory. A structure
 # whose records alone would exceed it relaxes with ASE's optimizer; a list's batch holds fewer slots.
@@ -53,6 +63,9 @@ LEAN_STEPS_PER_LAUNCH = 1
 COMPILED_BLOCK_PARTS = ("attn_block_atom_graph", "attn_block_line_graph", "refine_block_atom_graph",
                         "refine_block_line_graph")
 
+# Built one-structure GPU relaxations retained for later calls; least recently used released first.
+CACHED_ENGINES = 4
+
 
 class StructOptimizer:
     """This class is used for Sturcture Optimization."""
@@ -67,6 +80,7 @@ class StructOptimizer:
         enable_compile: bool = True,
         config: InferenceConfig | None = None,
         engine: str = "auto",
+        cached_engines: int = CACHED_ENGINES,
         *,
         auto_policy: str = "latency",
     ) -> None:
@@ -84,6 +98,8 @@ class StructOptimizer:
                 what ASE's optimizer would (see :meth:`relax`), else with ASE's optimizer; "ase" always with
                 ASE's optimizer; "gpu" on the GPU path or a ValueError naming why not. Positional after
                 ``config``, as in MD's signature.
+            cached_engines: Maximum number of built one-structure GPU relaxations retained for later calls;
+                0 disables reuse. The least recently used is released first; close() releases all.
             auto_policy: Keyword-only. Defaults to "latency" to skip uncached online memory probes.
                 Use "throughput" to permit calibration for longer tasks.
         """
@@ -102,6 +118,7 @@ class StructOptimizer:
         self._config = config
         # The last relax call's path and why (config_summary()["relaxation"]).
         self.last_relaxation: dict | None = None
+        self._engines = RelaxationCache(cached_engines)
 
         self.calculator = MLIPCalculator(
             model_path=model_path,
@@ -115,14 +132,20 @@ class StructOptimizer:
 
     def config_summary(self) -> dict:
         """Return the relaxation calculator's effective inference settings, and under ``"relaxation"`` the
-        requested engine and the last relax call's path with its reason."""
+        requested engine, the last relax call's path with its reason (and, where it took the GPU path, whether
+        it reused a kept GPU relaxation and why not) and the kept GPU relaxations."""
         return {**self.calculator.config_summary(),
-                "relaxation": {"engine": self.engine, "last": self.last_relaxation}}
+                "relaxation": {"engine": self.engine, "last": self.last_relaxation,
+                               "cached_engines": self._engines.summary()}}
 
     def close(self) -> None:
-        """Close the calculator this optimizer made (``MLIPCalculator.close``: its graphs, and the release
-        of its model adapter); context exit closes too."""
-        self.calculator.close()
+        """Release the kept GPU relaxations (their CUDA memory back to the device), then close the calculator
+        this optimizer made (``MLIPCalculator.close``: its graphs, and the release of its model adapter);
+        context exit closes too."""
+        try:
+            self._engines.close()
+        finally:
+            self.calculator.close()
 
     def __enter__(self):
         return self
@@ -169,13 +192,16 @@ class StructOptimizer:
         Atoms given are relaxed in place, with the calculator attached.
 
         The GPU path (engine "auto" or "gpu") relaxes in whole-step CUDA graphs
-        (:class:`~fastmd.interfaces.multi_system_relax.MultiSystemRelaxation`: ASE's FIRE per structure, and
-        ASE's FrechetCellFilter, on the device) when it computes what ASE's optimizer would: a CUDA calculator
-        with execution auto, no activation checkpointing and ``capacity.warmup >= 1``; FIRE with ASE's defaults
+        (:class:`~fastmd.interfaces.multi_system_relax.MultiSystemRelaxation`: ASE's FIRE or GoodOldQuasiNewton per structure, and
+        ASE's FrechetCellFilter or ExpCellFilter, on the device) when it computes what ASE's optimizer would:
+        a CUDA calculator with execution auto, no activation checkpointing and ``capacity.warmup >= 1``; FIRE with ASE's defaults
         or valid keyword arguments of :class:`~fastmd.execution.system_relax.FIREParameters` (``logfile``,
         ``trajectory``, ``restart`` and ``position_reset_callback`` only as None, ``downhill_check`` and
-        ``append_trajectory`` only as False); a fixed cell or ``FrechetCellFilter``; a structure periodic in all
-        three directions without constraints; no ``crystal_feas_save_path``; a task with energies and forces; a
+        ``append_trajectory`` only as False); or GoodOldQuasiNewton ("GoodOldQuasiNewton" or "GOQN")
+        with :class:`~fastmd.execution.system_relax.GOQNParameters`, BFGS Hessian updates and no
+        transition-state search, with ASE >= 3.26 (older versions use a different trust-region search).
+        A fixed cell, ``FrechetCellFilter`` or ``ExpCellFilter``; a structure
+        periodic in all three directions without constraints; no ``crystal_feas_save_path``; a task with energies and forces; a
         model that the multi-system entry points negotiate (MatRIS, and MACE's ``ScaleShiftMACE``, MACE-SOYO,
         SevenNet, ORB v3, CHGNet and TACE); and trajectory records that fit ``RECORD_MEMORY_FRACTION`` of the device's memory. Anything
         else, or a GPU relaxation that cannot start (the model's negotiation, a structure's construction checks),
@@ -185,7 +211,9 @@ class StructOptimizer:
         task, positions, cells; magnetic moments only in its last record, from one calculator call on the final
         structure with an "m" task), recorded on the device; MatRIS's interaction blocks run uncompiled there
         (``enable_compile`` applies to ASE's path), and a list relaxes its structures together in the slots of one
-        batch.
+        batch. One-structure GPU engines may be retained across calls when the model, options, atom
+        count and build signature match. ``cached_engines=0`` disables reuse. Failed relaxations are
+        released, and :meth:`close` releases retained engines; config_summary reports reuse and pool bytes.
         """
 
         reject_removed_arguments(kwargs)
@@ -314,37 +342,58 @@ class StructOptimizer:
         return first[0] + second[0], first[1] + second[1]
 
     def _note(self, path: str, reason: str, structures: int, seconds: dict | None = None, **counts) -> None:
+        # Where this call took the GPU path (or tried to: the GPU relaxation's failure is the reason), whether its
+        # relaxation was a kept one (RelaxationCache.last: "reused" and why not).
+        reuse, self._engines.last = self._engines.last, None
+        tried = path in ("gpu", "both") or "the GPU relaxation" in str(reason)
         self.last_relaxation = {"path": path, "reason": reason, "structures": structures, **counts,
-                                **({} if seconds is None else {"seconds": seconds})}
+                                **({} if seconds is None else {"seconds": seconds}),
+                                **({"reuse": reuse} if tried and reuse is not None else {})}
 
     # ------------------------------------------------------------------ the GPU path
     def _gpu_path_reason(self, atoms: Atoms, engine: str, crystal_feas_save_path, kwargs: dict, *, fmax, steps,
                          relax_cell, ase_filter, loginterval, **_) -> tuple[str | None, object]:
         """Why ``relax`` takes ASE's optimizer for ``atoms`` (None: the GPU path applies), and the GPU path's
-        FIREParameters."""
+        optimizer parameters (FIREParameters or GOQNParameters)."""
         import torch
         from ..adapters.negotiate import check_system_cells
-        from ..execution.system_relax import FIREParameters
+        from ..execution.system_relax import FIREParameters, GOQNParameters
         calculator = self.calculator
         if engine == "ase":
             return "engine='ase'", None
         if torch.device(calculator.device).type != "cuda" or not torch.cuda.is_available():
             return f"device {calculator.device!r} (the GPU path runs on CUDA)", None
-        if self.optimizer is not OPTIMIZERS["FIRE"]:
-            return f"optimizer {self.optimizer.__name__} (the GPU path runs FIRE)", None
-        other = sorted(name for name, value in kwargs.items() if name not in GPU_FIRE_ARGUMENTS and not (
-            name in GPU_NO_OP_ARGUMENTS and value is GPU_NO_OP_ARGUMENTS[name]))
+        if self.optimizer is OPTIMIZERS["FIRE"]:
+            name, kind, taken, no_ops = "FIRE", FIREParameters, GPU_FIRE_ARGUMENTS, GPU_NO_OP_ARGUMENTS
+        elif self.optimizer is OPTIMIZERS["GoodOldQuasiNewton"]:
+            import ase
+            from ase.utils import tokenize_version
+            if tokenize_version(ase.__version__) < tokenize_version("3.26.0"):
+                return ("GoodOldQuasiNewton on the GPU requires ASE >= 3.26 to match its "
+                        f"trust-region search (installed ASE {ase.__version__})"), None
+            name, kind, taken, no_ops = ("GoodOldQuasiNewton", GOQNParameters, GPU_GOQN_ARGUMENTS,
+                                         GPU_GOQN_NO_OP_ARGUMENTS)
+        else:
+            return (f"optimizer {self.optimizer.__name__} (the GPU path runs FIRE and GoodOldQuasiNewton)"), None
+
+        def no_op(name, value) -> bool:  # None and the booleans by identity, ASE's names by equality
+            expected = no_ops[name]
+            return value is expected if expected is None or isinstance(expected, bool) else (
+                isinstance(value, str) and value == expected)
+
+        other = sorted(key for key, value in kwargs.items() if key not in taken and not (
+            key in no_ops and no_op(key, value)))
         if other:
-            return f"FIRE arguments {other} (the GPU path takes {list(GPU_FIRE_ARGUMENTS)})", None
-        parameters = {name: value for name, value in kwargs.items()
-                      if name in GPU_FIRE_ARGUMENTS and not (name == "maxstep" and value is None)}
+            return f"{name} arguments {other} (the GPU path takes {list(taken)})", None
+        parameters = {key: value for key, value in kwargs.items()
+                      if key in taken and not (key in ("maxstep", "radius", "maxradius") and value is None)}
         try:
-            fire = FIREParameters(**parameters)
+            optimizer = kind(**parameters)
         except (TypeError, ValueError) as error:
-            return f"FIRE arguments outside the GPU path's ({error})", None
-        if relax_cell and ase_filter is not filter_classes.FrechetCellFilter:
+            return f"{name} arguments outside the GPU path's ({error})", None
+        if relax_cell and not any(ase_filter is getattr(filter_classes, name) for name in GPU_CELL_FILTERS):
             return (f"cell filter {getattr(ase_filter, '__name__', repr(ase_filter))} (the GPU path runs "
-                    "FrechetCellFilter)"), None
+                    f"{' and '.join(GPU_CELL_FILTERS)})"), None
         if crystal_feas_save_path:
             return "crystal_feas_save_path (crystal features come from the calculator's calls)", None
         if not all(atoms.get_pbc()):
@@ -374,7 +423,7 @@ class StructOptimizer:
             check_system_cells(calculator.adapter)
         except ValueError as error:
             return f"the model's negotiation: {error}", None
-        return None, fire
+        return None, optimizer
 
     @contextlib.contextmanager
     def _uncompiled(self):
@@ -417,10 +466,13 @@ class StructOptimizer:
         import torch
         from ..config import current_config
         from ..execution.replica_batch import DEFAULT_UNION_ROWS
-        from .multi_system_relax import MultiSystemRelaxation
+        from ..execution.system_relax import GOQNParameters
         calculator = self.calculator
-        options = dict(fmax=float(fmax), max_steps=int(steps), cell_filter="frechet" if relax_cell else None,
-                       fire=fire, config=self._config, device=calculator._model_device(),
+        goqn = isinstance(fire, GOQNParameters)  # the optimizer's parameters: FIRE's or GoodOldQuasiNewton's
+        options = dict(fmax=float(fmax), max_steps=int(steps),
+                       cell_filter=GPU_CELL_FILTERS[ase_filter.__name__] if relax_cell else None,
+                       optimizer="goqn" if goqn else "fire", **{"goqn" if goqn else "fire": fire},
+                       config=self._config, device=calculator._model_device(),
                        trajectory_interval=int(loginterval), trajectory_stress="s" in calculator.task)
         if len(structures) == 1:
             options.update(slots=1, drain=False, self_check=False, steps_per_launch=LEAN_STEPS_PER_LAUNCH)
@@ -441,8 +493,8 @@ class StructOptimizer:
         failure, relaxed, stats, relaxation, unexpected = None, [None] * len(structures), None, None, False
         started = constructed = time.perf_counter()
         with self._uncompiled():
-            try:
-                relaxation = MultiSystemRelaxation(calculator.adapter, structures, **options)
+            try:  # a kept relaxation of an earlier call restarted with the structure, else a new one
+                relaxation = self._engines.take(calculator.adapter, structures, options, task=calculator.task)
             except Exception as error:  # noqa: BLE001 - a negotiation, a construction check, out of memory: ASE's path
                 failure = (f"the GPU relaxation cannot start: {type(error).__name__}: "
                            f"{str(error).splitlines()[0][:300] if str(error) else ''}")
@@ -463,8 +515,9 @@ class StructOptimizer:
                         stats = relaxation.stats()
                     except Exception:  # noqa: BLE001 - statistics of a relaxation that failed are not needed
                         stats = None
-                    finally:
-                        relaxation.close()
+                    finally:  # kept for later calls after a run whose structures all finished, else released
+                        self._engines.give_back(relaxation, keep=failure is None and all(
+                            result is not None and result.status != "failed" for result in relaxed))
                 del relaxation
             if failure is not None:  # outside the except blocks: a traceback would pin the failed graphs
                 gc.collect()
@@ -484,7 +537,8 @@ class StructOptimizer:
         ran = time.perf_counter()
         seconds = {"construction": constructed - started, "relaxation": ran - constructed}
         if verbose and stats is not None:
-            what = "FIRE + FrechetCellFilter" if relax_cell else "FIRE, fixed cell"
+            name = "GoodOldQuasiNewton" if goqn else "FIRE"
+            what = f"{name} + {ase_filter.__name__}" if relax_cell else f"{name}, fixed cell"
             done = [result for result, reason in zip(relaxed, reasons) if reason is None]
             if len(structures) == 1 and done:
                 result = done[0]

@@ -1054,6 +1054,18 @@ class WholeStepGraphRunner:
             self.last_edge_count = 0
             self.last_triplet_count = 0
 
+    def forget_history(self) -> None:
+        """The refresh rule's history as a new runner's, for a state that does not continue the last one (another
+        system written into the runner's slots, then :meth:`reset`): no growth per window seen, no settled window
+        or fallback, and the skin warning not given yet. :meth:`reset` keeps what it does not reset (the state it
+        is given may continue a trajectory: a precapture's end, a cached capacity tier); after a reset with its
+        counters and this, the windows refresh their candidates and fall back where a new runner's would."""
+        self._settled_displacement = 0.0
+        self._settled_fallback = False
+        self._displacement_growth = [None, None]
+        self._outrun_warned = False
+
+
     def stats(self) -> dict[str, int | float]:
         return {
             "steps_per_launch": self.steps_per_launch,

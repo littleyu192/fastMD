@@ -25,17 +25,18 @@ from fastmd.graph.fixed_capacity_builder import line_graph_batch
 
 from ase.optimize import (
     BFGS, BFGSLineSearch, 
-    FIRE, LBFGS, 
+    FIRE, GoodOldQuasiNewton, LBFGS,
     LBFGSLineSearch, MDMin
 )
 
 names = [
     "BFGS", "BFGSLineSearch", 
-    "FIRE", "LBFGS", 
+    "FIRE", "GoodOldQuasiNewton", "LBFGS",
     "LBFGSLineSearch", "MDMin"
 ]
 
 OPTIMIZERS = {name: globals()[name] for name in names}
+OPTIMIZERS["GOQN"] = GoodOldQuasiNewton
 
 
 def require_finite_geometry(positions, cell, where: str) -> None:

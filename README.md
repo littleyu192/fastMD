@@ -256,9 +256,36 @@ For a fixed cell, use `task="ef"` and `relax_cell=False`. Variable-cell relaxati
 `fmax` includes the cell filter's force rows, so it is not a separate stress tolerance.
 Pass optimizer options directly to `relax(...)`, for example `dt=0.05`.
 
+Both GPU and ASE paths accept `ase_filter="ExpCellFilter"` as well as `"FrechetCellFilter"`.
+For batched GPU FIRE, `fastmd.interfaces.multi_system_relax.MultiSystemRelaxation` accepts
+`cell_filter="exp"`, `"frechet"`, or a `fastmd.execution.system_relax.CellFilter` instance.
+`CellFilter` exposes `scalar_pressure` (eV/Å³), a Boolean strain `mask`, `hydrostatic_strain`,
+`constant_volume`, and Frechet's `exp_cell_factor`. Masked deformation updates follow ASE 3.25+
+semantics; ASE 3.23/3.24 masked only the forces.
+
+Use `StructOptimizer(optimizer="GOQN", ...)` (or `"GoodOldQuasiNewton"`) for ASE's BFGS
+quasi-Newton optimizer on an eligible GPU path. `MultiSystemRelaxation` takes
+`optimizer="goqn"` and optional `fastmd.execution.system_relax.GOQNParameters` through `goqn=`.
+Its Hessian proposal runs eagerly on the device between captured one-step windows;
+`steps_per_launch` must be 1 or omitted. GOQN keeps dense FP64 Hessians: storage grows
+quadratically and eigendecomposition cost cubically with the number of degrees of freedom,
+so choose structure and batch sizes accordingly. GPU GOQN follows ASE 3.26's trust-region
+search. With ASE older than 3.26, `StructOptimizer` uses ASE for GOQN in `engine="auto"`
+and rejects `engine="gpu"`, preserving the installed ASE optimizer's behavior. The low-level
+`MultiSystemRelaxation(optimizer="goqn")` always uses the ASE 3.26 algorithm. FIRE is unchanged.
+
+`StructOptimizer(cached_engines=4, ...)` retains up to four one-structure GPU relaxation engines
+for later calls when the model, options, atom count and build signature match; use
+`cached_engines=0` to build each call afresh. Least recently used engines are released first,
+and failed runs are released. Use a context manager or `close()` to release retained graphs
+and the calculator. `config_summary()["relaxation"]` reports retained engine count, CUDA graph
+pool bytes, and the last call's reuse decision. Retained graph pools are capped at one eighth
+of device memory; this pool budget does not include model or GOQN Hessian storage. Allocators
+that cannot measure graph pools disable retention. Multi-structure batches are built per call.
+
 | Engine | Behavior |
 | --- | --- |
-| `"auto"` | GPU FIRE when eligible; otherwise ASE. |
+| `"auto"` | GPU FIRE or GOQN when eligible; otherwise ASE. |
 | `"gpu"` | Require GPU relaxation; raise with the reason if the GPU path is unavailable or fails. |
 | `"ase"` | ASE optimizer on the host; model evaluation uses the configured device. |
 
