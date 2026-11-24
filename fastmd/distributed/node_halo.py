@@ -219,14 +219,17 @@ class ShardContext(_Exchanges):
     pooled readout). ``owned``: ``[rows]`` bool, the owned real rows;
     ``n_total``: the atoms of the whole system (FP64 scalar tensor);
     ``first``: ``[]`` bool, this rank is rank 0 (device tensors, read by a
-    captured step). ``count_only``: the counting forward (and the memory
-    probe): every call is counted and returns its input (no collective).
+    captured step). ``world_size``: the Python rank count, or None for a memory
+    probe without a layout (which must preserve the P>1 forward).
+    ``count_only``: the counting forward (and the memory probe): every call
+    is counted and returns its input (no collective).
     """
 
     def __init__(self, layout: HaloLayout | None, *, owned: Tensor, n_total: Tensor, first: Tensor,
                  count_only: bool = False):
         super().__init__(layout, count_only=count_only)
         self.owned, self.n_total, self.first = owned, n_total, first
+        self.world_size = None if layout is None else layout.world_size
 
     def global_sum(self, point, values: Tensor) -> Tensor:
         self.fired[point.name] = self.fired.get(point.name, 0) + 1

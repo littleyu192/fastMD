@@ -810,6 +810,9 @@ class ShardedTap(Protocol):
     * ``ctx.owned``: ``[rows]`` bool, the rank's owned real rows (a pooled sum
       reads these rows only); ``ctx.n_total``: the atoms of the whole system
       (an FP64 scalar tensor).
+    * ``ctx.world_size``: the Python rank count, or None for a memory probe
+      without a layout. Only an explicit value of 1 guarantees complete
+      neighbourhoods for every centre; probes retain the multi-rank path.
 
     The call must not synchronize the host or differentiate itself, and every
     rank must make the same calls in the same order.

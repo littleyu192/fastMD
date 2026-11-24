@@ -6,6 +6,7 @@ are collective CPU metadata; atom records are sent to their destination ranks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import functools
 import itertools
 import math
 import time
@@ -123,9 +124,11 @@ class AtomState:
 class DomainPartition:
     """Fixed fractional-coordinate cuts of a nonsingular, fully periodic cell.
 
-    For a skew cell, distances to its fractional-coordinate planes give a
-    conservative halo. The model's graph builder applies the exact Cartesian
-    cutoff to these candidates, retaining the original lattice and images.
+    For a skew cell, the halo is the Cartesian distance to each domain's
+    parallelepiped over the periodic images (no smaller than the distances to
+    its fractional-coordinate planes). The model's graph builder applies the
+    exact Cartesian cutoff to these candidates, retaining the original lattice
+    and images.
     """
 
     def __init__(self, cell: Tensor, world_size: int, domain_grid: str | tuple[int, int, int] = "auto",
@@ -159,7 +162,9 @@ class DomainPartition:
             choices = [(x, y, world_size // (x * y))
                        for x in range(1, world_size + 1)
                        for y in range(1, world_size + 1) if world_size % (x * y) == 0]
-            lens = self.face_distances.tolist()
+            # An orthogonal cell ranks by its lengths, as MD does (its face distances
+            # round differently, which can break a tie the other way: another grid).
+            lens = (self.lengths if self.orthogonal else self.face_distances).tolist()
             self.domain_grid = min(choices, key=lambda g: (
                 sum(g[i] / lens[i] for i in range(3)), tuple(-x for x in g)))
         else:
@@ -255,8 +260,8 @@ class DomainPartition:
         # This margin only broadens halo candidates, never the final graph cutoff.
         eps = torch.finfo(positions.dtype).eps
         margin = max(1e-6, 32 * eps * max(float(self.lengths.max()), cutoff))
-        if positions.is_cuda:
-            squared = self._squared_domain_distances(fractions)
+        if positions.is_cuda or not self.orthogonal:
+            squared = self._halo_squared_distances(fractions, cutoff + margin)
             return [torch.where(squared[peer] <= (cutoff + margin) ** 2)[0]
                     for peer in range(self.world_size)]
         fractions = fractions.cpu().double()
@@ -288,9 +293,86 @@ class DomainPartition:
             raise ValueError("halo_mask needs CUDA positions")
         eps = torch.finfo(positions.dtype).eps
         margin = max(1e-6, 32 * eps * max(float(self.lengths.max()), cutoff))
-        mask = self._squared_domain_distances(self.fractional(positions).detach()) <= (cutoff + margin) ** 2
+        squared = self._halo_squared_distances(self.fractional(positions).detach(), cutoff + margin)
+        mask = squared <= (cutoff + margin) ** 2
         mask[rank] = False
         return mask
+
+    def _halo_squared_distances(self, fractions: Tensor, reach: float) -> Tensor:
+        """The squared distances the halo compares with ``reach ** 2``: those of
+        :meth:`_squared_domain_distances` for an orthogonal cell (exact), for a
+        skew cell raised by :meth:`_skew_squared_distances` where they admit a
+        row (exact within ``reach``), so a skew halo keeps only the rows within
+        ``reach`` of a domain instead of every row within ``reach`` of all its
+        planes."""
+        squared = self._squared_domain_distances(fractions)
+        if self.orthogonal:
+            return squared
+        return self._skew_squared_distances(fractions, squared, reach)
+
+    def _skew_squared_distances(self, fractions: Tensor, planes: Tensor, reach: float) -> Tensor:
+        """``planes`` (the plane bounds, ``[world_size, N]``) with every (peer,
+        row) they admit (at most ``reach ** 2``) raised to the squared Cartesian
+        distance (FP64) from the wrapped row to the peer's domain over the
+        periodic images: exact up to rounding where at most ``reach``; the rest
+        stay plane bounds, which exceed it.
+
+        For an image ``y = fraction + n`` the squared distance to a domain
+        ``lower <= f <= upper`` is the minimum of ``d G d`` (``G = cell cell^T``)
+        over the box ``y - upper <= d <= y - lower``. A convex quadratic attains
+        its minimum over a box at a point where each coordinate is at a bound
+        or solves the free coordinates' equations: one of the 27 patterns
+        (lower, upper, free per axis), and every other feasible pattern point is
+        no smaller, so their minimum is the distance. A free coordinate within
+        1e-9 of its bounds counts as feasible, which can only lower the result.
+        Only the images whose plane distance along every axis is at most
+        ``reach`` (plus 1e-9) can be within ``reach``; each axis admits a
+        consecutive range of them, enumerated per row.
+        """
+        device = fractions.device
+        rows = torch.nonzero(planes <= reach ** 2)
+        if not len(rows):
+            return planes
+        peers, rows = rows[:, 0], rows[:, 1]
+        at_lower, at_upper, fixed_only, transforms, metric = (
+            value.to(device) for value in _skew_patterns(tuple(self.cell.detach().cpu().double().flatten().tolist())))
+        lower, upper = self._domain_bounds(device)
+        lower, upper, x = lower[peers], upper[peers], fractions.double()[rows]
+        # The images n of each axis with a plane gap of at most reach: lower - t <= x + n <= upper + t.
+        spread = (reach / self.face_distances.to(device) + 1e-9)
+        first = torch.ceil(lower - spread - x)
+        count = (torch.floor(upper + spread - x) - first + 1).clamp(min=0)
+        offsets = torch.tensor(list(itertools.product(*(range(int(k)) for k in count.amax(0).tolist()))),
+                               dtype=torch.float64, device=device)
+        exact = torch.empty(len(rows), dtype=torch.float64, device=device)
+        chunk = max(1, (1 << 20) // (27 * len(offsets)))
+        for start in range(0, len(rows), chunk):
+            part = slice(start, start + chunk)
+            # [pattern, image, row, axis]
+            y = (x[part] + first[part])[None] + offsets[:, None]
+            low, high = (y - upper[part])[None], (y - lower[part])[None]
+            bound = at_lower * low + at_upper * high
+            # Element-wise products (no GEMM): the same bits on the CPU and on CUDA.
+            d = [bound[..., 0] * transforms[..., 0, axis] + bound[..., 1] * transforms[..., 1, axis]
+                 + bound[..., 2] * transforms[..., 2, axis] for axis in range(3)]
+            value = sum(d[i] * metric[i, j] * d[j] for i in range(3) for j in range(3))
+            d = torch.stack(d, dim=-1)
+            feasible = (fixed_only | ((d >= low - 1e-9) & (d <= high + 1e-9))).all(-1)
+            feasible &= (offsets[:, None] < count[part][None]).all(-1)[None]
+            exact[part] = torch.where(feasible, value, math.inf).flatten(0, 1).amin(0)
+        squared = planes.clone()
+        squared[peers, rows] = torch.maximum(planes[peers, rows], exact)
+        return squared
+
+    def _domain_bounds(self, device) -> tuple[Tensor, Tensor]:
+        """Every domain's fractional lower and upper bounds, ``[world_size, 3]`` FP64 on ``device``."""
+        lower = torch.tensor([[self.rank_indices(peer)[axis] / self.domain_grid[axis]
+                               for axis in range(3)] for peer in range(self.world_size)],
+                             dtype=torch.float64, device=device)
+        upper = torch.tensor([[(self.rank_indices(peer)[axis] + 1) / self.domain_grid[axis]
+                               for axis in range(3)] for peer in range(self.world_size)],
+                             dtype=torch.float64, device=device)
+        return lower, upper
 
     def _squared_domain_distances(self, fractions: Tensor) -> Tensor:
         """Squared distance lower bounds to every domain (exact for orthogonal cells).
@@ -306,12 +388,7 @@ class DomainPartition:
         device = fractions.device
         fractions = fractions.double()
         lengths = (self.lengths if self.orthogonal else self.face_distances).to(device=device)
-        lower = torch.tensor([[self.rank_indices(peer)[axis] / self.domain_grid[axis]
-                               for axis in range(3)] for peer in range(self.world_size)],
-                             dtype=torch.float64, device=device)
-        upper = torch.tensor([[(self.rank_indices(peer)[axis] + 1) / self.domain_grid[axis]
-                               for axis in range(3)] for peer in range(self.world_size)],
-                             dtype=torch.float64, device=device)
+        lower, upper = self._domain_bounds(device)
         squared = torch.zeros((self.world_size, len(fractions)), dtype=torch.float64, device=device)
         for axis in range(3):
             x = fractions[:, axis][None, :]
@@ -321,6 +398,33 @@ class DomainPartition:
             distance = torch.stack(distances).amin(0).square() * lengths[axis].square()
             squared = squared + distance if self.orthogonal else torch.maximum(squared, distance)
         return squared
+
+
+@functools.lru_cache(maxsize=16)
+def _skew_patterns(cell: tuple[float, ...]) -> tuple[Tensor, ...]:
+    """The 27 patterns of a skew domain distance (lower, upper or free per axis) for the FP64 ``cell`` (rows,
+    flattened): masks of the coordinates at their lower and upper bounds and of the fixed ones, ``[27, 1, 1, 3]``;
+    each pattern's map of the fixed coordinates to all three, ``[27, 1, 1, 3, 3]`` (the free ones minimize
+    ``d G d`` given the fixed ones); and the metric ``G = cell cell^T``. CPU tensors."""
+    cell = torch.tensor(cell, dtype=torch.float64).reshape(3, 3)
+    metric = cell @ cell.T
+    at_lower, at_upper, free, transforms = [], [], [], []
+    for kinds in itertools.product("luf", repeat=3):
+        fixed = [axis for axis in range(3) if kinds[axis] != "f"]
+        moving = [axis for axis in range(3) if kinds[axis] == "f"]
+        # d = (the fixed coordinates, zero elsewhere) @ transform: the free ones minimize d G d.
+        transform = torch.zeros((3, 3), dtype=torch.float64)
+        transform[fixed, fixed] = 1.0
+        if fixed and moving:
+            solved = -torch.linalg.solve(metric[moving][:, moving], metric[moving][:, fixed])
+            transform[torch.tensor(fixed)[:, None], torch.tensor(moving)[None, :]] = solved.T
+        at_lower.append([kind == "l" for kind in kinds])
+        at_upper.append([kind == "u" for kind in kinds])
+        free.append([kind == "f" for kind in kinds])
+        transforms.append(transform)
+    return (torch.tensor(at_lower, dtype=torch.float64)[:, None, None, :],
+            torch.tensor(at_upper, dtype=torch.float64)[:, None, None, :],
+            ~torch.tensor(free)[:, None, None, :], torch.stack(transforms)[:, None, None], metric)
 
 
 def _collective_check(context: Any, error: str | None) -> None:

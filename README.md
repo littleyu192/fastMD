@@ -91,8 +91,9 @@ The experimental runtime partitions one periodic system across GPUs for **MatRIS
 SevenNet, and conservative ORB v3**. It requires full periodicity and a fixed, nonsingular cell;
 triclinic cells are supported. Model families and versions without an audited shard declaration are rejected.
 
-Multi-rank ORB keeps all radius-graph edges; when a node exceeds the checkpoint's neighbor cap,
-this differs from single-device nearest-k evaluation.
+ORB keeps the nearest neighbors up to the checkpoint's cap on one rank, including CPU evaluation.
+With multiple ranks it retains the radius graph and rejects an evaluation on every rank if any atom
+exceeds that cap: a rank cannot select the nearest neighbors of its ghosts from incomplete neighborhoods.
 
 ```bash
 torchrun --standalone --nproc_per_node=2 -m fastmd.distributed \

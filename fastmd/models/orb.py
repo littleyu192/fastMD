@@ -16,9 +16,9 @@ and license. What the adapter declares and does:
   edges of every centre on the device (``nearest_k_mask``; exact distance ties
   broken by the edge, not its row); the others become far self-loops. At P>1,
   a rank lacks the full neighbours of its ghost centres, so ``sharded_energy``
-  retains every radius edge with an owned end. The distributed evaluator warns
-  when its CUDA degree counter exceeds the cap; that path does not reproduce
-  upstream's capped graph for an over-cap system.
+  retains every radius edge with an owned end. The distributed evaluator
+  refuses an evaluation on every rank when any atom exceeds the cap. At P=1,
+  including the CPU reference path, every centre keeps its nearest neighbours.
 * **Padding**: far self-loops. ORB gates every message by an envelope times
   ``r < 6`` and masks its ZBL pair repulsion by the covalent radii, so a loop
   at least twice the cutoff long adds exactly nothing; its length is never 0
@@ -852,11 +852,12 @@ class ORBAdapter:
         layers on the rank's rows (owned, ghost and unused) with the ghost rows' node features COPY'd from their
         owners before each layer but the first, the pooled sums of the owned rows summed over the ranks in FP64,
         the energy head of the sums counted on rank 0 only, plus the linear reference of the owned rows.
-        Keeps every radius edge with an owned end: a ghost centre's partial neighbourhood must not be
-        locally capped, because both ranks must compute the same cross-domain edge's messages."""
+        At P>1, keeps every radius edge with an owned end: a ghost centre's partial neighbourhood must not be
+        locally capped, because both ranks must compute the same cross-domain edge's messages. At P=1 every
+        centre has its complete neighbourhood, so select its nearest neighbours as on the single-device path."""
         from orb_models.forcefield.nn_util import get_cutoff
 
-        graph = self._atom_graphs(inputs, positions, cell, select_nearest=False)
+        graph = self._atom_graphs(inputs, positions, cell, select_nearest=ctx.world_size == 1)
         gns = self.module.model
         spec = self.shard_spec()
         # Derived from orb-models 0.5.4, orb_models/forcefield/gns.py:421-461 (MoleculeGNS.forward). Copyright 2024

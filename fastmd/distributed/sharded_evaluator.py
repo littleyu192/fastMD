@@ -746,8 +746,12 @@ class ShardedEvaluator:
             state, refreshed = self._refresh(state), True
         elif not new:
             engine.set_positions(state.positions.detach())
+        # Judge P>1 by this step's neighbours, including when an old layout runs before a refresh.
+        counter = None if self.single else getattr(engine, "neighbor_count", None)
         if not self.single:
             engine.new_state.fill_(int(new and not refreshed))
+            if counter is not None:
+                counter.zero_()
         energy, forces, flags, virial = self._run(stress)
         verdict = flags.cpu().tolist()
         # A line-graph shard's fifth flag: its line slots did not cover the step (also in the stale flag).
@@ -761,6 +765,8 @@ class ShardedEvaluator:
             state, refreshed = self._refresh(state), True
             if not self.single:
                 engine.new_state.fill_(0)
+                if counter is not None:
+                    counter.zero_()
             energy, forces, flags, virial = self._run(stress)
             verdict = flags.cpu().tolist()
         if verdict[_OVERFLOW] or verdict[_STALE] or verdict[_NEW_STATE]:
@@ -771,7 +777,10 @@ class ShardedEvaluator:
         if verdict[_NONFINITE]:
             raise ValueError("distributed evaluation: non-finite energy or forces (on some rank)")
         if self.max_neighbors is not None:
-            self._neighbor_count = max(self._neighbor_count, int(verdict[_NEIGHBORS]))
+            # The reduced flags describe this evaluation; the host maximum is only for reporting.
+            largest = int(verdict[_NEIGHBORS])
+            self._neighbor_count = max(self._neighbor_count, largest)
+            self._refuse_neighbor_cap(largest)
             self.neighbor_cap_summary()  # warns once when an atom exceeds the model's neighbour cap
         n = engine.n_owned
         energy = energy.detach().reshape(()).clone()
@@ -855,6 +864,15 @@ class ShardedEvaluator:
         self._totals(state)
         batch = topology.batch
         inputs, error = _prepared(self.adapter, batch)
+        if error is None and self.max_neighbors is not None and self.context.world_size > 1:
+            # An owned centre has its complete neighbourhood on its rank. Ghost centres need not.
+            centres = batch.edge_index[:, 0].long()
+            centres = centres[centres < topology.n_owned]
+            largest = int(torch.bincount(centres).max()) if len(centres) else 0
+            try:
+                self._refuse_neighbor_cap(largest)
+            except RuntimeError as exc:
+                error = str(exc)
         collective_check(self.context, error)
         n_total = torch.tensor(float(self.natoms), dtype=torch.float64)
         first = torch.tensor(self.context.rank == 0)
@@ -990,17 +1008,33 @@ class ShardedEvaluator:
         """For a model that keeps at most ``max_neighbors`` neighbours per atom in its own graph
         (``TopologySpec.max_neighbors``): the cap, the most neighbours within the cutoff an atom had in this
         evaluator's evaluations (on any rank: the step flags' MAX over the ranks) and whether that exceeded the
-        cap, in which case every pair was evaluated (the model's intent, not its own truncated graph) and this
-        warns once. None without a cap, and on CPU ranks (the reference topology does not count)."""
+        cap, in which case this warns once. An adapter that selects nearest neighbours (ORB) selects on one
+        rank and refuses over-cap evaluations at P>1; other adapters evaluate every radius pair. None without
+        a cap, and on CPU ranks (their reference topology counts owned centres only for the refusal)."""
         if self.max_neighbors is None or self.device.type != "cuda":
             return None
         largest = self._neighbor_count
         if largest > self.max_neighbors and not self._neighbor_cap_warned:
             self._neighbor_cap_warned = True
+            kept = ("the engine evaluated every pair" if not getattr(self.adapter, "selects_nearest_neighbors", False)
+                    else f"the model kept the nearest {self.max_neighbors}" if self.single
+                    else "those evaluations were refused (more than one rank)")
             warnings.warn(f"model {self.adapter.name!r} keeps at most {self.max_neighbors} neighbours per atom in its "
-                          f"own graph; an atom had {largest} within the {self.cutoff:g} A cutoff, and the engine "
-                          "evaluated every pair", RuntimeWarning, stacklevel=2)
+                          f"own graph; an atom had {largest} within the {self.cutoff:g} A cutoff, and {kept}",
+                          RuntimeWarning, stacklevel=2)
         return {"max_neighbors": self.max_neighbors, "largest": largest, "exceeded": largest > self.max_neighbors}
+
+    def _refuse_neighbor_cap(self, largest: int) -> None:
+        """Refuse a P>1 evaluation whose radius graph differs from the model's nearest-neighbour graph.
+
+        A ghost centre's neighbourhood is incomplete on this rank, so it cannot select that centre's nearest K.
+        CUDA callers pass the global maximum; CPU callers propagate any refusal through collective_check.
+        """
+        if (self.context.world_size > 1 and self.max_neighbors is not None and largest > self.max_neighbors
+                and getattr(self.adapter, "selects_nearest_neighbors", False)):
+            raise RuntimeError(f"model {self.adapter.name!r} keeps the nearest {self.max_neighbors} neighbours of "
+                               f"each atom; an atom had {largest} within the {self.cutoff:g} A cutoff, which a rank "
+                               "cannot select for its ghost atoms: evaluate this system on one rank")
 
     def close(self) -> None:
         """Release the captured step (its NCCL work) first, then the topology and the hooks (idempotent)."""
