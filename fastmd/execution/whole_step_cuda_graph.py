@@ -119,6 +119,10 @@ class WholeStepGraphRunner:
     the record window is the only captured window and every replay records.
     """
 
+    # The steps of a recapture's side-stream warmup windows; None: whole windows. Every warmup step runs
+    # the window's step body, so two steps run each kind of step once (an inner step and the last one).
+    recapture_warmup_steps: int | None = None
+
     @scoped_init
     def __init__(
         self,
@@ -373,7 +377,10 @@ class WholeStepGraphRunner:
             self.potential_energy.copy_(energy)
         return status
 
-    def _window_body(self, record: bool = False) -> None:
+    def _window_body(self, record: bool = False, steps: int | None = None) -> None:
+        """One window: ``steps_per_launch`` steps (``steps``: fewer, a recapture's warmup; its last step is the
+        window's last)."""
+        steps = self.steps_per_launch if steps is None else int(steps)
         if self.stateful_integrator is not None:
             self.stateful_integrator.backup()
         self.backup_positions.copy_(self.positions)
@@ -385,10 +392,10 @@ class WholeStepGraphRunner:
         self.window_max_edges.zero_()
         self.window_max_triplets.zero_()
         self.window_max_isolated.zero_()
-        for k in range(self.steps_per_launch):
+        for k in range(steps):
             if self.step_targets is not None:
                 self.step_targets.apply(k)
-            last = k == self.steps_per_launch - 1
+            last = k == steps - 1
             # A record window's last step also computes the stress. A model the engine differentiates: the
             # stateful integrator's mirrors at the window's end only, the window's statistics in one buffer.
             status = self._step_body(rebuild_candidates=False, **({"stress": True} if record and last else {}),
@@ -410,6 +417,13 @@ class WholeStepGraphRunner:
         self.potential_energy.copy_(self.backup_energy)
         if self.stateful_integrator is not None:
             self.stateful_integrator.restore()
+
+    def _warmup_steps(self) -> int | None:
+        """The steps of each side-stream warmup window: a whole window (None), or for a recapture
+        ``recapture_warmup_steps`` of them where set."""
+        if not self.recapture or self.recapture_warmup_steps is None:
+            return None
+        return min(self.steps_per_launch, int(self.recapture_warmup_steps))
 
     def _warmups(self) -> int:
         """Side-stream warmup windows: ``warmup`` for the first capture of an MD,
@@ -457,12 +471,12 @@ class WholeStepGraphRunner:
             with fusion_scope(self.enable_model_fusions):
                 with torch.cuda.stream(side):
                     for _ in range(0 if self.record_every_window else self._warmups()):
-                        self._window_body()
+                        self._window_body(steps=self._warmup_steps())
                         restore_saved()
                         self.warmup_runs += 1
                     # Before either capture, so that no warmup runs next to a captured pool.
                     for _ in range(self._warmups() if self.record_stress else 0):
-                        self._window_body(record=True)
+                        self._window_body(record=True, steps=self._warmup_steps())
                         restore_saved()
                         self.warmup_runs += 1
                 torch.cuda.current_stream().wait_stream(side)

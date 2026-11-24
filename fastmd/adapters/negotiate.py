@@ -979,7 +979,8 @@ def _shard_kernel(adapter, choice: KernelChoice, option: str, contract: CaptureC
 def _foreign_execution(adapter, config, entry, cuda, contract, full_pbc, builder, capacity, memory, budget,
                        trial, device, model_graph_pools: int = 1) -> tuple[Decision, dict]:
     """whole_step -> model_graph -> eager for a model other than MatRIS; K6 has no calibration for it,
-    so a CUDA graph needs a measured memory bound (a valid MeasuredMemoryModel fit): one capture for
+    so a CUDA graph needs a measured memory bound (a MeasuredMemoryModel that bounds the capacity: a valid fit,
+    or an invalid one at a capacity it measured): one capture for
     whole_step (its windows share one pool), ``model_graph_pools`` captures for model_graph (where it holds
     more than one pool, the trial against it runs only where they fit)."""
     import torch
@@ -1067,13 +1068,14 @@ def _memory_bound(memory, capacity, budget, device, pools: int = 1) -> tuple[boo
     from ..engine.saved_recompute import AUTO_THRESHOLD
     if memory is None:
         return False, "no memory bound: K6 uncalibrated and no measured memory model", {}
-    if not memory.valid:
-        return False, f"measured memory fit invalid ({memory.reason}): no memory bound", {}
-    if capacity is None:
-        return False, "no capacity to predict the capture at", {}
-    edges, triplets = int(capacity.get("edges", 0)), int(capacity.get("triplets", 0))
-    bound = memory.bound("capture", edges, triplets)
+    edges, triplets = (0, 0) if capacity is None else (int(capacity.get("edges", 0)), int(capacity.get("triplets", 0)))
+    # An invalid fit still bounds a capacity it measured (the probe measures the one a capture would hold).
+    bound = None if capacity is None else memory.bound("capture", edges, triplets)
     if bound is None:
+        if not memory.valid:
+            return False, f"measured memory fit invalid ({memory.reason}): no memory bound", {}
+        if capacity is None:
+            return False, "no capacity to predict the capture at", {}
         return False, f"no measured prediction at {edges} edges, {triplets} triplets (outside the measured range)", {}
     bound *= pools
     if budget is None:
@@ -1084,7 +1086,10 @@ def _memory_bound(memory, capacity, budget, device, pools: int = 1) -> tuple[boo
     what = "capture bound" if pools == 1 else f"bound of {pools} captures"
     if pools > 1:
         numbers["pools"] = pools
-    return fits, (f"measured {what} {bound / 2**30:.2f} GiB {'<=' if fits else '>'} "
+    measured_only = "" if memory.valid else " (the peak measured at this capacity: the fit is not valid)"
+    if measured_only:
+        numbers["measured_capacity_only"] = True
+    return fits, (f"measured {what} {bound / 2**30:.2f} GiB{measured_only} {'<=' if fits else '>'} "
                   f"{AUTO_THRESHOLD:.0%} of {budget / 2**30:.1f} GiB"), numbers
 
 
@@ -1245,7 +1250,7 @@ def batch_systems(record: EnginePlanRecord, adapter, *, systems: int,
 def size_unions(record: EnginePlanRecord, *, requested: int, memory, union_edges: Callable[[int], int], device,
                 replicas: int | None = None, persistent_per_replica: int = 0, budget: int | None = None,
                 union_triplets: Callable[[int], int] | None = None,
-                unit: str = "replicas") -> tuple[int, EnginePlanRecord]:
+                unit: str = "replicas", budget_share: float = 1.0) -> tuple[int, EnginePlanRecord]:
     """The replicas per union that the memory admits, and a copy of ``record`` with that decision
     ("union_size"): ``requested``, unless the unions would not fit the auto share of ``budget`` (default: the
     device's capture budget), when the largest of ``requested`` halved as often as needed that does. Several
@@ -1257,7 +1262,9 @@ def size_unions(record: EnginePlanRecord, *, requested: int, memory, union_edges
     each); a union beyond the measured range is halved like one that does not fit. ``memory`` None: not
     measured (a union too small), kept as requested, as without a valid capture fit (a failed measurement).
     Unions that do not fit at one replica raise :class:`NegotiationError`. ``unit`` names what a union holds
-    (the multi-system entry point sizes its unions in "rows": the slots' atom ceilings)."""
+    (the multi-system entry point sizes its unions in "rows": the slots' atom ceilings). ``budget_share``: the
+    share of the budget the unions may take (a relaxation's union leaves the rest to the capture of its drained
+    union)."""
     from ..engine.saved_recompute import AUTO_THRESHOLD
     requested, replicas = int(requested), int(requested if replicas is None else replicas)
     triplets = (lambda size: 0) if union_triplets is None else union_triplets
@@ -1269,18 +1276,22 @@ def size_unions(record: EnginePlanRecord, *, requested: int, memory, union_edges
     if memory is None:
         reason += ": too small to measure (not bounded)"
     else:
-        budget = capture_budget(device) if budget is None else int(budget)
+        budget = int((capture_budget(device) if budget is None else int(budget)) * float(budget_share))
         limit = AUTO_THRESHOLD * budget
 
+        capture = memory.fits.get("capture")
+        valid = capture is not None and capture.valid
+
         def need(size: int) -> int | None:
-            bound = memory.bound("capture", int(union_edges(size)), int(triplets(size)))
+            # Only a valid fit sizes unions: the measurements are of sub-unions, never the union being
+            # sized, even where capacity rounding coincides with a measured sub-union's capacity.
+            bound = memory.bound("capture", int(union_edges(size)), int(triplets(size))) if valid else None
             return None if bound is None else bound + (replicas - size) * int(persistent_per_replica)
 
         evidence.update(memory=memory.summary(), budget_gib=round(budget / 2**30, 3), threshold=AUTO_THRESHOLD)
         first = need(requested)
         evidence["need_gib"] = None if first is None else round(first / 2**30, 3)
-        capture = memory.fits.get("capture")
-        if first is None and not (capture is not None and capture.valid):
+        if first is None and not valid:
             reason += f"; memory not bounded ({memory.reason})"
         elif first is not None and first <= limit:
             reason += (f": measured need {first / 2**30:.2f} GiB <= {AUTO_THRESHOLD:.0%} of the budget "

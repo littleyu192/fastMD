@@ -21,6 +21,7 @@ system.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 import gc
 import math
@@ -85,6 +86,35 @@ UNION_PROBE_MIN_ROWS = 128
 UNION_THROUGHPUT_SLACK = 0.05
 # Replays timed per probe (their fastest counts).
 _PROBE_REPLAYS = 2
+# Eager evaluations timed per probe after a first, untimed one (their fastest counts): a model's calls at a new size
+# can be slow more than once (MACE-MPA-0's first probe after the self-check: its first two evaluations 0.7 s each,
+# then 0.03 s), and a capture again is priced by the eager times between the probes.
+_PROBE_EAGER = 2
+# The permanent generation of the garbage collector holds a few hundred of the interpreter's own objects (CPython
+# 3.12: 375) without any gc.freeze(); more means the application (or a multi-GPU evaluator) froze objects.
+_INTERPRETER_FROZEN_OBJECTS = 1000
+
+
+@contextmanager
+def _collections_of_new_objects():
+    """The garbage collections inside visit only the objects created since its start: one full collection, then
+    ``gc.freeze()`` until its end (``gc.unfreeze()``). The construction collects before each probe and each memory
+    measurement point (the previous one's buffers go back first), and a full collection visits every tracked
+    object, the loaded model's included: 0.19-0.27 s each with MACE-MPA-0, SevenNet-0, CHGNet 0.3.0 or ORB v3
+    loaded, 14-16 of them per construction of #79's 256 WBM structures (3.0-3.6 s), against 2 ms each inside (ORB v3:
+    10-90 ms, its compiled model's first calls create many objects).
+    Objects alive at its start are still freed by reference counting; only cyclic garbage among them waits for its
+    end. Where objects are frozen already (the application's or a multi-GPU evaluator's own ``gc.freeze()``), the
+    collections stay full and nothing is thawed."""
+    if gc.get_freeze_count() > _INTERPRETER_FROZEN_OBJECTS:
+        yield
+        return
+    gc.collect()
+    gc.freeze()
+    try:
+        yield
+    finally:
+        gc.unfreeze()
 
 
 def step_seconds_at(points, rows: float, column: int = 1) -> float | None:
@@ -169,6 +199,9 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
 
     _members = "systems"
     _entry = "MultiSystemMolecularDynamics"  # the public entry point, in warnings
+    # The memory a union needs over its own measured memory (a relaxation's union also captures its drained union next
+    # to it: MultiSystemRelaxation): its union sizes against this share's inverse of the capture budget.
+    _union_memory_factor = 1.0
 
     def __init__(self, model, systems: Sequence[Atoms], *, momenta=None, ensemble: str = "nvt_nhc",
                  temperature: float = 300.0, timestep: float = 1.0, taut: float = 100.0, tdamp: float | None = None,
@@ -331,8 +364,9 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                            tchain=int(tchain), tloop=int(tloop),
                            fix_com=default_fix_com(self.ensemble) if fix_com is None else bool(fix_com))
         # The checks and the probes of time and memory in the runner's fusion scope (MatRIS's fused kernels; generic:
-        # none).
-        with self._config.scope(), fusion_scope(self._config.optimization_profile != "generic"):
+        # none), their collections over the objects they create (``_collections_of_new_objects``).
+        with (self._config.scope(), fusion_scope(self._config.optimization_profile != "generic"),
+              _collections_of_new_objects()):
             if self_check:
                 floor, energy_floor = (1e-10, 1e-12) if self._float64 else (1e-5, 1e-6)
                 check = self._self_check(floor, energy_floor)
@@ -437,19 +471,31 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                 "probe_limit": getattr(self, "_probe_limit", None),
                 "probe_seconds": round(getattr(self, "_probe_seconds", 0.0), 3)}
 
-    def _probe_step_seconds(self, total: int, *, stress: bool = False,
-                            stop_when_level: bool = False) -> list[tuple[int, float, float, float, int]]:
+    def _probe_step_seconds(self, total: int, *, stress: bool = False, stop_when_level: bool = False,
+                            ends: bool = False, window: float | None = None,
+                            window_rows: int = 0) -> list[tuple[int, float, float, float, int]]:
         """The step time of slot unions of the first systems (each slot its own atoms, in slot order) at rows
         doubling from the largest system (at least ``UNION_PROBE_MIN_ROWS``) up to ``total``: one ``(rows, seconds
-        captured, seconds eager, seconds of the capture, recompute level)`` per union (one evaluation, with each
-        system's stress for ``stress``; the eager one after a first, untimed; the level MatRIS's automatic recompute
-        chose, as an index of ``saved_recompute.LADDER``, 0 for another model), none where ``total`` is less than
-        twice the first. Stops at a union that runs
-        out of CUDA memory or fails (``_probe_limit`` says why), and with ``stop_when_level`` after two doublings
-        whose rows per second gained no more than ``UNION_THROUGHPUT_SLACK`` on the best before them. MatRIS's
-        automatic recompute decides each union by itself, in a state of the probes' own
-        (``saved_recompute.detached_auto``: its rule never steps down from a larger union's level); the entry
-        points' state stays as it was."""
+        captured, seconds eager, seconds of the capture, recompute level)`` per union, ascending (one evaluation, with
+        each system's stress for ``stress``; the eager one the faster of ``_PROBE_EAGER`` after a first, untimed; the
+        level MatRIS's automatic recompute chose, as an index of ``saved_recompute.LADDER``, 0 for another model), none
+        where ``total`` is less than twice the first. Stops at a union that runs out of CUDA memory or fails
+        (``_probe_limit`` says why), and with ``stop_when_level`` after two doublings whose rows per second gained no
+        more than ``UNION_THROUGHPUT_SLACK`` on the best before them. MatRIS's automatic recompute decides each union
+        by itself, in a state of the probes' own (``saved_recompute.detached_auto``: its rule never steps down from a
+        larger union's level); the entry points' state stays as it was.
+
+        Each probe costs a capture and the first evaluations of a new size, where some models prepare their kernels
+        (MACE-MPA-0 and SevenNet-0: cuEquivariance's, 0.7-1.3 s per size), so fewer sizes are measured where fewer
+        serve. With ``ends``: the first union and the largest (the probes price the drains, and the step time is close
+        to affine in the rows between them: MACE-MPA-0, SevenNet-0 and CHGNet 0.3.0 on #79's WBM set within 3-11 % of
+        the line through the ends); where the largest fails, the doublings up to it. With ``window`` (seconds): the
+        first union and the third doubling (about four times its rows) first; where the step time extrapolated through
+        them puts a window of ``steps_per_launch`` steps of the largest union (scaled up to ``window_rows`` rows where
+        that is more, as ``step_seconds_at`` extrapolates) under ``window``, the largest union, and no other where its
+        measured window is under ``window`` too (with a step time that does not fall as the rows grow, no union the
+        window decides on reaches it: the choice the other sizes inform is made); otherwise the doublings as without
+        it, no union measured twice."""
         self._probe_limit, started = None, time.perf_counter()
         sizes = [len(numbers) for numbers in self._numbers]
         first = max(UNION_PROBE_MIN_ROWS, max(sizes))
@@ -461,26 +507,57 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
             size *= 2
         targets.append(int(total))
         counts = np.cumsum(sizes)
-        points, why = [], None
+        doublings = []  # the system counts of the unions at the targets (a union no larger than the one before: none)
+        for target in targets:
+            k = min(int(np.searchsorted(counts, target)) + 1, self.systems)
+            if not doublings or counts[k - 1] > counts[doublings[-1] - 1]:
+                doublings.append(k)
+        measured = {}  # system count -> its point, or why its union failed
         stream = torch.cuda.Stream(self.device)
         with saved_recompute.detached_auto(self._adapter.module, self._config) as forget:
-            for target in targets:
-                k = min(int(np.searchsorted(counts, target)) + 1, self.systems)
-                if points and int(counts[k - 1]) <= points[-1][0]:
-                    continue
-                forget()
-                gc.collect()
-                torch.cuda.empty_cache()
-                try:
-                    points.append(self._probe_union(k, stream, stress))
-                except (torch.OutOfMemoryError, RuntimeError) as error:  # the probes inform a choice: they stop
-                    why = (f"a union of {int(counts[k - 1])} rows failed ({type(error).__name__}: "
-                           f"{str(error).splitlines()[0][:120] if str(error) else ''})")
-                if why is not None:  # outside the except block: its traceback would pin the failed union's buffers
-                    self._probe_limit = why
+
+            def probe(k: int):
+                if k not in measured:
+                    forget()
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    why = None
+                    try:
+                        measured[k] = self._probe_union(k, stream, stress)
+                    except (torch.OutOfMemoryError, RuntimeError) as error:  # the probes inform a choice: they stop
+                        why = (f"a union of {int(counts[k - 1])} rows failed ({type(error).__name__}: "
+                               f"{str(error).splitlines()[0][:120] if str(error) else ''})")
+                    if why is not None:  # outside the except block: its traceback would pin the failed union's buffers
+                        measured[k] = why
+                return measured[k]
+
+            order = doublings
+            if ends:
+                low, high = probe(doublings[0]), probe(doublings[-1])
+                if isinstance(low, str) or not isinstance(high, str):
+                    order = sorted({doublings[0], doublings[-1]})
+            elif window is not None and len(doublings) >= 4:
+                small, pilot, largest = doublings[0], doublings[2], doublings[-1]
+                low, high = probe(small), probe(pilot)
+                if not isinstance(low, str) and not isinstance(high, str):
+                    rows = int(counts[largest - 1])
+                    scale = self.steps_per_launch * max(1.0, window_rows / rows)
+                    predicted = high[1] + (high[1] - low[1]) / (high[0] - low[0]) * (rows - high[0])
+                    if scale * predicted < window:
+                        point = probe(largest)
+                        if not isinstance(point, str) and scale * point[1] < window:
+                            order = [small, pilot, largest]
+                            self._probe_limit = (f"a window of the largest union ({max(rows, window_rows)} rows) "
+                                                 f"takes {scale * point[1]:.3f} s, under {window} s")
+            points = []
+            for k in order:
+                point = probe(k)
+                if isinstance(point, str):
+                    self._probe_limit = point
                     break
+                points.append(point)
                 rates = [rows / seconds for rows, seconds, *_ in points]
-                if stop_when_level and len(rates) >= 3 and all(
+                if order is doublings and stop_when_level and len(rates) >= 3 and all(
                         rates[last] <= (1.0 + UNION_THROUGHPUT_SLACK) * max(rates[:last]) for last in (-1, -2)):
                     self._probe_limit = f"the rows per second stayed level up to {points[-1][0]} rows"
                     break
@@ -514,13 +591,15 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
             system_energy_derivative(adapter, builder.batch, graph, stress=stress)
 
         stream.wait_stream(torch.cuda.current_stream(device))
+        eager = []
         with torch.cuda.stream(stream):
             evaluate()
-            torch.cuda.synchronize(device)
-            started = time.perf_counter()
-            evaluate()
-            torch.cuda.synchronize(device)
-            eager = time.perf_counter() - started
+            for _ in range(_PROBE_EAGER):
+                torch.cuda.synchronize(device)
+                started = time.perf_counter()
+                evaluate()
+                torch.cuda.synchronize(device)
+                eager.append(time.perf_counter() - started)
         torch.cuda.current_stream(device).wait_stream(stream)
         graph = torch.cuda.CUDAGraph()
         torch.cuda.synchronize(device)
@@ -538,7 +617,7 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
             replays.append(time.perf_counter() - started)
         del graph, builder
         level = saved_recompute.LADDER.index(saved_recompute.current_mode(adapter.module, self._config))
-        return layout.rows, min(replays), eager, capture, level
+        return layout.rows, min(replays), min(eager), capture, level
 
     def _probe_capacity_step(self):
         """The capacity tiers of a probe: the model's, MatRIS's the configuration's (no headroom: a probe holds its
@@ -668,9 +747,10 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
                 del builder
                 torch.cuda.empty_cache()
         triplet_sizes = dict(union_triplets=union_triplets) if line_graph else {}
+        # (a union that needs more than its own memory sizes against the share of the budget left to it)
         chosen, plan = size_unions(plan, requested=requested, memory=memory, union_edges=union_edges,
                                    device=self.device, replicas=total, persistent_per_replica=persistent, unit="rows",
-                                   **triplet_sizes)
+                                   budget_share=1.0 / float(self._union_memory_factor), **triplet_sizes)
         plan.decisions[-1].evidence.update(occupied_rows=occupied, largest_union_systems=stop - start,
                                            largest_slot_rows=max(self.ceilings))
         if chosen >= requested:
@@ -758,16 +838,18 @@ class MultiSystemMolecularDynamics(_UnionMolecularDynamics):
         self._capture(union, *state, forces=None)
 
     def _set_capacities(self, union: _SlotUnion, positions, *, grown: bool = False,
-                        pair_headroom: bool = False) -> None:
+                        pair_headroom: bool = False, headroom: float | None = None) -> None:
         """``union``'s pair (and, with a line graph, triplet) capacity for its demand at ``positions``: the model's
         tiers, or with the union's growth headrooms (``grown``: a union captured again; ``pair_headroom``: the pairs'
-        only)."""
+        only; ``headroom``: the pairs' headroom in place of the union's growth headroom)."""
         pairs, triplets = slot_union_demand(self._adapter, positions, layout=union.layout, cells=union.cells,
                                             atomic_numbers=union.numbers, atoms=union.atoms,
                                             candidate_skin=self.candidate_skin, device=self.device)
-        # MatRIS's union also holds its systems' pair padding from the start (ReplicaMolecularDynamics._start_union).
-        first = 0.0 if negotiated(self._adapter) and not pair_headroom else self.capacity_headroom
-        union.u_capacity = union_capacity(pairs, self._capacity_step, headroom=self.capacity_headroom if grown else first,
+        growth = self.capacity_headroom if headroom is None else float(headroom)
+        # MatRIS's union also holds its systems' pair padding from the start (ReplicaMolecularDynamics._start_union),
+        # within ``headroom`` where one is given (a relaxation in flight with a fixed cell).
+        first = 0.0 if negotiated(self._adapter) and not pair_headroom else growth
+        union.u_capacity = union_capacity(pairs, self._capacity_step, headroom=growth if grown else first,
                                           line_graph=self._line_graph)
         union.t_capacity = (union_triplet_capacity(triplets, self._capacity_step, replicas=union.replicas,
                                                    headroom=self.triplet_headroom if grown else 0.0)

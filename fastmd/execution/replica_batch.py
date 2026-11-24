@@ -678,8 +678,8 @@ class ReplicaWholeStepRunner(WholeStepGraphRunner):
                   & torch.isfinite(self.momenta.view(shape)).all(dim=1) & torch.isfinite(self.potential_energy))
         return (~finite).to(torch.float64)
 
-    def _window_body(self, record: bool = False) -> None:
-        super()._window_body(record)
+    def _window_body(self, record: bool = False, steps: int | None = None) -> None:
+        super()._window_body(record, steps)
         self._window_record[4:].copy_(self._health())
 
     @scoped_call

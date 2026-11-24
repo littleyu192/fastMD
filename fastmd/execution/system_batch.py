@@ -503,6 +503,28 @@ def slot_union_demand(adapter, positions: Tensor, *, layout: SlotLayout, cells, 
     """The union's undirected pair and triplet counts at ``positions`` (``(rows, 3)``; triplets 0 without a line
     graph): one eager build with capacities estimated from the density, again with the counts found if those
     were too small."""
+    edges, triplets, _ = _slot_union_counts(adapter, positions, layout=layout, cells=cells,
+                                            atomic_numbers=atomic_numbers, atoms=atoms,
+                                            candidate_skin=candidate_skin, device=device)
+    return -(-edges // 2), triplets
+
+
+def slot_union_system_pairs(adapter, positions: Tensor, *, layout: SlotLayout, cells, atomic_numbers: Tensor, atoms,
+                            candidate_skin: float, device) -> list[int]:
+    """The undirected pairs of each slot's system at ``positions`` (``(rows, 3)``), from the one eager build of
+    :func:`slot_union_demand` (a system's directed edges are its pairs twice)."""
+    _, _, row_edges = _slot_union_counts(adapter, positions, layout=layout, cells=cells,
+                                         atomic_numbers=atomic_numbers, atoms=atoms,
+                                         candidate_skin=candidate_skin, device=device)
+    edges = torch.zeros(layout.count, dtype=torch.int64, device=row_edges.device).index_add_(
+        0, layout.system_of_row(row_edges.device).long(), row_edges)
+    return [-(-int(count) // 2) for count in edges.tolist()]
+
+
+def _slot_union_counts(adapter, positions: Tensor, *, layout: SlotLayout, cells, atomic_numbers: Tensor, atoms,
+                       candidate_skin: float, device) -> tuple[int, int, Tensor]:
+    """The union's directed edges, triplets and ``[rows]`` directed edges of each row at ``positions``: one eager
+    build with capacities estimated from the density, again with the counts found if those were too small."""
     rows = int(sum(atoms))
     cutoff = float(adapter.topology_spec().cutoff)
     volume = float(np.abs(np.linalg.det(np.asarray(torch.as_tensor(cells, dtype=torch.float64).cpu()))).sum())
@@ -515,9 +537,10 @@ def slot_union_demand(adapter, positions: Tensor, *, layout: SlotLayout, cells, 
         builder.refresh_candidates(positions)
         builder.build(positions, rebuild_candidates=False)
         edges, triplets = int(builder.edge_offsets[-1].item()), int(builder.pair_offsets[-1].item())
+        row_edges = builder.edge_counts
         del builder
         if edges <= 2 * guess and triplets <= t_guess:
-            return -(-edges // 2), triplets
+            return edges, triplets, row_edges
         guess, t_guess = max(guess, -(-edges // 2)), max(t_guess, triplets) if t_guess else 0
 
 

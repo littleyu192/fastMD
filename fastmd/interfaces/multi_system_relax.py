@@ -46,6 +46,13 @@ from .replica_md import _COUNTERS
 # of a slot's rows are vacant while its own class has structures left (with fewer slots than classes on this grid, the
 # ratio doubles until each class has a slot, and so does the vacancy bound).
 SLOT_CLASS_RATIO = 1.25
+# A class's slots follow its expected work, the slot-steps its structures take: the sum over them of their atoms to
+# this power, the growth of a structure's FIRE steps with its atoms (#79's WBM set, ORB v3, a fixed cell: the
+# evaluations a structure takes grow as its atoms to the power 0.50). The classes' queues then empty at about the same
+# time. With slots in proportion to the atoms (power 1) the large classes' queues emptied first and their slots took
+# the small structures of the classes still queued: a union whose rows, and edge rows, were half vacant before its
+# queue emptied (ORB v3 in IEEE FP32, 64 slots: 0.85 of the edge capacity filled over the run, 0.92 at 0.5).
+SLOT_WORK_EXPONENT = 0.5
 # The default slots (``slots`` and ``union_rows`` None): the smallest union whose measured rows per second are within
 # UNION_THROUGHPUT_SLACK of the best union's (multi_system_md's comment), holding at least this many slots where there
 # are as many structures, where a window of that union takes at least IN_FLIGHT_MIN_WINDOW_SECONDS; else every
@@ -91,6 +98,23 @@ DRAIN_FRACTION = 0.5
 DRAIN_MIN_SYSTEMS = 4
 # A variable cell may shrink while it relaxes: the union's sort keys hold the queued cells compressed by this factor.
 CELL_FILTER_COMPRESSION = 0.8
+# In flight, a freed slot takes the next queued structure that keeps the union's pairs at least this fraction below
+# its pair capacity (each structure's pairs counted at its start, scaled by the union's measured pairs over those of
+# its structures at their start), else waits for one: a structure written into a slot can bring more pairs than the
+# one it replaces, and a union whose structures outgrow its capacity is captured again (ORB v3 in IEEE FP32, 64 slots
+# of #79's WBM set: a 2.1 s growth in the ninth window). Between windows without writes (after the queue emptied: none
+# without writes before) the motion of the atoms changed a union's pairs by -0.6 to +0.6 %.
+ADMISSION_MARGIN = 0.01
+# ... and with a fixed cell its first capture holds this pair headroom where it is smaller than the union's growth
+# headroom (and no ``capacity_headroom`` is given): the admission keeps the structures written into it within the
+# capacity, and the rest covers the motion of its atoms (#79's WBM set, ORB v3 in IEEE FP32, 64 slots: 0.04 filled 0.96
+# of its edge capacity over the run against 0.94 with the growth headroom 0.08, without a growth; 0 grew once). A
+# variable cell compresses (CELL_FILTER_COMPRESSION), and its pairs with it: the growth headroom.
+IN_FLIGHT_PAIR_HEADROOM = 0.04
+# A freed slot waits for a structure within the pairs at most this many turnovers, then takes the next one as without
+# the admission (a union whose relaxing structures' pairs grow, e.g. compressing cells, would otherwise keep slots
+# idle while structures queue: it grows instead).
+ADMISSION_WAIT_TURNOVERS = 2
 
 
 @dataclass
@@ -123,9 +147,10 @@ def plan_slots(sizes: Sequence[int], slots: int) -> tuple[list[int], list[int], 
     when there are no more than ``slots`` (each slot its own structure's size); otherwise size classes on a
     geometric grid of ratio ``SLOT_CLASS_RATIO`` (each structure in the smallest class that holds it, each class's
     ceiling its largest structure; the ratio doubled while there are more classes than slots), the slots shared
-    among the classes in proportion to their atoms (one each first, then each next slot to the class with the most
-    atoms per slot, never more slots than structures). ``first``: the structure first in each slot; ``queues``: the
-    rest of each class's structures in input order, one queue per class, smallest class first."""
+    among the classes in proportion to their expected work (``SLOT_WORK_EXPONENT``; one each first, then each next
+    slot to the class with the most work per slot, never more slots than structures). ``first``: the structure
+    first in each slot; ``queues``: the rest of each class's structures in input order, one queue per class,
+    smallest class first."""
     sizes = [int(n) for n in sizes]
     if len(sizes) <= slots:
         return list(sizes), list(range(len(sizes))), []
@@ -143,9 +168,9 @@ def plan_slots(sizes: Sequence[int], slots: int) -> tuple[list[int], list[int], 
             break
         ratio *= 2.0
     classes = sorted(members)
-    work = [sum(sizes[i] for i in members[c]) for c in classes]
+    work = [sum(sizes[i] ** SLOT_WORK_EXPONENT for i in members[c]) for c in classes]
     share = [1] * len(classes)
-    for _ in range(slots - len(classes)):  # each next slot to the class with the most atoms per slot
+    for _ in range(slots - len(classes)):  # each next slot to the class with the most work per slot
         open_classes = [k for k, c in enumerate(classes) if share[k] < len(members[c])]
         if not open_classes:
             break
@@ -161,6 +186,26 @@ def plan_slots(sizes: Sequence[int], slots: int) -> tuple[list[int], list[int], 
     return ceilings, first, queues
 
 
+@dataclass
+class _PairBudget:
+    """A union's pairs at one turnover (``ADMISSION_MARGIN``): ``held``, the start pairs of the structure in each
+    slot (updated in place by :meth:`take`), their ``total``, the ``scale`` of the union's measured pairs to that
+    total, and the pairs ``allowed``."""
+
+    held: list[int]
+    total: int
+    scale: float
+    allowed: float
+
+    def fits(self, slot: int, pairs: int) -> bool:
+        """Whether a structure of ``pairs`` start pairs in ``slot`` keeps the union within ``allowed``."""
+        return self.scale * (self.total - self.held[slot] + pairs) <= self.allowed
+
+    def take(self, slot: int, pairs: int) -> None:
+        self.total += pairs - self.held[slot]
+        self.held[slot] = pairs
+
+
 class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
     """The slot unions of :class:`~fastmd.interfaces.multi_system_md.MultiSystemMolecularDynamics` (negotiation,
     self-check, measured memory, unions sharing a graph pool, captures and capacity growth) with
@@ -168,6 +213,14 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
     :class:`~fastmd.execution.system_relax.SlotRelaxationRunner` as its runner. Private: the relaxation's driver."""
 
     _entry = "MultiSystemRelaxation"
+
+    @property
+    def _union_memory_factor(self) -> float:
+        """A drain captures the union of the relaxing systems (at most DRAIN_FRACTION of the rows) while the union runs:
+        a union that drains sizes against the share of the capture budget that leaves room for both (MatRIS 10M OAM, a
+        variable cell, 64 slots of #79's WBM set in 2,526 rows sized against the whole budget: its drain's capture ran
+        out of CUDA memory on a GB200, and the union ran on for about 18 s); without draining, against all of it."""
+        return 1.0 + DRAIN_FRACTION if self._drain else 1.0
 
     def __init__(self, model, systems, *, relaxation: dict, admit_cells, structures=None, planner=None, first=None,
                  drain: bool = True, in_flight: bool = False, **options) -> None:
@@ -181,6 +234,9 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
         self.slot_plan = None  # the planner's slots, where it ran
         # Called with (old union, [(new union, the old union's slots it holds), ...]) when unions are captured anew.
         self.moved = lambda old, parts: None
+        # The released slots of a union that wait for a queued structure (MultiSystemRelaxation's admission): a split
+        # carries them as the relaxing systems' slots.
+        self.waiting = lambda union: ()
         # The MD constructor's thermostat arguments are unused: the integrator is FIRE (its float64 state, as the
         # Nose-Hoover chain's, takes float64 models too).
         super().__init__(model, systems, ensemble="nvt_nhc", **options)
@@ -192,15 +248,25 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
         ``IN_FLIGHT_MIN_WINDOW_SECONDS`` (its slots planned and their first structures in them), else every
         structure in a slot (as planned); with the slots or rows given, as given. The probes also price the drains
         (``MultiSystemRelaxation._drain``): they run with the slots or rows given too, up to the union's rows, unless
-        nothing drains."""
+        nothing drains. Where the slots are not theirs to choose (given, or no more structures than
+        ``THROUGHPUT_MIN_SLOTS``: every structure has a slot) they measure only the first union and the largest (the
+        drains' prices, and the window of every structure in one union), and where a window of the largest union (or
+        of ``THROUGHPUT_MIN_SLOTS`` planned slots, where they hold more rows) is shorter than
+        ``IN_FLIGHT_MIN_WINDOW_SECONDS`` (with a step time that does not fall as the rows grow, no in-flight union's is
+        longer: every structure in a slot) the doublings between them stop (``_probe_step_seconds``)."""
         rows = DEFAULT_UNION_ROWS if union_rows is None else union_rows
         if self._planner is None and not self._drain:  # nothing to choose or price
             self._step_seconds = []
             return rows, None
         # (each step's stress: a cell filter's, or the trajectory's records' with a fixed cell)
         stress = bool(self._relaxation["cell_filter"] or self._relaxation.get("record_stress"))
-        points = self._step_seconds = self._probe_step_seconds(min(sum(self.ceilings), rows), stress=stress,
-                                                               stop_when_level=True)
+        choice = self._planner is not None and len(self._structures) > THROUGHPUT_MIN_SLOTS
+        # an in-flight union holds at most the union's rows, or THROUGHPUT_MIN_SLOTS slots at their class ceilings
+        in_flight_rows = (sum(plan_slots([len(atoms) for atoms in self._structures], THROUGHPUT_MIN_SLOTS)[0])
+                          if choice else 0)
+        points = self._step_seconds = self._probe_step_seconds(
+            min(sum(self.ceilings), rows), stress=stress, stop_when_level=True, ends=not choice,
+            window=IN_FLIGHT_MIN_WINDOW_SECONDS if choice else None, window_rows=in_flight_rows)
         if self._planner is None or len(points) < 2:
             return rows, None
         best = max(size / seconds for size, seconds, *_ in points)
@@ -245,11 +311,12 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
             integrator.write_system(slot, positions=positions[slot], cell=self._cells[index])
         integrator.sync()
         union.integrator = integrator
-        # In flight, with the pairs' growth headroom from the start: the structures written into freed slots change the
-        # union's counts, and a relaxation's first steps move the atoms (and cells) the most (ORB v3 in IEEE FP32, 64
-        # slots: its first window grew the union, 1.7 s). Its triplets keep the model's tiers (every padded triplet runs
-        # a line graph's angle networks), and with every structure in a slot the pairs too (SevenNet-0, a variable cell:
-        # its union did not grow without them).
+        # In flight, with a pair headroom from the start (IN_FLIGHT_PAIR_HEADROOM with a fixed cell, else the growth
+        # headroom): the structures written into freed slots change the union's counts (the admission keeps them within
+        # it), and a relaxation's first steps move the atoms (and cells) the most (ORB v3 in IEEE FP32, 64 slots, without
+        # a headroom: its first window grew the union, 1.7 s). Its triplets keep the model's tiers (every padded triplet
+        # runs a line graph's angle networks), and with every structure in a slot the pairs too (SevenNet-0, a variable
+        # cell: its union did not grow without them).
         self._set_demand_capacities(union, coordinates, first=True)
         self._capture(union, coordinates, integrator.momenta.to(torch.float32), forces=None)
 
@@ -312,11 +379,13 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
 
     def _split(self, union, positions, momenta, forces, why: str):
         """``union``'s growth ran out of CUDA memory (``why``): its systems still relaxing (its slots that are not
-        idle) run on in two unions with about half its rows each (four, eight... where a part runs out of memory
+        idle, and its released slots that wait for a queued structure: ``waiting``) run on in two unions with about half its rows each (four, eight... where a part runs out of memory
         again), each slot its ceiling and its system's optimizer state (``_carry``), captured at the parts' demand
         with the growth headroom, in ``union``'s place; a system that does not fit alone raises
         :class:`~fastmd.adapters.protocol.NegotiationError`. Returns the parts."""
-        slots = [slot for slot, phase in enumerate(union.integrator.phase.tolist()) if int(phase) != IDLE]
+        waiting = set(self.waiting(union))
+        slots = [slot for slot, phase in enumerate(union.integrator.phase.tolist())
+                 if int(phase) != IDLE or slot in waiting]
         position, count, length = self._unions.index(union), 2, len(self._numbers)
 
         def release(parts) -> None:  # the parts captured so far and their per-system tables
@@ -393,11 +462,17 @@ class _SlotRelaxationEngine(MultiSystemMolecularDynamics):
 
     def _set_demand_capacities(self, union, positions, *, first: bool = False) -> None:
         """``union``'s capacities with the growth headroom (``_set_capacities``; its ``first`` capture: the pairs'
-        only) at its demand at ``positions``, and the time the demand took (``demand_seconds``: one eager build of
-        the union, part of a capture again's cost)."""
+        only, in flight with a fixed cell ``IN_FLIGHT_PAIR_HEADROOM`` unless ``capacity_headroom`` was given) at its demand at
+        ``positions``, and the time the demand took (``demand_seconds``: one eager build of the union, part of a
+        capture again's cost)."""
         torch.cuda.synchronize(self.device)
         started = time.perf_counter()
-        self._set_capacities(union, positions, **({"pair_headroom": self.in_flight} if first else {"grown": True}))
+        options = {"grown": True}
+        if first:
+            options = {"pair_headroom": self.in_flight}
+            if self.in_flight and self._headroom is None and not self._relaxation["cell_filter"]:
+                options["headroom"] = min(self.capacity_headroom, IN_FLIGHT_PAIR_HEADROOM)
+        self._set_capacities(union, positions, **options)
         torch.cuda.synchronize(self.device)
         union.demand_seconds = time.perf_counter() - started
 
@@ -445,7 +520,8 @@ class MultiSystemRelaxation:
         FIRE steps per captured window: a finished structure leaves its slot at the end of its window. Default 5:
         early in a relaxation the atoms (and cells) move fast, and a window that outruns the candidates' skin is
         replayed (10-step windows did so in the first windows of variable-cell relaxations), and a capture again
-        (draining) runs the window in its warmup; a window costs the host one read.
+        (draining) captures a whole window (its warmup runs two steps: ``SlotRelaxationRunner``); a window costs the
+        host one read.
     drain:
         Capture a union again with only its relaxing structures where that pays back (``DRAIN_PAYBACK``'s comment;
         before the queue empties only leaving out the slots no queued structure fits); it reads measured times, so
@@ -454,7 +530,8 @@ class MultiSystemRelaxation:
         As in :class:`~fastmd.interfaces.multi_system_md.MultiSystemMolecularDynamics` (``union_rows`` caps the
         slots' rows per union; the self-check runs on the structures that start in a slot, with the default slots
         on all of them, before the slots are planned; a union's first capture holds the
-        growth headroom, and one whose growth runs out of CUDA memory splits, its relaxing structures' optimizer
+        growth headroom, in flight with a fixed cell at most ``IN_FLIGHT_PAIR_HEADROOM`` unless ``capacity_headroom``
+        is given, and one whose growth runs out of CUDA memory splits, its relaxing structures' optimizer
         state carried over).
     trajectory_interval, trajectory_stress:
         Record each structure's states as an ASE observer attached to its optimizer with ``interval =
@@ -533,14 +610,24 @@ class MultiSystemRelaxation:
                 union = next(union for union in self._engine._unions if union.start <= system < union.stop)
                 self._occupant[(union, system - union.start)] = index
             self._engine.moved = self._moved
+            self._engine.waiting = lambda union: self._waiting.get(union, ())
             # The queues follow the classes, smallest first; a class's ceiling (its largest structure) is its slots'.
             self._queues = [deque(queue) for queue in queues]
             self._class_ceilings = sorted(set(ceilings)) if queues else []
             self._check_elements(set(range(len(structures))) - set(first))
             self._check_neighbours(set(range(len(structures))) - set(first))
+            # In flight: each structure's pairs at its start, and per union those of the structure in each slot (a
+            # finished one stays there, frozen, until another is written over it): ``_turnover``'s admission.
+            self._pairs = self._structure_pairs() if any(self._queues) else None
+            self._slot_pairs: dict = {}
+            if self._pairs is not None:
+                for (union, slot), index in self._occupant.items():
+                    self._slot_pairs.setdefault(union, [0] * union.layout.count)[slot] = self._pairs[index]
         except BaseException:
             self.close()
             raise
+        self._waiting: dict = {}  # union -> {its released slot that waits for a structure within its pairs: turnovers}
+        self.admission_waits = 0  # slots left waiting at a turnover, summed over the turnovers
         self.results: list[RelaxationResult | None] = [None] * len(structures)
         self.windows = 0
         self.writes = 0
@@ -549,10 +636,39 @@ class MultiSystemRelaxation:
         self.drain = bool(drain)
         self.drain_failures: list[str] = []  # captures again that failed (the union kept running as it was)
         self.drains: list[dict] = []  # each capture again with fewer rows: its numbers
-        self._kept: set = set()  # unions whose capture again failed: not tried again
+        self._kept: dict = {}  # union -> the rows of its capture again that failed: tried again at most half of them
         self._window_seconds: dict = {}  # union -> the wall seconds of its last windows
         self._waste: dict = {}  # union -> the seconds its finished systems' rows cost since it took its systems
         self.turnover_seconds = 0.0
+
+    def _structure_pairs(self) -> list[int]:
+        """Each structure's undirected pairs within the model's cutoff at its start: eager builds of slot unions of
+        the structures, each in a slot of its own atoms, of at most ``DEFAULT_UNION_ROWS`` rows."""
+        from ..execution.system_batch import SlotLayout, slot_union_system_pairs
+
+        engine = self._engine
+
+        def count(indices: list[int]) -> list[int]:
+            structures = [self._structures[index] for index in indices]
+            atoms = [len(structure) for structure in structures]
+            positions = torch.as_tensor(np.concatenate([structure.get_positions() for structure in structures]),
+                                        dtype=torch.float64, device=engine.device)
+            cells = torch.as_tensor(np.stack([structure.cell.array for structure in structures]), dtype=torch.float64)
+            numbers = torch.as_tensor(np.concatenate([structure.get_atomic_numbers() for structure in structures]),
+                                      dtype=torch.int32)
+            return slot_union_system_pairs(engine._adapter, positions, layout=SlotLayout(tuple(atoms)), cells=cells,
+                                           atomic_numbers=numbers, atoms=atoms, candidate_skin=engine.candidate_skin,
+                                           device=engine.device)
+
+        pairs, chunk, rows = [], [], 0
+        with engine._config.scope():
+            for index, structure in enumerate(self._structures):
+                if chunk and rows + len(structure) > DEFAULT_UNION_ROWS:
+                    pairs += count(chunk)
+                    chunk, rows = [], 0
+                chunk.append(index)
+                rows += len(structure)
+            return pairs + count(chunk)
 
     @staticmethod
     def _fitting_slots(sizes: list[int], rows: int) -> int:
@@ -652,42 +768,95 @@ class MultiSystemRelaxation:
         phases = union.runner.phases or tuple(union.integrator.phase.tolist())
         return any(int(phase) not in FINISHED + (IDLE,) for phase in phases)
 
-    def _next(self, ceiling: int) -> int | None:
+    def _next(self, ceiling: int, budget: _PairBudget | None = None, slot: int = 0) -> int | None:
         """The next queued structure for a freed slot of ``ceiling`` rows: of the largest class whose structures it
-        holds and whose queue is not empty (its own class first)."""
+        holds and whose queue is not empty (its own class first); with ``budget``, the first one in that order
+        whose pairs keep the union within it in place of the structure in ``slot``. Taken from its queue."""
         for size, queue in zip(reversed(self._class_ceilings), reversed(self._queues)):
-            if size <= ceiling and queue:
+            if size > ceiling or not queue:
+                continue
+            if budget is None:
                 return queue.popleft()
+            for position, index in enumerate(queue):
+                if budget.fits(slot, self._pairs[index]):
+                    del queue[position]
+                    return index
         return None
 
+    def _pair_budget(self, union) -> _PairBudget | None:
+        """``union``'s admission budget (``ADMISSION_MARGIN``): None outside the in-flight phase."""
+        held = self._slot_pairs.get(union)
+        if held is None or not any(self._queues):
+            return None
+        total = sum(held)
+        measured = union.runner.last_edge_count / 2.0  # its last window's pairs (none yet after a capture)
+        return _PairBudget(held, total, measured / total if measured > 0 and total > 0 else 1.0,
+                           union.u_capacity * (1.0 - ADMISSION_MARGIN))
+
     def _turnover(self, union) -> None:
-        """The finished structures of ``union`` leave their slots (their results), the next ones come in."""
+        """The finished structures of ``union`` leave their slots (their results), the next ones come in: in flight,
+        each while the union's pairs stay within its capacity (``ADMISSION_MARGIN``). A freed slot that no queued
+        structure fits within the pairs waits, released, for the next turnovers, at most
+        ``ADMISSION_WAIT_TURNOVERS`` of them and not where no system of the union would relax (then it takes the next
+        structure as without the budget)."""
         finished = [slot for slot, phase in enumerate(union.runner.phases) if int(phase) in FINISHED]
-        if not finished:
+        waiting = self._waiting.pop(union, {})  # slot -> the turnovers it has waited
+        if not finished and not waiting:
             return
-        self._collect(union, finished)
-        engine, wrote = self._engine, False
-        for slot in finished:
-            index = self._next(union.layout.ceilings[slot])
-            if index is None:
-                union.integrator.release(slot)
-                continue
+        if finished:
+            self._collect(union, finished)
+        engine, wrote, left = self._engine, False, []
+        budget = self._pair_budget(union)
+
+        def write(slot: int, index: int) -> None:
             engine.write_structure(union, slot, self._structures[index])
             self._occupant[(union, slot)] = index
             self.writes += 1
+            if union in self._slot_pairs:
+                self._slot_pairs[union][slot] = self._pairs[index]
+
+        for slot in sorted([*finished, *waiting]):
+            patient = waiting.get(slot, 0) < ADMISSION_WAIT_TURNOVERS
+            index = self._next(union.layout.ceilings[slot], budget if patient else None, slot)
+            if index is None:
+                left.append(slot)
+                continue
+            if budget is not None:
+                budget.take(slot, self._pairs[index])
+            write(slot, index)
             wrote = True
+        freed = set(finished) | set(waiting)
+        if left and budget is not None and not wrote and not any(
+                int(phase) in (PENDING, ACTIVE) for slot, phase in enumerate(union.runner.phases) if slot not in freed):
+            for position, slot in enumerate(left):  # nothing would relax: the first slot a structure fits, as without
+                index = self._next(union.layout.ceilings[slot])  # the budget
+                if index is not None:
+                    write(left.pop(position), index)
+                    wrote = True
+                    break
+        for slot in left:
+            union.integrator.release(slot)
+            if budget is not None and self._next_fits(union.layout.ceilings[slot]):
+                self._waiting.setdefault(union, {})[slot] = waiting.get(slot, 0) + 1
+                self.admission_waits += 1
         if wrote:
             engine.commit_writes(union)
         union.runner.phases = tuple(union.integrator.phase.tolist())  # the written and released slots' phases
+
+    def _next_fits(self, ceiling: int) -> bool:
+        """Whether a queued structure fits a slot of ``ceiling`` rows."""
+        return any(size <= ceiling and queue for size, queue in zip(self._class_ceilings, self._queues))
 
     def _drain(self, u: int) -> None:
         """The union ``u`` captured again with only its relaxing systems where that pays back (``DRAIN_PAYBACK``'s
         comment; ``_SlotRelaxationEngine.compact``): with no structure left to write, each in a slot of its own atom
         count; else in their slots (which take the next structures of their classes), leaving out the slots no queued
-        structure fits any more."""
+        structure fits any more (none while a slot waits for one)."""
         union = self._engine._unions[u]
         live = [slot for slot, phase in enumerate(union.runner.phases) if int(phase) in (PENDING, ACTIVE)]
         queued = any(self._queues)
+        if queued and self._waiting.get(union):  # a slot waits for a queued structure (at most a few windows)
+            return
         rows = sum((union.layout.ceilings if queued else union.integrator.host_atoms)[slot] for slot in live)
         seconds = self._window_seconds.get(union)
         if not live or rows >= union.layout.rows or not seconds or not union.capture_seconds:
@@ -696,7 +865,7 @@ class MultiSystemRelaxation:
         saving = step - self._step_seconds(union, rows, step)
         # the time the finished systems' rows cost since the union took its systems
         self._waste[union] = waste = self._waste.get(union, 0.0) + saving * self._engine.steps_per_launch
-        if rows > DRAIN_FRACTION * union.layout.rows or union in self._kept:
+        if rows > DRAIN_FRACTION * min(union.layout.rows, self._kept.get(union, union.layout.rows)):
             return
         steps = float(np.median(union.integrator.state.steps[live].cpu().numpy()))
         cost = self._recapture_seconds(union, rows)
@@ -716,7 +885,7 @@ class MultiSystemRelaxation:
             gc.collect()
             torch.cuda.empty_cache()
             self.drain_failures.append(failure)
-            self._kept.add(union)
+            self._kept[union] = rows
             return
         self._window_seconds.pop(union, None)
         self._waste.pop(union, None)
@@ -727,9 +896,16 @@ class MultiSystemRelaxation:
     def _moved(self, old, parts) -> None:
         """The structures of ``old``'s slots into the new unions that hold them (``parts``: ``(union, the old
         slots it holds in its slot order)``)."""
+        held = self._slot_pairs.pop(old, None)
+        waiting = self._waiting.pop(old, {})
         for union, slots in parts:
             for slot, old_slot in enumerate(slots):
-                self._occupant[(union, slot)] = self._occupant.pop((old, old_slot))
+                if old_slot in waiting:  # its structure has left (its results are in); the slot still waits
+                    self._waiting.setdefault(union, {})[slot] = waiting[old_slot]
+                else:
+                    self._occupant[(union, slot)] = self._occupant.pop((old, old_slot))
+            if held is not None:
+                self._slot_pairs[union] = [held[old_slot] for old_slot in slots]
 
     def _step_seconds(self, union, rows: int, step: float) -> float:
         """The step time of a union of ``rows`` rows, estimated from ``union``'s measured ``step``: scaled by the
@@ -742,7 +918,7 @@ class MultiSystemRelaxation:
 
     def _recapture_seconds(self, union, rows: int | None = None) -> float:
         """The time a capture again of ``union`` with only ``rows`` rows takes, estimated: what it runs (its first
-        evaluation and warmup windows eagerly, and the capture of a window: the probes' eager step and capture
+        evaluation and warmup steps eagerly, and the capture of a window: the probes' eager step and capture
         times at ``rows``), the rest of ``union``'s last capture (builders, buffers, the graph's instantiation:
         its measured time less what it ran by the probes) and the demand count before it (its measured time).
         Without probes: its last capture's time, its first capture's scaled from that capture's warmup windows to
@@ -751,14 +927,17 @@ class MultiSystemRelaxation:
 
         engine, warmups = self._engine, CapturePolicy.from_config().recapture_warmup
         points, steps = engine._step_seconds, engine.steps_per_launch
-        # the last capture's warmup windows (a carried union's first capture is a capture again)
-        last = warmups if union.recaptures or union.carried else engine._config.capacity.warmup
+        # the steps of a capture again's warmup windows (the runner's recapture_warmup_steps)
+        short = min(steps, getattr(union.runner, "recapture_warmup_steps", None) or steps)
+        # the last capture's warmup steps (a carried union's first capture is a capture again)
+        again = union.recaptures or union.carried
+        last = warmups * short if again else engine._config.capacity.warmup * steps
         if not points:
-            return union.capture_seconds[-1] * (1.0 if union.recaptures else (warmups + 1) / (last + 1))
-        ran = lambda size, windows: ((1 + windows * steps) * step_seconds_at(points, size, 2)
-                                     + steps * step_seconds_at(points, size, 3))
+            return union.capture_seconds[-1] * (1.0 if again else (warmups * short + 1) / (last + 1))
+        ran = lambda size, warmup_steps: ((1 + warmup_steps) * step_seconds_at(points, size, 2)
+                                          + steps * step_seconds_at(points, size, 3))
         rest = max(union.capture_seconds[-1] - ran(union.layout.rows, last), 0.0)
-        return union.demand_seconds + rest + ran(union.layout.rows if rows is None else rows, warmups)
+        return union.demand_seconds + rest + ran(union.layout.rows if rows is None else rows, warmups * short)
 
     def _collect(self, union, slots: list[int]) -> None:
         from ase.calculators.singlepoint import SinglePointCalculator
@@ -793,8 +972,8 @@ class MultiSystemRelaxation:
     def stats(self) -> dict:
         """The unions' counters (``MultiSystemMolecularDynamics.stats``: windows launched, candidate refreshes,
         fallback windows, recaptures, capacities and their fill, capture times), the relaxation's windows, writes
-        (structures written into freed slots) and host time between windows (s), and the results so far by
-        status."""
+        (structures written into freed slots), host time between windows (s) and slots left waiting for a structure
+        within the union's pairs (``admission_waits``), and the results so far by status."""
         done = [result for result in self.results if result is not None]
         statuses = {name: sum(result.status == name for result in done) for name in ("converged", "max_steps",
                                                                                      "failed")}
@@ -802,7 +981,8 @@ class MultiSystemRelaxation:
         return {**unions, "relaxation_windows": self.windows, "structure_writes": self.writes,
                 "compactions": self.compactions, "drain_failures": list(self.drain_failures),
                 "evaluated_row_steps": self.row_steps, "drains": [dict(drain) for drain in self.drains],
-                "turnover_seconds": self.turnover_seconds, "finished": statuses, "structures": len(self.results)}
+                "turnover_seconds": self.turnover_seconds, "admission_waits": self.admission_waits,
+                "finished": statuses, "structures": len(self.results)}
 
     def plan_record(self):
         """The negotiated plan (:class:`~fastmd.adapters.negotiate.EnginePlanRecord`)."""
@@ -822,6 +1002,7 @@ class MultiSystemRelaxation:
             self._engine.close()
         finally:
             self._engine.moved = None
+            self._engine.waiting = None
             self._engine._planner = None
 
     def __enter__(self):

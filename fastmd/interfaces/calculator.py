@@ -669,7 +669,9 @@ class MLIPCalculator(Calculator):
     def _negotiated_decide(self, atoms) -> tuple[str, str]:
         """execution auto for another model at a system's first repeat call: the plan's execution decided
         again (``renegotiate_execution``) at the capacity its model graph would capture (the skin path's
-        bucket, which adds the minimum padding), with a memory model measured (at the plan's precision) on
+        bucket, which adds the minimum padding, of the demand times the adapter's declared thermal factors
+        where the configuration runs its tiers, as the runner holds it), with a memory model measured (at the
+        plan's precision) on
         the model's own evaluation of this system (edges only, or with the line graph of a model the engine
         differentiates: also at the bucket's triplet capacity; K6 has no calibration for it); the plan is
         kept for ``plan_record()``."""
@@ -679,8 +681,9 @@ class MLIPCalculator(Calculator):
         from fastmd.graph.fixed_capacity_builder import _fixed_builder_available
         from fastmd.execution._memory_probe import edges_only_memory_runs
         from fastmd.execution._memory_probe import line_graph_memory_runs
-        from fastmd.engine.capacity_policy import CapturePolicy
+        from fastmd.engine.capacity_policy import CapturePolicy, held_demand, thermal_factors
         config = replace(self._inference_config, execution="auto")
+        u_factor, t_factor = thermal_factors(self.adapter, config)
         device = self._model_device()
         plan = (self._engine_plan[1] if self._engine_plan is not None and self._engine_plan[0] is self.adapter
                 else negotiate(self.adapter, config, entry="calculator", device=device))
@@ -693,7 +696,7 @@ class MLIPCalculator(Calculator):
                 # Match cuda_graph._demand: an odd edge must fit in the bucket.
                 u = (int(batch.edge_index.shape[0]) + 1) // 2
                 capacity = {"edges": 2 * CapturePolicy.from_config(config.capacity).bucket_key(
-                    u + config.capacity.min_pad_u, 0)[0]}
+                    held_demand(u + config.capacity.min_pad_u, 0, u_factor), 0)[0]}
                 n = batch.n_real
                 memory = self._system_memory(atoms, config, capacity, lambda: edges_only_memory_runs(
                     self.adapter, cell=batch.cell, atomic_numbers=batch.species[:n],
@@ -705,8 +708,9 @@ class MLIPCalculator(Calculator):
             with self._inference_config.scope():
                 batch = line_graph_batch(self._per_call_graph(None, atoms))
                 u, t = int(batch.pair_u2d.shape[0]), int(batch.triplets.shape[0])
-                key = CapturePolicy.from_config(config.capacity).bucket_key(u + config.capacity.min_pad_u,
-                                                                             t + config.capacity.min_pad_t)
+                key = CapturePolicy.from_config(config.capacity).bucket_key(
+                    held_demand(u + config.capacity.min_pad_u, 0, u_factor),
+                    held_demand(t + config.capacity.min_pad_t, 0, t_factor))
                 capacity = {"edges": 2 * key[0], "triplets": key[1]}
                 memory = self._system_memory(atoms, config, capacity, lambda: line_graph_memory_runs(
                     self.adapter, cell=batch.cell, atomic_numbers=batch.species, pbc=torch.tensor(pbc, device=device),

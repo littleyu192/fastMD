@@ -61,13 +61,14 @@ _FIXED_BUILDER_EVIDENCE = matris_builder_evidence(
 
 
 # A builder's sizes (its rows, edge capacity, sink rows and owned rows) are runtime arguments that the kernels
-# never specialize on, nor on the alignment of the edge count (a view of the last of the rows + 1 edge offsets,
-# 16-byte aligned for an even number of rows only): a union of another size (one drained or split, a structure of
-# another size) runs the kernels compiled for the first instead of compiling its own (0.3-1 s per size: ORB v3
-# with TF32, a relaxation's drains); the kernels whose block or search depth follows the rows still compile once
-# per power of two of them.
+# never specialize on: a union of another size (one drained or split, a structure of another size) runs the
+# kernels compiled for the first instead of compiling its own (0.2-1 s per kernel and size: ORB v3 with TF32, a
+# relaxation's drains). No block or loop depth follows the rows either: the kernels that cover all the rows in one
+# program step through them a fixed block at a time, and the line graph's search takes its depth at run time.
 _SIZES = ("N", "N_DUMMY", "E_CAP", "n_owned_slots")
-_ALIGNMENT = (*_SIZES, "total_edges", "edge_total", "edge_count")
+# ... nor on the alignment of the one-element views of the edge and triplet totals they read (``edge_offsets[-1:]``:
+# 16-byte aligned or not as the rows are even or odd).
+_ALIGNMENT = (*_SIZES, "total_edges", "edge_total", "edge_count", "triplet_count")
 
 
 if _fixed_builder_available:
@@ -549,12 +550,28 @@ if _fixed_builder_available:
         N,
         BLOCK: tl.constexpr,
     ):
-        """One program over all N atoms: what a candidate-reusing build computes before its edges,
-        from float64 coordinates. The float32 wrap (fractional coordinates, wrapped positions, the
-        wrap delta) feeds the neighbour kernels; the model's float64 positions are the coordinates
-        minus the same whole lattice vectors; the largest displacement since the refresh decides
-        whether the candidates are still valid; the isolated-atom count starts at zero."""
-        rows = tl.arange(0, BLOCK)
+        """One program over all N atoms, BLOCK at a time: what a candidate-reusing build computes
+        before its edges, from float64 coordinates. The float32 wrap (fractional coordinates, wrapped
+        positions, the wrap delta) feeds the neighbour kernels; the model's float64 positions are the
+        coordinates minus the same whole lattice vectors; the largest displacement since the refresh
+        decides whether the candidates are still valid; the isolated-atom count starts at zero."""
+        largest2 = 0.0  # the largest squared displacement so far (a maximum: the same in any order)
+        for start in range(0, N, BLOCK):
+            largest2 = _float64_prologue_block(
+                positions, inv_cell, cell, cell64, reference_positions, reference_wraps, frac_coords, wrapped,
+                wrap_delta, model_positions, largest2, start, N, BLOCK)
+        largest = tl.sqrt(largest2)
+        tl.store(max_displacement, largest)
+        tl.store(candidate_valid, (largest * 2.0 <= skin_limit) & (tl.load(capacity_valid) != 0))
+        tl.store(isolated_atom_count, 0)  # the count kernel that follows adds the atoms without edges
+
+
+    @triton.jit
+    def _float64_prologue_block(positions, inv_cell, cell, cell64, reference_positions, reference_wraps, frac_coords,
+                                wrapped, wrap_delta, model_positions, largest2, start, N, BLOCK: tl.constexpr):
+        """``_float64_prologue_kernel`` on the atoms ``[start, start + BLOCK)``; returns ``largest2`` folded with
+        their largest squared displacement (NaN-propagating)."""
+        rows = start + tl.arange(0, BLOCK)
         mask = rows < N
         p0 = tl.load(positions + rows * 3, mask=mask, other=0.0)
         p1 = tl.load(positions + rows * 3 + 1, mask=mask, other=0.0)
@@ -598,10 +615,7 @@ if _fixed_builder_available:
         d1 = q1 - tl.load(reference_positions + rows * 3 + 1, mask=mask, other=0.0)
         d2 = q2 - tl.load(reference_positions + rows * 3 + 2, mask=mask, other=0.0)
         # NaN-propagating (a non-finite state must fail the skin test and reach the replay's check).
-        largest = tl.sqrt(tl.reduce(tl.where(mask, d0 * d0 + d1 * d1 + d2 * d2, 0.0), 0, _max_nan))
-        tl.store(max_displacement, largest)
-        tl.store(candidate_valid, (largest * 2.0 <= skin_limit) & (tl.load(capacity_valid) != 0))
-        tl.store(isolated_atom_count, 0)  # the count kernel that follows adds the atoms without edges
+        return _max_nan(largest2, tl.reduce(tl.where(mask, d0 * d0 + d1 * d1 + d2 * d2, 0.0), 0, _max_nan))
 
 
     @triton.jit(do_not_specialize=_SIZES, do_not_specialize_on_alignment=_ALIGNMENT)
@@ -629,11 +643,14 @@ if _fixed_builder_available:
     ):
         """Edges only, unsorted, one program per atom: the rows of ``_materialize_neighbors_kernel``
         (the same arithmetic) at the offset this program sums from the counts of
-        ``_count_neighbors_kernel`` (it writes its own ``edge_offsets`` entry: no cumsum), written to the
-        builder's buffers and to the model's (``edge_index`` [E, 2] int32, ``edge_image`` [E, 3] float32)."""
+        ``_count_neighbors_kernel``, ``BLOCK_N`` counts at a time (it writes its own ``edge_offsets``
+        entry: no cumsum), written to the builder's buffers and to the model's (``edge_index`` [E, 2]
+        int32, ``edge_image`` [E, 3] float32)."""
         atom = tl.program_id(0).to(tl.int64)
-        atoms = tl.arange(0, BLOCK_N)
-        offset = tl.sum(tl.load(edge_counts + atoms, mask=atoms < atom, other=0), axis=0)
+        offset = atom * 0  # an integer sum: the same in any order
+        for first in range(0, atom, BLOCK_N):
+            atoms = first + tl.arange(0, BLOCK_N)
+            offset += tl.sum(tl.load(edge_counts + atoms, mask=atoms < atom, other=0), axis=0)
         tl.store(edge_offsets + atom + 1, offset + tl.load(edge_counts + atom))
         tl.store(edge_offsets + atom * 0, offset * 0, mask=atom == 0)
         slots = tl.arange(0, BLOCK)
@@ -746,7 +763,7 @@ _CANDIDATE_STATE = (
 
 if _fixed_builder_available:
 
-    @triton.jit(do_not_specialize=["e_capacity", "u_capacity", "t_capacity", *_SIZES],
+    @triton.jit(do_not_specialize=["e_capacity", "u_capacity", "t_capacity", "search_steps", *_SIZES],
                 do_not_specialize_on_alignment=_ALIGNMENT)
     def _line_graph_kernel(
         pair_offsets,
@@ -763,7 +780,7 @@ if _fixed_builder_available:
         N,
         BMAX: tl.constexpr,
         N_DUMMY,
-        SEARCH_STEPS: tl.constexpr,
+        search_steps,
         BLOCK: tl.constexpr,
         LOOP_PADDING: tl.constexpr = False,
     ):
@@ -772,7 +789,9 @@ if _fixed_builder_available:
         (the arithmetic of the torch expression it replaced, row by row).
         ``LOOP_PADDING`` (far self-loops): a padded triplet is centred on the
         real atom of its padded pair, not on a sink atom; on overflow the
-        substitute is the all-loop topology."""
+        substitute is the all-loop topology. ``search_steps``: the depth of the
+        binary search over the N + 1 pair offsets (a runtime loop: no compile per
+        power of two of the rows)."""
         rows = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
         in_range = rows < t_capacity
         out = line_graph + rows * 5
@@ -788,7 +807,7 @@ if _fixed_builder_available:
             # The last atom whose pair offset is <= row (searchsorted right - 1).
             lo = tl.zeros([BLOCK], dtype=tl.int64)
             hi = lo + N
-            for _ in tl.static_range(SEARCH_STEPS):
+            for _ in range(search_steps):
                 mid = (lo + hi + 1) // 2
                 take = tl.load(pair_offsets + mid) <= rows
                 lo = tl.where(take, mid, lo)
@@ -1007,11 +1026,14 @@ def validate_staticization_invariants(
 _SINK_PADDING = PaddingRule("sink_atoms")
 # GhostSpec.edges -> the kernels' GHOST_EDGES (0: no edges-only ghost rows).
 _GHOST_EDGE_RULES = {"receiver": 1, "either": 2}
-# The most atoms whose float64 build prologue runs as one Triton program (FixedCapacityGraphBuilder).
+# The most atoms whose float64 build prologue runs as one Triton program (FixedCapacityGraphBuilder), and the
+# atoms it takes at a time (one block up to 1,024 atoms).
 _FLOAT64_PROLOGUE_ATOMS = 4096
+_FLOAT64_PROLOGUE_BLOCK = 1024
 # The most atoms whose unsorted float64 edges are written in three kernels after the prologue (each
-# program sums the counts before its atom).
+# program sums the counts before its atom, this many at a time).
 _UNSORTED_EDGES_ATOMS = 1024
+_UNSORTED_EDGES_SUM_BLOCK = 256
 
 
 def radius_graph_view(batch: GraphBatch) -> RadiusGraph:
@@ -2034,7 +2056,7 @@ class FixedCapacityGraphBuilder:
             BMAX=self.buffer_max,
             E_CAP=self.e_capacity,
             BLOCK=self._slot_block,
-            BLOCK_N=triton.next_power_of_2(self.n_real),
+            BLOCK_N=_UNSORTED_EDGES_SUM_BLOCK,
             EDGE_CUTOFF2=self.atom_graph_cutoff * self.atom_graph_cutoff,
             num_warps=8,
         )
@@ -2244,7 +2266,7 @@ class FixedCapacityGraphBuilder:
             N=self.n_real,
             BMAX=self.buffer_max,
             N_DUMMY=self.n_dummy,
-            SEARCH_STEPS=self.n_real.bit_length() + 1,
+            search_steps=self.n_real.bit_length() + 1,
             BLOCK=block,
             **({} if self._pad_loop is None else {"LOOP_PADDING": True}),
             num_warps=4,
@@ -2433,7 +2455,7 @@ class FixedCapacityGraphBuilder:
                 self._isolated_atom_count,
                 self.skin + 1.0e-6,
                 N=self.n_real,
-                BLOCK=max(triton.next_power_of_2(self.n_real), 16),
+                BLOCK=_FLOAT64_PROLOGUE_BLOCK,
                 num_warps=4,
             )
             if self._unsorted_edges:

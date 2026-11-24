@@ -648,6 +648,10 @@ class SlotRelaxationRunner(SlotWholeStepRunner):
     copy: :attr:`phases` after :meth:`settle`); a system whose state turns non-finite is a failed phase, not an
     error. The mirrors are the integrator's state (positions, velocities, the stored forces and energies)."""
 
+    # A relaxation captures its unions again as they drain: each capture again warms up on two steps rather than
+    # a whole window (ORB v3 in IEEE FP32, #79's WBM set: the warmup window was two thirds of a drain's 0.45 s).
+    recapture_warmup_steps = 2
+
     def __init__(self, **kwargs) -> None:
         self._stress = None
         self.phases: tuple = ()

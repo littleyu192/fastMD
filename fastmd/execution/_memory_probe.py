@@ -3,25 +3,27 @@
 K6 (``fastmd.engine.memory_admission``) has no calibration for such a model, so execution auto
 measures it instead: the model's own evaluation on a fixed-capacity build of the system (the runtime's
 candidate list: cutoff + skin; edges only, or with the line graph of a model with triplets), once eager
-and once captured in a CUDA graph, at a few capacities below the one its capture would hold. Each run
+and once captured in a CUDA graph, at a few capacities up to the one its capture would hold. Each run
 makes its own builder, and a captured graph is released before the run returns, so that every point
 starts from the same state.
 """
 from __future__ import annotations
 
+import gc
+
 import torch
 
 from fastmd.engine._graph_capture import capture_graph
 
-# The measured capacities, as fractions of the capacity the capture would hold: the prediction there stays
-# within twice the largest measured one, and the probe itself never allocates the full capture.
-PROBE_FRACTIONS = (0.25, 0.5, 0.75)
+# Measure the target itself: a fit below a crossover between per-atom and per-edge dominated peaks
+# can underestimate it. The 87.5% point keeps three capacities to fit above a crossover up to 75%.
+PROBE_FRACTIONS = (0.25, 0.5, 0.75, 0.875, 1.0)
 
 
 # With triplets: (edge, triplet) fractions of the targets. Their triplet/edge ratios are half, one and two
 # times the targets' (the fit tells the per-edge and per-triplet costs apart, and the target's ratio lies
-# within the measured ones), and the largest stays at 0.75 of either target, as for edges only.
-PROBE_PAIR_FRACTIONS = ((0.25, 0.5), (0.5, 0.25), (0.5, 0.5), (0.75, 0.75))
+# within the measured ones), and the targets themselves are measured, as for edges only.
+PROBE_PAIR_FRACTIONS = ((0.25, 0.5), (0.5, 0.25), (0.5, 0.5), (0.75, 0.75), (1.0, 1.0))
 
 
 def probe_capacities(target_edges: int) -> list[int]:
@@ -127,8 +129,9 @@ def measured_memory(model_class, runs, target_edges: int, device, target_triplet
                     *, cache_owner=None, cache_key=None):
     """``model_class.measure`` (``MeasuredMemoryModel``) of ``runs`` at ``probe_capacities(target_edges)``
     (with ``target_triplets``: at ``probe_capacity_pairs``, fitting a per-triplet cost), or
-    ``model_class.failed`` with the reason where the measurement ran out of CUDA memory or a capture
-    failed (execution auto then stays eager, with that reason); other errors propagate."""
+    ``model_class.failed`` with the reason where the measurement ran out of CUDA memory (also outside
+    the caching allocator: a CUDA call, a kernel load) or a capture failed (execution auto then stays eager,
+    with that reason); other errors propagate."""
     from fastmd.execution._memory_probe_cache import cached_memory, remember_memory
     if cache_owner is not None:
         existing = cached_memory(cache_owner, cache_key, target_edges, target_triplets)
@@ -145,8 +148,12 @@ def measured_memory(model_class, runs, target_edges: int, device, target_triplet
     except torch.OutOfMemoryError as error:
         why = f"ran out of CUDA memory ({str(error).splitlines()[0][:160]})"
     except RuntimeError as error:
-        if "capture" not in str(error).lower():
+        message = str(error).lower()
+        if "capture" not in message and "out of memory" not in message:
             raise
-        why = f"failed in a capture ({str(error).splitlines()[0][:160]})"
+        why = (f"{'ran out of CUDA memory' if 'out of memory' in message else 'failed in a capture'} "
+               f"({str(error).splitlines()[0][:160]})")
     # Outside the except blocks: a traceback would pin the failed run's graph and buffers.
+    gc.collect()
+    torch.cuda.empty_cache()  # the probe's blocks go back before the eager fallback
     return model_class.failed(f"the memory measurement {why}", triplets=triplets)
