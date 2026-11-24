@@ -6,8 +6,10 @@ builder, the whole-step CUDA graph captured after one warmup window) costs MatRI
 under deterministic algorithms), more than relaxing a small structure takes. :class:`RelaxationCache` keeps the
 relaxations it built, at most ``limit`` (the least recently used one is released first), and relaxes a later
 structure in a kept one (:meth:`~fastmd.interfaces.multi_system_relax.MultiSystemRelaxation.restart`: written into
-the captured slot, the run's state as a new relaxation's) wherever a new relaxation of it would build the same, so
-that the results and trajectory records are bit for bit those of a new one:
+the captured slot, the run's state as a new relaxation's) wherever a new relaxation of it would build the same.
+The optimizer state resets as for a fresh run. Bitwise output agreement requires deterministic model and kernel
+behavior and must be validated for the actual configuration; enabling deterministic algorithms alone does not
+guarantee it. Reuse is selected by:
 
 * the key (:func:`relaxation_key`): the model (the adapter object, and each parameter's and buffer's storage and
   version: weights changed in place make another key), the calculator's task, the atom count, every construction

@@ -150,7 +150,7 @@ LAYERS = (("leaf", ("fastmd", "fastmd.config", "fastmd.precision", "fastmd._nvtx
           ("contract", ("fastmd.adapters.negotiate",)),
           ("execution", ("fastmd.execution",)),
           ("distributed", ("fastmd.distributed",)),
-          ("interfaces", ("fastmd.interfaces", "fastmd.explain", "fastmd.applications", "fastmd.accuracy",
+          ("interfaces", ("fastmd.interfaces", "fastmd.explain", "fastmd.check", "fastmd.applications", "fastmd.accuracy",
                           "fastmd.relaxation", "fastmd.relax_cli")))
 INIT_ONLY = frozenset({"fastmd", "fastmd.adapters", "fastmd.models", "fastmd.ops"})
 RANK = {layer: rank for rank, (layer, _) in enumerate(LAYERS)}

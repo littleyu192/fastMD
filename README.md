@@ -52,12 +52,28 @@ Launch one process per GPU with `torchrun`; no separate distributed extra is nee
   that their GPU kernels compile and run.
 - NequIP uses `.[nequip]`, which pins NequIP 0.14.0 and PyTorch ≥ 2.8, < 2.10. Supply a local
   `.nequip.zip` package or current `.ckpt`; the adapter does not download weights.
-- Legacy eSEN needs its own environment and local weights; follow the [eSEN guide](docs/esen.md).
-  There is no `esen` extra. Experimental M3GNet uses `.[m3gnet]`.
+- Legacy eSEN requires `fairchem-core==1.10.0` in its own environment and an explicit local checkpoint.
+  There is no `esen` extra. Experimental M3GNet uses `.[m3gnet]` and a separate API.
 - [pyproject.toml](pyproject.toml) defines installation dependencies. The `requirements-*.txt` files record
   upstream test environments, including platform-specific hashes; they are not complete dependency lockfiles.
 
 </details>
+
+### Check the current environment
+
+```bash
+python -m fastmd.check --json
+python -m fastmd.check --family mace --import
+```
+
+The report covers all nine loader families, core dependencies, graph-builder capability flags,
+and installed kernel libraries. `--family` checks package presence; `--import` also tests actual
+imports. Package versions, import success, source-pin checks and kernel execution are distinct:
+this command loads no model, downloads no weights, and executes no kernel. Version differences
+are reported without claiming that model loading or a multi-GPU run will succeed.
+
+For an input generator and an example with explicit local weights, see
+[the runnable quick start](examples/quickstart.md).
 
 ## Quick start
 
@@ -282,6 +298,9 @@ and the calculator. `config_summary()["relaxation"]` reports retained engine cou
 pool bytes, and the last call's reuse decision. Retained graph pools are capped at one eighth
 of device memory; this pool budget does not include model or GOQN Hessian storage. Allocators
 that cannot measure graph pools disable retention. Multi-structure batches are built per call.
+Reusing an engine resets the optimizer state as for a fresh run. Bitwise output agreement
+requires deterministic model and kernel behavior and must be validated for the actual configuration;
+enabling deterministic algorithms alone does not guarantee it.
 
 | Engine | Behavior |
 | --- | --- |

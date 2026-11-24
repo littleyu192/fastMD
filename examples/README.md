@@ -7,6 +7,13 @@ Follow the [installation instructions](../README.md#installation) and run comman
 Model weights are supplied separately. The main README includes a [MACE relaxation example](../README.md#structure-relaxation)
 and [molecular dynamics usage](../README.md#molecular-dynamics) for [simulate.py](simulate.py).
 
+## Local quick start
+
+[quickstart.md](quickstart.md) shows installation inspection, deterministic input generation and
+a calculator run with explicit local weights. [quickstart.py](quickstart.py) runs these examples
+without depending on the optional documentation directory. Model and kernel validation remain
+separate from package discovery.
+
 ## MatRIS relaxation
 
 Replace the path with your local MatRIS checkpoint:
